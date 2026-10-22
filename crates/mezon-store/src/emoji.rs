@@ -1,7 +1,7 @@
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
-use std::sync::Arc;
-use std::sync::atomic::{AtomicU16, Ordering};
+use std::sync::atomic::{AtomicU16, AtomicU64, Ordering};
+use std::sync::{Arc, LazyLock, RwLock};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use gpui::{App, AppContext, Context, Entity, EventEmitter, Global, Task};
@@ -21,6 +21,20 @@ const LAG_REFRESH_MIN_INTERVAL: Duration = Duration::from_secs(30);
 const EMOJI_ACTION_CREATED: i32 = 1;
 const EMOJI_ACTION_UPDATE: i32 = 2;
 const EMOJI_ACTION_DELETE: i32 = 3;
+const GLOBAL_EMOJI_CLAN_ID: &str = "0";
+const GLOBAL_EMOJI_CATEGORIES: &[&str] = &[
+    "Recent",
+    "Frequently",
+    "People",
+    "Nature",
+    "Food",
+    "Activities",
+    "Travel",
+    "Objects",
+    "Symbols",
+    "Flags",
+    "forsale",
+];
 
 pub const MAX_EMOJI_BYTES: u64 = 256 * 1024;
 pub const MAX_STICKER_BYTES: u64 = 512 * 1024;
@@ -113,6 +127,49 @@ pub struct Emoji {
     pub is_for_sale: bool,
 }
 
+static EMOJI_SOURCES: LazyLock<RwLock<HashMap<String, Arc<str>>>> = LazyLock::new(Default::default);
+static EMOJI_SOURCES_GENERATION: AtomicU64 = AtomicU64::new(0);
+
+pub fn emoji_source(emoji_id: &str) -> Option<Arc<str>> {
+    EMOJI_SOURCES.read().ok()?.get(emoji_id).cloned()
+}
+
+pub fn emoji_sources_generation() -> u64 {
+    EMOJI_SOURCES_GENERATION.load(Ordering::Acquire)
+}
+
+pub(crate) fn publish_emoji_sources<'a>(
+    emojis: impl IntoIterator<Item = &'a Emoji>,
+) -> HashSet<String> {
+    let Ok(mut known) = EMOJI_SOURCES.write() else {
+        return HashSet::new();
+    };
+    let changed = merge_emoji_sources(&mut known, emojis);
+    if !changed.is_empty() {
+        EMOJI_SOURCES_GENERATION.fetch_add(1, Ordering::AcqRel);
+    }
+    changed
+}
+
+fn merge_emoji_sources<'a>(
+    known: &mut HashMap<String, Arc<str>>,
+    emojis: impl IntoIterator<Item = &'a Emoji>,
+) -> HashSet<String> {
+    let mut changed = HashSet::new();
+    for emoji in emojis {
+        if emoji.src.is_empty()
+            || known
+                .get(&emoji.id)
+                .is_some_and(|src| src.as_ref() == emoji.src)
+        {
+            continue;
+        }
+        known.insert(emoji.id.clone(), emoji.src.as_str().into());
+        changed.insert(emoji.id.clone());
+    }
+    changed
+}
+
 #[derive(Debug, Clone)]
 pub enum EmojiEvent {
     Changed,
@@ -163,6 +220,18 @@ impl EmojiStore {
         self.loading_recent = false;
         self.reset_generation = self.reset_generation.wrapping_add(1);
         cx.notify();
+    }
+
+    fn sync_emoji_sources(&self, cx: &mut Context<Self>) {
+        let changed = publish_emoji_sources(self.by_id.values());
+        if changed.is_empty() {
+            return;
+        }
+        if let Some(messages) = crate::MessagesStore::try_global(cx) {
+            messages.update(cx, |messages, cx| {
+                messages.refresh_emoji_sources(&changed, cx)
+            });
+        }
     }
 
     fn new(api: Arc<AppApi>, cx: &mut Context<Self>) -> Self {
@@ -292,6 +361,7 @@ impl EmojiStore {
         self.by_id = by_id;
         self.order = order;
         tracing::info!("EmojiStore: fetched {} emojis", self.order.len());
+        self.sync_emoji_sources(cx);
         cx.emit(EmojiEvent::Changed);
         cx.notify();
     }
@@ -564,6 +634,7 @@ impl EmojiStore {
             _ => false,
         };
         if changed {
+            self.sync_emoji_sources(cx);
             cx.emit(EmojiEvent::Changed);
             cx.notify();
         }
@@ -616,7 +687,12 @@ fn by_category_in<'a>(
     order: &'a [String],
     active_clan_id: Option<&str>,
 ) -> Vec<(String, Vec<&'a Emoji>)> {
-    let mut ordered: Vec<&Emoji> = ordered_emojis(by_id, order).collect();
+    let mut ordered: Vec<&Emoji> = ordered_emojis(by_id, order)
+        .filter(|emoji| {
+            emoji.clan_id != GLOBAL_EMOJI_CLAN_ID
+                || GLOBAL_EMOJI_CATEGORIES.contains(&emoji.category.as_str())
+        })
+        .collect();
     if let Some(active) = active_clan_id {
         ordered.sort_by_key(|emoji| u8::from(emoji.clan_id != active));
     }
@@ -984,6 +1060,46 @@ pub async fn upload_emoticon_file(
 mod tests {
     use super::*;
 
+    fn emoji_with_src(id: &str, src: &str) -> Emoji {
+        Emoji {
+            src: src.into(),
+            ..emoji(id, id, "Custom", "1")
+        }
+    }
+
+    #[test]
+    fn merge_emoji_sources_reports_new_and_moved_sources_and_keeps_known_ones() {
+        let mut known: HashMap<String, Arc<str>> = HashMap::new();
+        let first = [
+            emoji_with_src("1", "https://cdn.komu.vn/emojis/1.webp"),
+            emoji_with_src("2", "https://cdn.komu.vn/emojis/2.webp"),
+            emoji_with_src("3", ""),
+        ];
+        let changed = merge_emoji_sources(&mut known, &first);
+        let expected: HashSet<String> = ["1", "2"].iter().map(|id| id.to_string()).collect();
+        assert_eq!(changed, expected);
+
+        let second = [
+            emoji_with_src("1", "https://cdn.komu.vn/emojis/1.webp"),
+            emoji_with_src("2", "https://cdn.mezon.ai/emojis/2.webp"),
+            emoji_with_src("4", "https://cdn.mezon.ai/emojis/4.webp"),
+        ];
+        let changed = merge_emoji_sources(&mut known, &second);
+        let expected: HashSet<String> = ["2", "4"].iter().map(|id| id.to_string()).collect();
+        assert_eq!(changed, expected);
+
+        assert!(merge_emoji_sources(&mut known, &[emoji_with_src("2", "")]).is_empty());
+        assert!(merge_emoji_sources(&mut known, &second).is_empty());
+        assert_eq!(
+            known.get("2").map(|src| src.as_ref()),
+            Some("https://cdn.mezon.ai/emojis/2.webp")
+        );
+        assert_eq!(
+            known.get("1").map(|src| src.as_ref()),
+            Some("https://cdn.komu.vn/emojis/1.webp")
+        );
+    }
+
     fn init_emoji_store(cx: &mut gpui::TestAppContext) -> (Arc<AppApi>, Entity<EmojiStore>) {
         cx.update(|cx| {
             let api = Arc::new(mezon_client::AppApi::new(
@@ -1297,6 +1413,36 @@ mod tests {
         assert_eq!(ids(groups[0].1.clone()), vec!["2"]);
         assert_eq!(groups[1].0, "ClanB");
         assert_eq!(ids(groups[1].1.clone()), vec!["1", "3"]);
+    }
+
+    #[test]
+    fn by_category_hides_non_picker_global_categories_in_dm_and_clan_views() {
+        let (by_id, order) = store_with(vec![
+            emoji("1", "dm_only", "DM", GLOBAL_EMOJI_CLAN_ID),
+            emoji("2", "smile", "People", GLOBAL_EMOJI_CLAN_ID),
+            emoji("3", "wave", "ClanA", "A"),
+            emoji("4", "invalid", "", GLOBAL_EMOJI_CLAN_ID),
+        ]);
+
+        let dm_groups = by_category_in(&by_id, &order, None);
+        assert_eq!(
+            dm_groups
+                .iter()
+                .map(|(category, _)| category.as_str())
+                .collect::<Vec<_>>(),
+            vec!["People", "ClanA"]
+        );
+        assert_eq!(ids(dm_groups[0].1.clone()), vec!["2"]);
+        assert_eq!(ids(dm_groups[1].1.clone()), vec!["3"]);
+
+        let clan_groups = by_category_in(&by_id, &order, Some("A"));
+        assert_eq!(
+            clan_groups
+                .iter()
+                .map(|(category, _)| category.as_str())
+                .collect::<Vec<_>>(),
+            vec!["ClanA", "People"]
+        );
     }
 
     #[test]

@@ -170,6 +170,11 @@ impl Capturer {
     pub fn target(&self) -> Option<&Target> {
         self.engine.target()
     }
+
+    #[cfg(any(target_os = "linux", target_os = "freebsd"))]
+    pub fn monitor_area(&self) -> Option<Area> {
+        self.engine.monitor_area()
+    }
 }
 
 #[cfg(target_os = "macos")]

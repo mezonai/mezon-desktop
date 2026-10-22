@@ -1,5 +1,6 @@
 use std::rc::Rc;
 
+use gpui::Action;
 use gpui::{
     AnyElement, App, Context, Entity, ListState, Pixels, Point, SharedString, Subscription,
     WeakEntity, Window, div, img, list, prelude::*, px, size,
@@ -8,11 +9,13 @@ use mezon_store::{
     AccountStore, ClanId, ClanList, DirectMessageStore, FriendStore, NotificationSettingStore,
     PlatformStore, Settings,
 };
-use ui::Tooltip;
+use ui::{Tooltip as UiTooltip, text_for_action};
 
+use crate::GoBack;
+use crate::GoForward;
 use crate::app::shell::Shell;
 use crate::app::window_controls;
-use crate::components::primitives::{ContextMenu, Icon, IconName, context_menu_at};
+use crate::components::primitives::{ContextMenu, Icon, IconName, Tooltip, context_menu_at};
 use crate::router::{Route, Router};
 use crate::theme::{ActiveTheme, Theme};
 
@@ -58,6 +61,8 @@ pub struct ClanSidebar {
     can_go_back: bool,
     can_go_forward: bool,
     home_logo: SharedString,
+    nav_back_title: SharedString,
+    nav_forward_title: SharedString,
     discover_title: SharedString,
     create_clan_title: SharedString,
     image_cache: Entity<crate::image_cache::LruImageCache>,
@@ -173,6 +178,8 @@ impl ClanSidebar {
             can_go_back: initial_can_go_back,
             can_go_forward: initial_can_go_forward,
             home_logo: SharedString::default(),
+            nav_back_title: SharedString::default(),
+            nav_forward_title: SharedString::default(),
             discover_title: SharedString::default(),
             create_clan_title: SharedString::default(),
             image_cache: cx.new(|cx| {
@@ -256,6 +263,10 @@ impl ClanSidebar {
 
     fn sync_chrome(&mut self, cx: &App) {
         let locale = self.settings.read(cx).language.clone();
+        self.nav_back_title = mezon_i18n::t(&locale, "nav.historyBack").to_string().into();
+        self.nav_forward_title = mezon_i18n::t(&locale, "nav.historyForward")
+            .to_string()
+            .into();
         self.discover_title = mezon_i18n::t(&locale, "common.discover").to_string().into();
         self.create_clan_title = mezon_i18n::t(&locale, "common.createClan")
             .to_string()
@@ -408,6 +419,8 @@ impl Render for ClanSidebar {
         let clan_list_handle = self.clan_list.clone();
         let list_state = self.list_state.clone();
         let suppress_hover = self.list_state.is_scroll_hover_suppressed();
+        let nav_back_title = self.nav_back_title.clone();
+        let nav_forward_title = self.nav_forward_title.clone();
         let discover_title = self.discover_title.clone();
         let create_clan_title = self.create_clan_title.clone();
         let clan_list_for_modal = self.clan_list.clone();
@@ -466,6 +479,8 @@ impl Render for ClanSidebar {
                         theme,
                         self.can_go_back,
                         self.can_go_forward,
+                        nav_back_title,
+                        nav_forward_title,
                     ))
                     .child(
                         div()
@@ -524,7 +539,13 @@ impl Render for ClanSidebar {
     }
 }
 
-fn render_window_nav(theme: &Theme, can_go_back: bool, can_go_forward: bool) -> AnyElement {
+fn render_window_nav(
+    theme: &Theme,
+    can_go_back: bool,
+    can_go_forward: bool,
+    back_title: SharedString,
+    forward_title: SharedString,
+) -> AnyElement {
     div()
         .flex()
         .flex_row()
@@ -532,12 +553,30 @@ fn render_window_nav(theme: &Theme, can_go_back: bool, can_go_forward: bool) -> 
         .justify_center()
         .w_full()
         .pb(px(4.))
-        .child(nav_arrow("clan-nav-back", can_go_back, true, theme))
-        .child(nav_arrow("clan-nav-forward", can_go_forward, false, theme))
+        .child(nav_arrow(
+            "clan-nav-back",
+            can_go_back,
+            true,
+            theme,
+            back_title,
+        ))
+        .child(nav_arrow(
+            "clan-nav-forward",
+            can_go_forward,
+            false,
+            theme,
+            forward_title,
+        ))
         .into_any_element()
 }
 
-fn nav_arrow(id: &'static str, enabled: bool, is_back: bool, theme: &Theme) -> AnyElement {
+fn nav_arrow(
+    id: &'static str,
+    enabled: bool,
+    is_back: bool,
+    theme: &Theme,
+    title: SharedString,
+) -> AnyElement {
     let icon_color = if enabled {
         theme.text_secondary
     } else {
@@ -565,9 +604,19 @@ fn nav_arrow(id: &'static str, enabled: bool, is_back: bool, theme: &Theme) -> A
         .child(icon);
 
     if enabled {
+        let title = title.clone();
+        let tooltip = move |window: &mut Window, cx: &mut App| {
+            let text = if is_back {
+                history_nav_tooltip_label(&title, &GoBack, window, cx)
+            } else {
+                history_nav_tooltip_label(&title, &GoForward, window, cx)
+            };
+            Tooltip::text(text)(window, cx)
+        };
         button = button
             .cursor_pointer()
             .hover(move |s| s.bg(bg_hover))
+            .tooltip(tooltip)
             .on_click(move |_, _, cx| {
                 if is_back {
                     crate::router::go_back(cx);
@@ -578,6 +627,21 @@ fn nav_arrow(id: &'static str, enabled: bool, is_back: bool, theme: &Theme) -> A
     }
 
     button.into_any_element()
+}
+
+fn history_nav_tooltip_label(
+    title: &str,
+    action: &dyn Action,
+    window: &Window,
+    cx: &App,
+) -> SharedString {
+    text_for_action(action, window, cx)
+        .map(|shortcut| {
+            let shortcut = shortcut.replace('-', "+");
+            format!("{title} ({shortcut})")
+        })
+        .unwrap_or_else(|| title.to_string())
+        .into()
 }
 
 fn render_clan_footer(
@@ -611,7 +675,7 @@ fn render_clan_footer(
                             s.bg(theme.tokens.bg_button_add_friend)
                                 .text_color(gpui::white())
                         })
-                        .tooltip(Tooltip::text(discover_title))
+                        .tooltip(UiTooltip::text(discover_title))
                 })
                 .on_click(|_, _, cx| {
                     if let Some(store) = PlatformStore::try_global(cx) {
@@ -642,7 +706,7 @@ fn render_clan_footer(
                             s.bg(theme.tokens.bg_button_add_friend)
                                 .text_color(gpui::white())
                         })
-                        .tooltip(Tooltip::text(create_clan_title))
+                        .tooltip(UiTooltip::text(create_clan_title))
                 })
                 .on_click(move |_, window, cx| {
                     use crate::clan::create_clan_modal::CreateClanModal;

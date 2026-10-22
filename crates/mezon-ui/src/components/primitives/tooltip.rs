@@ -14,11 +14,17 @@ impl Tooltip {
     pub fn build(text: impl Into<SharedString>, cx: &mut App) -> AnyView {
         cx.new(|_| Tooltip::new(text)).into()
     }
+
+    pub fn text(title: impl Into<SharedString>) -> impl Fn(&mut Window, &mut App) -> AnyView {
+        let title = title.into();
+        move |_, cx| Self::build(title.clone(), cx)
+    }
 }
 
 impl Render for Tooltip {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         div()
+            .font_family(crate::theme::ui_font_family(cx))
             .px(px(8.))
             .py(px(4.))
             .rounded_md()

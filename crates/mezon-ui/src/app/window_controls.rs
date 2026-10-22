@@ -103,7 +103,7 @@ pub fn window_title_options() -> TitlebarOptions {
         use gpui::{point, px};
 
         TitlebarOptions {
-            title: None,
+            title: Some(APP_NAME.into()),
             appears_transparent: true,
             traffic_light_position: Some(point(
                 px(MACOS_TRAFFIC_LIGHT_X),

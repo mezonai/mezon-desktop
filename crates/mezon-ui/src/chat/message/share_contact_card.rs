@@ -1,6 +1,6 @@
 use gpui::{
-    AnyElement, App, ClickEvent, ElementId, FontWeight, SharedString, Window, div, prelude::*, px,
-    rgba,
+    AnyElement, App, ClickEvent, ElementId, FontWeight, SharedString, Window, div, img, prelude::*,
+    px, rgba,
 };
 use mezon_store::{DirectMessageStore, Embed, FriendState, FriendStore, PresenceStore, UserId};
 
@@ -8,7 +8,7 @@ use super::content::{SelectableSectionCursor, SelectableTextContext};
 use super::context::RowCtx;
 use crate::app::shell::Shell;
 use crate::chat::call_actions::{CallTarget, call_user};
-use crate::components::primitives::{Avatar, Icon, IconName};
+use crate::components::primitives::{Avatar, IconName};
 use crate::router::{Route, navigate};
 
 const CARD_WIDTH: f32 = 280.0;
@@ -226,7 +226,7 @@ fn contact_action_button(
             .border_color(theme.tokens.border_primary);
     }
     button
-        .child(Icon::new(icon).size_4())
+        .child(img(icon.path()).size_4().flex_none())
         .child(label.into())
         .into_any_element()
 }

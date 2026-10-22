@@ -20,7 +20,8 @@ use std::time::{Duration, Instant};
 use tokio::sync::{oneshot, watch};
 
 const DEFAULT_SEND_TIMEOUT_MS: u64 = 10000;
-const CHANNEL_DESC_FETCH_LIMIT: i32 = 1000;
+pub const CHANNEL_DESC_FETCH_LIMIT: i32 = 1000;
+pub const SEARCH_CTRL_K_MAX_TEXT_BYTES: usize = 255;
 const DEFAULT_CONNECT_GATE_MS: u64 = 5000;
 const DEFAULT_PING_TIMEOUT_MS: u64 = 5000;
 const MULTIPART_OP_TIMEOUT_MS: u64 = 120000;
@@ -45,6 +46,7 @@ pub struct ApiStatusError {
 impl ApiStatusError {
     pub const INVALID_ARGUMENT: u32 = 3;
     pub const NOT_FOUND: u32 = 5;
+    pub const ALREADY_EXISTS: u32 = 6;
     pub const PERMISSION_DENIED: u32 = 7;
     pub const RESOURCE_EXHAUSTED: u32 = 8;
     pub const OUT_OF_RANGE: u32 = 11;
@@ -57,6 +59,10 @@ impl ApiStatusError {
 
     pub fn is_invalid_argument(self) -> bool {
         self.code == Self::INVALID_ARGUMENT
+    }
+
+    pub fn is_already_exists(self) -> bool {
+        self.code == Self::ALREADY_EXISTS
     }
 
     pub fn is_permission_denied(self) -> bool {
@@ -96,8 +102,6 @@ pub fn is_channel_limit_api_error(err: &anyhow::Error) -> bool {
     api_status_from_error(err).is_some_and(|status| status.is_create_channel_limit_exceeded())
 }
 
-const API_CODE_ALREADY_EXISTS: u32 = 6;
-
 fn api_status_error(code: u32) -> anyhow::Error {
     ApiStatusError { code }.into()
 }
@@ -120,6 +124,24 @@ impl std::fmt::Display for EnvelopeStatus {
 }
 
 const ENVELOPE_NOT_FOUND: i32 = 404;
+
+#[derive(Debug, Clone, Copy)]
+struct HttpFallbackStatus {
+    status: u16,
+}
+
+impl std::fmt::Display for HttpFallbackStatus {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "HTTP fallback failed with status {}", self.status)
+    }
+}
+
+impl std::error::Error for HttpFallbackStatus {}
+
+fn is_http_conflict(err: &anyhow::Error) -> bool {
+    err.downcast_ref::<HttpFallbackStatus>()
+        .is_some_and(|failure| failure.status == http::StatusCode::CONFLICT.as_u16())
+}
 
 #[cfg(any(test, feature = "test-support"))]
 pub fn unknown_api_error(api_name: &str) -> anyhow::Error {
@@ -261,6 +283,7 @@ pub enum RealtimeEvent {
     VoiceLeaved(realtime::VoiceLeavedEvent),
     VoiceReaction(realtime::VoiceReactionSend),
     VoiceInteractive(realtime::VoiceInteractiveEvent),
+    SfuBreakoutRoom(realtime::SfuBreakoutRoomEvent),
     ScreenShare(realtime::ScreenShareEvent),
     AiAgentEnabled(realtime::AiAgentEnabledEvent),
     UserChannelAdded(realtime::UserChannelAdded),
@@ -324,6 +347,7 @@ impl RealtimeEvent {
             Self::VoiceLeaved(_) => "VoiceLeaved",
             Self::VoiceReaction(_) => "VoiceReaction",
             Self::VoiceInteractive(_) => "VoiceInteractive",
+            Self::SfuBreakoutRoom(_) => "SfuBreakoutRoom",
             Self::ScreenShare(_) => "ScreenShare",
             Self::AiAgentEnabled(_) => "AiAgentEnabled",
             Self::UserChannelAdded(_) => "UserChannelAdded",
@@ -389,6 +413,7 @@ impl TryFrom<realtime::envelope::Message> for RealtimeEvent {
             realtime::envelope::Message::VoiceLeavedEvent(m) => Ok(Self::VoiceLeaved(m)),
             realtime::envelope::Message::VoiceReactionSend(m) => Ok(Self::VoiceReaction(m)),
             realtime::envelope::Message::VoiceInteractiveEvent(m) => Ok(Self::VoiceInteractive(m)),
+            realtime::envelope::Message::SfuBreakoutRoomEvent(m) => Ok(Self::SfuBreakoutRoom(m)),
             realtime::envelope::Message::ScreenShareEvent(m) => Ok(Self::ScreenShare(m)),
             realtime::envelope::Message::AiagentEnabledEvent(m) => Ok(Self::AiAgentEnabled(m)),
             realtime::envelope::Message::UserChannelAddedEvent(m) => Ok(Self::UserChannelAdded(m)),
@@ -518,6 +543,25 @@ const CHANNEL_TYPE_MEZON_VOICE: i32 = 10;
 pub struct OutgoingMessageFlags {
     pub anonymous_message: bool,
     pub message_code: i32,
+}
+
+fn varint_encoded_len(mut value: u64) -> usize {
+    let mut n = 1usize;
+    while value > 0x7f {
+        n += 1;
+        value >>= 7;
+    }
+    n
+}
+
+pub fn encoded_envelope_cid_last_len(envelope: &realtime::Envelope) -> usize {
+    let cid = envelope.cid;
+    if cid <= 0 {
+        return envelope.encoded_len();
+    }
+    let mut zero_cid = envelope.clone();
+    zero_cid.cid = 0;
+    zero_cid.encoded_len() + 1 + varint_encoded_len(cid as u64)
 }
 
 fn encode_envelope_cid_last(mut envelope: realtime::Envelope) -> Vec<u8> {
@@ -1552,6 +1596,16 @@ pub fn prioritize_avatar(clan_avatar: &str, user_avatar: &str) -> String {
     }
 }
 
+pub fn message_sender_name(message: &api::ChannelMessage) -> &str {
+    if !message.clan_nick.is_empty() {
+        &message.clan_nick
+    } else if !message.display_name.is_empty() {
+        &message.display_name
+    } else {
+        &message.username
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ApiEntityMention {
     pub user_id: i64,
@@ -2058,6 +2112,34 @@ pub struct ContentToken {
         deserialize_with = "string_or_number::deserialize"
     )]
     pub clan_id: Option<String>,
+    #[serde(
+        default,
+        rename = "channelLabel",
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "string_or_number::deserialize"
+    )]
+    pub channel_label: Option<String>,
+    #[serde(
+        default,
+        rename = "parentId",
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "string_or_number::deserialize"
+    )]
+    pub parent_id: Option<String>,
+    #[serde(
+        default,
+        rename = "channelType",
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "opt_i64_flex::deserialize"
+    )]
+    pub channel_type: Option<i64>,
+    #[serde(
+        default,
+        rename = "channelPrivate",
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "opt_i64_flex::deserialize"
+    )]
+    pub channel_private: Option<i64>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -3024,6 +3106,101 @@ pub fn forward_content_json(content_raw: &str, text: &str) -> String {
     serde_json::Value::Object(obj).to_string()
 }
 
+fn url_is_inline_data(url: &str) -> bool {
+    let trimmed = url.trim();
+    trimmed
+        .as_bytes()
+        .get(..5)
+        .is_some_and(|prefix| prefix.eq_ignore_ascii_case(b"data:"))
+}
+
+fn api_attachment_to_proto(a: &ApiAttachment) -> api::MessageAttachment {
+    api::MessageAttachment {
+        url: a.url.clone(),
+        filename: a.filename.clone(),
+        filetype: a.filetype.clone(),
+        width: a.width,
+        height: a.height,
+        thumbnail: a.thumbnail.clone(),
+        duration: a.duration,
+        size: a.size,
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn build_forward_channel_message_send(
+    clan_id: i64,
+    channel_id: i64,
+    content_raw: &str,
+    text: &str,
+    is_public: bool,
+    mode: i32,
+    attachments: &[ApiAttachment],
+    mentions: &[OutgoingMention],
+) -> realtime::ChannelMessageSend {
+    let content_json = forward_content_json(content_raw, text);
+    let mention_everyone = mentions.iter().any(OutgoingMention::is_here);
+    let proto_mentions: Vec<api::MessageMention> = mentions
+        .iter()
+        .filter_map(OutgoingMention::to_proto)
+        .collect();
+    realtime::ChannelMessageSend {
+        clan_id,
+        channel_id,
+        content: content_json,
+        mentions: proto_mentions,
+        attachments: attachments.iter().map(api_attachment_to_proto).collect(),
+        mode,
+        is_public,
+        mention_everyone,
+        ..Default::default()
+    }
+}
+
+pub fn channel_message_send_realtime_proto_len(
+    message: &realtime::ChannelMessageSend,
+    cid: i32,
+) -> usize {
+    let envelope = realtime::Envelope {
+        cid,
+        message: Some(realtime::envelope::Message::ChannelMessageSend(
+            message.clone(),
+        )),
+    };
+    encoded_envelope_cid_last_len(&envelope)
+}
+
+pub fn forward_blocked_for_realtime_message(message: &realtime::ChannelMessageSend) -> bool {
+    if message
+        .attachments
+        .iter()
+        .any(|a| url_is_inline_data(&a.url) || url_is_inline_data(&a.thumbnail))
+    {
+        return true;
+    }
+    let proto_len = channel_message_send_realtime_proto_len(message, 1);
+    crate::abridged_tcp_adapter::proto_exceeds_realtime_abridged_cap(proto_len)
+}
+
+pub fn forward_blocked_for_realtime(
+    content_raw: &str,
+    text: &str,
+    attachments: &[ApiAttachment],
+    mentions: &[OutgoingMention],
+) -> bool {
+    let message = build_forward_channel_message_send(
+        1,
+        1,
+        content_raw,
+        text,
+        false,
+        2,
+        attachments,
+        mentions,
+    );
+    forward_blocked_for_realtime_message(&message)
+}
+
 pub fn mention_content_tokens(mentions: &[OutgoingMention]) -> Vec<ContentToken> {
     mentions
         .iter()
@@ -3046,6 +3223,84 @@ impl OutgoingHashtag {
             channel_id: (!self.channel_id.is_empty()).then(|| self.channel_id.clone()),
             ..Default::default()
         }
+    }
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct ChannelLinkMeta {
+    pub channel_id: String,
+    pub channel_label: String,
+    pub clan_id: String,
+    pub parent_id: Option<String>,
+    pub channel_type: u32,
+    #[serde(default)]
+    pub private: bool,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct OutgoingHashtags {
+    pub tokens: Vec<OutgoingHashtag>,
+    pub channels: Vec<ChannelLinkMeta>,
+}
+
+impl OutgoingHashtags {
+    pub fn new(tokens: Vec<OutgoingHashtag>, channels: Vec<ChannelLinkMeta>) -> Self {
+        Self { tokens, channels }
+    }
+
+    fn channel(&self, channel_id: &str) -> Option<&ChannelLinkMeta> {
+        self.channels
+            .iter()
+            .find(|channel| channel.channel_id == channel_id)
+    }
+}
+
+impl From<Vec<OutgoingHashtag>> for OutgoingHashtags {
+    fn from(tokens: Vec<OutgoingHashtag>) -> Self {
+        Self {
+            tokens,
+            channels: Vec::new(),
+        }
+    }
+}
+
+impl std::ops::Deref for OutgoingHashtags {
+    type Target = [OutgoingHashtag];
+
+    fn deref(&self) -> &Self::Target {
+        &self.tokens
+    }
+}
+
+pub fn channel_id_in_channel_url(url: &str) -> Option<&str> {
+    let marker = "/chat/clans/";
+    let rest = &url[url.find(marker)? + marker.len()..];
+    let mut parts = rest.split('/');
+    let clan_id = parts.next()?;
+    if clan_id.is_empty() || !clan_id.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    if parts.next()? != "channels" {
+        return None;
+    }
+    let channel_id = parts.next()?;
+    let channel_id = channel_id.split(['?', '#']).next().unwrap_or(channel_id);
+    (!channel_id.is_empty() && channel_id.bytes().all(|b| b.is_ascii_digit())).then_some(channel_id)
+}
+
+fn insert_channel_link_meta(
+    object: &mut serde_json::Map<String, serde_json::Value>,
+    meta: &ChannelLinkMeta,
+) {
+    object.insert("clanId".into(), meta.clan_id.clone().into());
+    object.insert("channelLabel".into(), meta.channel_label.clone().into());
+    object.insert("channelId".into(), meta.channel_id.clone().into());
+    object.insert("channelType".into(), meta.channel_type.into());
+    if let Some(parent_id) = &meta.parent_id {
+        object.insert("parentId".into(), parent_id.clone().into());
+    }
+    if meta.private {
+        object.insert("channelPrivate".into(), 1.into());
     }
 }
 
@@ -3195,6 +3450,29 @@ pub fn is_link_markdown_kind(kind: &str) -> bool {
     )
 }
 
+fn url_body_len_without_unbalanced_close_parens(body: &[char]) -> usize {
+    let open = body.iter().filter(|&&c| c == '(').count();
+    let mut close = body.iter().filter(|&&c| c == ')').count();
+    let mut len = body.len();
+    while close > open {
+        let mut before_punctuation = len;
+        while before_punctuation > 0
+            && matches!(
+                body[before_punctuation - 1],
+                '.' | ',' | ';' | ':' | '!' | '?' | '\'' | '"'
+            )
+        {
+            before_punctuation -= 1;
+        }
+        if before_punctuation == 0 || body[before_punctuation - 1] != ')' {
+            break;
+        }
+        len = before_punctuation - 1;
+        close -= 1;
+    }
+    len
+}
+
 fn scan_markdown(chars: &[char]) -> Vec<MarkdownMatch> {
     let n = chars.len();
     let is_triple =
@@ -3235,6 +3513,8 @@ fn scan_markdown(chars: &[char]) -> Vec<MarkdownMatch> {
             while j < n && !matches!(chars[j], ' ' | '\n' | '\r' | '\t') {
                 j += 1;
             }
+            let j =
+                i + scheme + url_body_len_without_unbalanced_close_parens(&chars[i + scheme..j]);
             if j > i + scheme {
                 let url: String = chars[i..j].iter().collect();
                 out.push(MarkdownMatch {
@@ -3392,7 +3672,7 @@ fn ephemeral_message_send(
     is_public: bool,
     mode: i32,
     mentions: Vec<OutgoingMention>,
-    hashtags: Vec<OutgoingHashtag>,
+    hashtags: OutgoingHashtags,
     emojis: Vec<OutgoingEmoji>,
     attachments: Vec<api::MessageAttachment>,
     reply: Option<OutgoingReply>,
@@ -3439,9 +3719,10 @@ fn ephemeral_message_send(
 pub fn build_send_content(
     text: &str,
     mentions: &[OutgoingMention],
-    hashtags: &[OutgoingHashtag],
+    hashtags: &OutgoingHashtags,
     emojis: &[OutgoingEmoji],
 ) -> SendContent {
+    let channels = hashtags;
     let stripped = strip_markdown(text);
     let mentions: Vec<OutgoingMention> = mentions
         .iter()
@@ -3473,6 +3754,7 @@ pub fn build_send_content(
         &hashtags,
         &emojis,
         &stripped.markdowns,
+        channels,
     );
     let cvtt = canvas_titles_for_text(&stripped.text);
     let json = if cvtt.is_empty() {
@@ -3490,10 +3772,41 @@ pub fn build_send_content(
     }
 }
 
+pub fn build_send_content_with_code(
+    text: &str,
+    mentions: &[OutgoingMention],
+    hashtags: &OutgoingHashtags,
+    emojis: &[OutgoingEmoji],
+    message_code: i32,
+) -> SendContent {
+    if message_code != MESSAGE_BUZZ_CODE {
+        return build_send_content(text, mentions, hashtags, emojis);
+    }
+    let markdowns: Vec<OutgoingMarkdown> = detect_markdown(text)
+        .into_iter()
+        .filter(|token| is_link_markdown_kind(&token.kind))
+        .collect();
+    let json = build_message_content_json(text, mentions, hashtags, emojis, &markdowns, hashtags);
+    let cvtt = canvas_titles_for_text(text);
+    let json = if cvtt.is_empty() {
+        json
+    } else {
+        with_cvtt(json, &cvtt)
+    };
+    SendContent {
+        json,
+        text: text.to_string(),
+        mentions: mentions.to_vec(),
+        hashtags: hashtags.to_vec(),
+        emojis: emojis.to_vec(),
+        markdowns,
+    }
+}
+
 fn build_presign_finish_content(
     content: &str,
     mentions: &[OutgoingMention],
-    hashtags: &[OutgoingHashtag],
+    hashtags: &OutgoingHashtags,
     emojis: &[OutgoingEmoji],
     presign_finish: &[String],
     create_time_seconds: u32,
@@ -3693,6 +4006,7 @@ fn build_message_content_json(
     hashtags: &[OutgoingHashtag],
     emojis: &[OutgoingEmoji],
     markdowns: &[OutgoingMarkdown],
+    channels: &OutgoingHashtags,
 ) -> String {
     let mut obj = serde_json::Map::new();
     obj.insert("t".into(), text.into());
@@ -3726,6 +4040,9 @@ fn build_message_content_json(
                 if !h.channel_id.is_empty() {
                     o.insert("channelId".into(), h.channel_id.clone().into());
                 }
+                if let Some(meta) = channels.channel(&h.channel_id) {
+                    insert_channel_link_meta(&mut o, meta);
+                }
                 o.insert("s".into(), h.s.into());
                 o.insert("e".into(), h.e.into());
                 serde_json::Value::Object(o)
@@ -3749,12 +4066,29 @@ fn build_message_content_json(
         obj.insert("ej".into(), arr.into());
     }
     if !markdowns.is_empty() {
+        let utf16: Vec<u16> = if channels.channels.is_empty() {
+            Vec::new()
+        } else {
+            text.encode_utf16().collect()
+        };
         let arr: Vec<serde_json::Value> = markdowns
             .iter()
             .map(|m| {
                 let mut o = serde_json::Map::new();
                 if !m.kind.is_empty() {
                     o.insert("type".into(), m.kind.clone().into());
+                }
+                let linked = usize::try_from(m.s)
+                    .ok()
+                    .zip(usize::try_from(m.e).ok())
+                    .and_then(|(s, e)| utf16.get(s..e))
+                    .map(String::from_utf16_lossy);
+                if let Some(meta) = linked
+                    .as_deref()
+                    .and_then(channel_id_in_channel_url)
+                    .and_then(|channel_id| channels.channel(channel_id))
+                {
+                    insert_channel_link_meta(&mut o, meta);
                 }
                 o.insert("s".into(), m.s.into());
                 o.insert("e".into(), m.e.into());
@@ -3876,6 +4210,7 @@ impl MezonTransport {
                     api_index: api_index as i32,
                     api_name: api_name.to_string(),
                     body,
+                    region: 0,
                 },
             )),
         };
@@ -4166,7 +4501,10 @@ impl MezonTransport {
                     status.as_u16()
                 );
             }
-            anyhow::bail!("HTTP fallback failed with status {}", status.as_u16());
+            return Err(HttpFallbackStatus {
+                status: status.as_u16(),
+            }
+            .into());
         }
         if bytes.len() as u64 > MAX_HTTP_FALLBACK_RESPONSE_BYTES {
             anyhow::bail!(
@@ -4364,13 +4702,7 @@ impl MezonTransport {
         enrich_content_tokens(&mut content_tokens, &entity_mentions);
         let content = content_tokens.t.clone();
 
-        let sender_name = if !message.clan_nick.is_empty() {
-            message.clan_nick.clone()
-        } else if !message.display_name.is_empty() {
-            message.display_name.clone()
-        } else {
-            message.username.clone()
-        };
+        let sender_name = message_sender_name(message).to_string();
 
         let attachments = parse_message_attachments(&message.attachments);
         let references = parse_message_references(&message.references);
@@ -4427,10 +4759,14 @@ impl MezonTransport {
 
     fn pin_message_from_proto(pin: api::PinMessage) -> ApiPinMessage {
         let content = pin.content;
-        let content_text = serde_json::from_str::<serde_json::Value>(&content)
-            .ok()
-            .and_then(|v| v.get("t").and_then(|t| t.as_str().map(|s| s.to_string())))
-            .unwrap_or_else(|| content.clone());
+        let content_text = match serde_json::from_str::<serde_json::Value>(&content) {
+            Ok(serde_json::Value::Object(fields)) => match fields.get("t") {
+                Some(serde_json::Value::String(text)) => text.clone(),
+                Some(_) => content.clone(),
+                None => String::new(),
+            },
+            _ => content.clone(),
+        };
         let attachments = parse_message_attachments(&pin.attachment);
 
         ApiPinMessage {
@@ -4663,6 +4999,10 @@ impl MezonTransport {
             "UploadBatchAttachmentFile" => 209,
             "SearchCtrlK" => 210,
             "SearchMentionUsers" => 211,
+            "GenerateCDNSignature" => 212,
+            "LinkCDNFile" => 214,
+            "SfuBreakoutRoom" => 215,
+            "SfuBreakoutMerge" => 216,
             _ => {
                 tracing::warn!("unknown API name: {api_name}");
                 return None;
@@ -5233,7 +5573,7 @@ impl MezonTransport {
         is_public: bool,
         mode: i32,
         mentions: Vec<OutgoingMention>,
-        hashtags: Vec<OutgoingHashtag>,
+        hashtags: OutgoingHashtags,
         emojis: Vec<OutgoingEmoji>,
         ogp: Option<OutgoingOgp>,
     ) -> Result<ApiMessage> {
@@ -5285,7 +5625,7 @@ impl MezonTransport {
             Vec::new(),
             Vec::new(),
             Vec::new(),
-            Vec::new(),
+            OutgoingHashtags::default(),
             Vec::new(),
             None,
             true,
@@ -5310,7 +5650,7 @@ impl MezonTransport {
         mode: i32,
         topic_id: i64,
         mentions: Vec<OutgoingMention>,
-        hashtags: Vec<OutgoingHashtag>,
+        hashtags: OutgoingHashtags,
         emojis: Vec<OutgoingEmoji>,
         reply: Option<OutgoingReply>,
         flags: OutgoingMessageFlags,
@@ -5361,7 +5701,7 @@ impl MezonTransport {
         topic_id: i64,
         attachments: Vec<api::MessageAttachment>,
         mentions: Vec<OutgoingMention>,
-        hashtags: Vec<OutgoingHashtag>,
+        hashtags: OutgoingHashtags,
         emojis: Vec<OutgoingEmoji>,
         presign_finish: Option<Vec<String>>,
         reply: Option<OutgoingReply>,
@@ -5413,7 +5753,7 @@ impl MezonTransport {
         attachments: Vec<api::MessageAttachment>,
         reply: Option<OutgoingReply>,
         mentions: Vec<OutgoingMention>,
-        hashtags: Vec<OutgoingHashtag>,
+        hashtags: OutgoingHashtags,
         emojis: Vec<OutgoingEmoji>,
         presign_finish: Option<Vec<String>>,
         flags: OutgoingMessageFlags,
@@ -5464,7 +5804,7 @@ impl MezonTransport {
         mode: i32,
         reply: OutgoingReply,
         mentions: Vec<OutgoingMention>,
-        hashtags: Vec<OutgoingHashtag>,
+        hashtags: OutgoingHashtags,
         emojis: Vec<OutgoingEmoji>,
         ogp: Option<OutgoingOgp>,
         flags: OutgoingMessageFlags,
@@ -5520,7 +5860,7 @@ impl MezonTransport {
             Vec::new(),
             Vec::new(),
             Vec::new(),
-            Vec::new(),
+            OutgoingHashtags::default(),
             Vec::new(),
             None,
             true,
@@ -5540,7 +5880,7 @@ impl MezonTransport {
         is_public: bool,
         mode: i32,
         mentions: Vec<OutgoingMention>,
-        hashtags: Vec<OutgoingHashtag>,
+        hashtags: OutgoingHashtags,
         emojis: Vec<OutgoingEmoji>,
         ogp: Option<OutgoingOgp>,
         flags: OutgoingMessageFlags,
@@ -5576,7 +5916,7 @@ impl MezonTransport {
         attachments: Vec<api::MessageAttachment>,
         references: Vec<api::MessageRef>,
         mentions: Vec<OutgoingMention>,
-        hashtags: Vec<OutgoingHashtag>,
+        hashtags: OutgoingHashtags,
         emojis: Vec<OutgoingEmoji>,
         presign_finish: Option<Vec<String>>,
         content_is_json: bool,
@@ -5601,12 +5941,12 @@ impl MezonTransport {
                 json: content.to_string(),
                 text,
                 mentions,
-                hashtags,
+                hashtags: hashtags.tokens,
                 emojis,
                 markdowns: Vec::new(),
             }
         } else {
-            build_send_content(content, &mentions, &hashtags, &emojis)
+            build_send_content_with_code(content, &mentions, &hashtags, &emojis, flags.message_code)
         };
         let content_json = sent.json.clone();
         let content_json = match &presign_finish {
@@ -6537,23 +6877,29 @@ impl MezonTransport {
         attachments: Vec<api::MessageAttachment>,
         mentions: Vec<OutgoingMention>,
     ) -> Result<()> {
-        let content_json = forward_content_json(content_raw, text);
-        let mention_everyone = mentions.iter().any(OutgoingMention::is_here);
-        let proto_mentions: Vec<api::MessageMention> = mentions
-            .iter()
-            .filter_map(OutgoingMention::to_proto)
+        let api_attachments: Vec<ApiAttachment> = attachments
+            .into_iter()
+            .map(|a| ApiAttachment {
+                url: a.url,
+                filename: a.filename,
+                filetype: a.filetype,
+                width: a.width,
+                height: a.height,
+                thumbnail: a.thumbnail,
+                duration: a.duration,
+                size: a.size,
+            })
             .collect();
-        let message = realtime::ChannelMessageSend {
+        let message = build_forward_channel_message_send(
             clan_id,
             channel_id,
-            content: content_json,
-            mentions: proto_mentions,
-            attachments,
-            mode,
+            content_raw,
+            text,
             is_public,
-            mention_everyone,
-            ..Default::default()
-        };
+            mode,
+            &api_attachments,
+            &mentions,
+        );
         let _ack = self.write_or_http_channel_message(message).await?;
         Ok(())
     }
@@ -6566,7 +6912,7 @@ impl MezonTransport {
         message_id: i64,
         content: &str,
         mentions: Vec<OutgoingMention>,
-        hashtags: Vec<OutgoingHashtag>,
+        hashtags: OutgoingHashtags,
         emojis: Vec<OutgoingEmoji>,
         presign_finish: Vec<String>,
         create_time_seconds: u32,
@@ -6981,8 +7327,8 @@ impl MezonTransport {
         if text.is_empty() {
             anyhow::bail!("SearchCtrlK text must not be empty");
         }
-        if text.len() > 255 {
-            anyhow::bail!("SearchCtrlK text exceeds 255 bytes");
+        if text.len() > SEARCH_CTRL_K_MAX_TEXT_BYTES {
+            anyhow::bail!("SearchCtrlK text exceeds {SEARCH_CTRL_K_MAX_TEXT_BYTES} bytes");
         }
         let cid = self.generate_cid();
         let body = api::SearchCtrlKRequest {
@@ -7025,6 +7371,84 @@ impl MezonTransport {
         Ok(api::SearchMentionUsersResponse::decode(
             response.as_slice(),
         )?)
+    }
+
+    pub async fn generate_cdn_signature(&self, channel_id: i64) -> Result<String> {
+        if channel_id == 0 {
+            anyhow::bail!("GenerateCDNSignature needs a channel id");
+        }
+        let cid = self.generate_cid();
+        let body = api::GenerateCdnSignatureRequest { channel_id }.encode_to_vec();
+        let (code, response) = self
+            .send_api_request_with_http_fallback(cid, "GenerateCDNSignature", body)
+            .await?;
+        if code != 0 {
+            return Err(api_status_error(code));
+        }
+        Ok(api::GenerateCdnSignatureResponse::decode(response.as_slice())?.signature)
+    }
+
+    pub async fn sfu_breakout_room(
+        &self,
+        request: api::SfuBreakoutRoomRequest,
+    ) -> Result<api::SfuBreakoutRoomResponse> {
+        if request.parent_channel_id == 0 {
+            anyhow::bail!("SfuBreakoutRoom needs a parent channel id");
+        }
+        let cid = self.generate_cid();
+        let (code, response) = self
+            .send_api_request_with_http_fallback(cid, "SfuBreakoutRoom", request.encode_to_vec())
+            .await?;
+        if code != 0 {
+            return Err(api_status_error(code));
+        }
+        Ok(api::SfuBreakoutRoomResponse::decode(response.as_slice())?)
+    }
+
+    pub async fn sfu_breakout_merge(&self, breakout_id: i64) -> Result<()> {
+        if breakout_id == 0 {
+            anyhow::bail!("SfuBreakoutMerge needs a breakout id");
+        }
+        let cid = self.generate_cid();
+        let body = api::SfuBreakoutMergeRequest {
+            target_id: breakout_id,
+        }
+        .encode_to_vec();
+        let (code, _) = self
+            .send_api_request_with_http_fallback(cid, "SfuBreakoutMerge", body)
+            .await?;
+        if code != 0 {
+            return Err(api_status_error(code));
+        }
+        Ok(())
+    }
+
+    pub async fn link_cdn_file(&self, src: &str, dst: &str) -> Result<()> {
+        let cid = self.generate_cid();
+        let body = api::LinkCdnFileRequest {
+            src: src.to_string(),
+            dst: dst.to_string(),
+        }
+        .encode_to_vec();
+        let has_http_session = self.http_fallback.read().is_some();
+        let sent = match self
+            .send_api_request_with_http_fallback(cid, "LinkCDNFile", body.clone())
+            .await
+        {
+            Err(error) if has_http_session && is_unknown_api_error(&error) => self
+                .send_api_request_over_http("LinkCDNFile", body)
+                .await
+                .map(|response| (0, response)),
+            sent => sent,
+        };
+        match sent {
+            Ok((0, _)) => Ok(()),
+            Ok((code, _)) => Err(api_status_error(code)),
+            Err(error) if is_http_conflict(&error) => {
+                Err(api_status_error(ApiStatusError::ALREADY_EXISTS))
+            }
+            Err(error) => Err(error),
+        }
     }
 
     /// Search threads by label within a parent channel.
@@ -7485,7 +7909,7 @@ impl MezonTransport {
         let body = request.encode_to_vec();
         let (code, _) = self.send_api_request(cid, "UpdateClanDesc", body).await?;
         if code != 0 {
-            return Err(anyhow::anyhow!("API error: code={}", code));
+            return Err(api_status_error(code));
         }
         Ok(())
     }
@@ -7702,14 +8126,14 @@ impl MezonTransport {
     pub async fn update_user_profile_by_clan(
         &self,
         clan_id: i64,
-        nick_name: &str,
+        nick_name: Option<&str>,
         avatar_url: Option<&str>,
     ) -> Result<()> {
         let cid = self.generate_cid();
         let body = api::UpdateClanProfileRequest {
             clan_id,
-            nick_name: Some(nick_name.to_string()),
-            avatar: avatar_url.map(|s| s.to_string()),
+            nick_name: nick_name.filter(|s| !s.is_empty()).map(|s| s.to_string()),
+            avatar: avatar_url.filter(|s| !s.is_empty()).map(|s| s.to_string()),
         }
         .encode_to_vec();
         let (code, response) = self
@@ -7722,10 +8146,9 @@ impl MezonTransport {
                 code,
                 msg
             );
-            return Err(anyhow::anyhow!(
-                "API error: code={}, response={}",
-                code,
-                msg
+            return Err(api_status_error(code)).context(format!(
+                "UpdateUserProfileByClan failed (code={code}, response={})",
+                msg.trim()
             ));
         }
         Ok(())
@@ -8056,6 +8479,7 @@ impl MezonTransport {
         size: i32,
         width: i32,
         height: i32,
+        channel_id: i64,
     ) -> Result<api::UploadAttachment> {
         let cid = self.generate_cid();
         let body = api::UploadAttachmentRequest {
@@ -8065,6 +8489,8 @@ impl MezonTransport {
             width,
             height,
             part_count: 0,
+            channel_id,
+            transcode_hls: crate::video_source::wants_hls_transcode(filename, size),
         }
         .encode_to_vec();
         let (code, response) = self
@@ -8309,8 +8735,7 @@ impl MezonTransport {
         &self,
         message: realtime::ChannelMessageSend,
     ) -> Result<realtime::ChannelMessageAck> {
-        let has_fallback = self.http_fallback.read().is_some();
-        if has_fallback && !self.is_open().await {
+        if self.http_fallback.read().is_some() && !self.is_open().await {
             tracing::warn!(
                 target: "socket",
                 "api_socket_closed: action=ChannelMessageSend — sending over HTTP"
@@ -8334,7 +8759,7 @@ impl MezonTransport {
         is_public: bool,
         mode: i32,
         mentions: Vec<OutgoingMention>,
-        hashtags: Vec<OutgoingHashtag>,
+        hashtags: OutgoingHashtags,
         emojis: Vec<OutgoingEmoji>,
         attachments: Vec<api::MessageAttachment>,
         reply: Option<OutgoingReply>,
@@ -8377,7 +8802,7 @@ impl MezonTransport {
         is_public: bool,
         mode: i32,
         mentions: Vec<OutgoingMention>,
-        hashtags: Vec<OutgoingHashtag>,
+        hashtags: OutgoingHashtags,
         emojis: Vec<OutgoingEmoji>,
         attachments: Vec<api::MessageAttachment>,
         reply: Option<OutgoingReply>,
@@ -9438,29 +9863,22 @@ impl MezonTransport {
             metadata: metadata.to_string(),
         }
         .encode_to_vec();
-        // Keep token issuance on the same HTTP route as the web voice client.
         let has_http_session = self.http_fallback.read().is_some();
-        let (code, response) = if has_http_session {
-            match self
-                .send_api_request_over_http("GenerateMeetToken", body.clone())
-                .await
-            {
-                Ok(response) => (0, response),
-                Err(error) => {
-                    tracing::warn!(target: "socket", "GenerateMeetToken HTTP request failed; using socket fallback: {error:#}");
-                    self.send_api_request_with_http_fallback(cid, "GenerateMeetToken", body)
-                        .await?
-                }
+        let (code, response) = match self
+            .send_api_request_with_http_fallback(cid, "GenerateMeetToken", body.clone())
+            .await
+        {
+            Ok(result) => result,
+            Err(error) if has_http_session => {
+                tracing::warn!(target: "socket", "GenerateMeetToken socket request failed; using HTTP fallback: {error:#}");
+                let response = self
+                    .send_api_request_over_http("GenerateMeetToken", body)
+                    .await?;
+                (0, response)
             }
-        } else {
-            self.send_api_request_with_http_fallback(cid, "GenerateMeetToken", body)
-                .await?
+            Err(error) => return Err(error),
         };
-        let token = meet_token_from_raw_body(code, &response)?;
-        Ok(api::GenerateMeetTokenResponse {
-            token,
-            ..Default::default()
-        })
+        meet_token_from_raw_body(code, &response)
     }
 
     pub async fn remove_participant_mezon_meet(
@@ -9644,7 +10062,7 @@ impl MezonTransport {
         message_id: i64,
         content: &str,
         mentions: Vec<OutgoingMention>,
-        hashtags: Vec<OutgoingHashtag>,
+        hashtags: OutgoingHashtags,
         emojis: Vec<OutgoingEmoji>,
         mode: i32,
         is_public: bool,
@@ -10111,7 +10529,7 @@ impl MezonTransport {
             .send_api_request(cid, "LinkSMS", body)
             .await
             .map_err(|error| LinkPhoneError::Transport(error.to_string()))?;
-        if code == API_CODE_ALREADY_EXISTS {
+        if code == ApiStatusError::ALREADY_EXISTS {
             return Err(LinkPhoneError::AlreadyLinked);
         }
         if code != 0 {
@@ -10236,16 +10654,48 @@ fn realtime_error_from_body(body: &[u8]) -> Option<realtime::Error> {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RealtimeControlError {
+    pub action: String,
+    pub code: i64,
+    pub message: Option<String>,
+}
+
+impl RealtimeControlError {
+    pub const FORBIDDEN: i64 = 403;
+
+    pub fn is_forbidden(&self) -> bool {
+        self.code == Self::FORBIDDEN
+    }
+}
+
+impl std::fmt::Display for RealtimeControlError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match &self.message {
+            Some(message) => write!(f, "{} error: code={} {}", self.action, self.code, message),
+            None => write!(f, "{} error: code={}", self.action, self.code),
+        }
+    }
+}
+
+impl std::error::Error for RealtimeControlError {}
+
 fn complete_realtime_control_request(action: &str, code: u32, response: &[u8]) -> Result<()> {
     if let Some(error) = realtime_error_from_body(response) {
-        anyhow::bail!(
-            "{action} error: code={} {}",
-            error.code,
-            error.message.trim()
-        );
+        return Err(RealtimeControlError {
+            action: action.to_owned(),
+            code: i64::from(error.code),
+            message: Some(error.message.trim().to_owned()),
+        }
+        .into());
     }
     if code != 0 {
-        anyhow::bail!("{action} error: code={code}");
+        return Err(RealtimeControlError {
+            action: action.to_owned(),
+            code: i64::from(code),
+            message: None,
+        }
+        .into());
     }
     Ok(())
 }
@@ -10260,7 +10710,7 @@ fn api_response_or_realtime_error(code: u32, api_name: &str) -> Result<()> {
 
 const MEET_TOKEN_PROTOBUF_TAG: u8 = 0x0A;
 
-fn meet_token_from_raw_body(code: u32, body: &[u8]) -> Result<String> {
+fn meet_token_from_raw_body(code: u32, body: &[u8]) -> Result<api::GenerateMeetTokenResponse> {
     if code != 0 {
         tracing::error!(target: "socket", "GenerateMeetToken failed: code={code}");
         return Err(api_status_error(code))
@@ -10269,18 +10719,58 @@ fn meet_token_from_raw_body(code: u32, body: &[u8]) -> Result<String> {
     let Some(&first_byte) = body.first() else {
         anyhow::bail!("GenerateMeetToken failed: empty body (code=0)");
     };
-    let token = if first_byte == MEET_TOKEN_PROTOBUF_TAG {
+    let response = if first_byte == MEET_TOKEN_PROTOBUF_TAG {
         api::GenerateMeetTokenResponse::decode(body)
             .ok()
-            .map(|response| response.token)
-            .filter(|token| !token.is_empty())
+            .filter(|response| !response.token.is_empty())
     } else {
-        bare_jwt(body)
+        bare_jwt(body).map(|token| api::GenerateMeetTokenResponse {
+            token,
+            ..Default::default()
+        })
     };
-    token.ok_or_else(|| {
+    let mut response = response.ok_or_else(|| {
         tracing::error!(target: "socket", "GenerateMeetToken failed: response is not a JWT (code=0)");
         anyhow::anyhow!("GenerateMeetToken failed: response is not a JWT (code=0)")
-    })
+    })?;
+    let sfu_url = normalized_sfu_ws_url(&response.url);
+    if sfu_url.is_none() && !response.url.trim().is_empty() {
+        tracing::warn!(
+            "GenerateMeetToken returned an unusable SFU url={:?}; the configured SFU stays in use",
+            response.url
+        );
+    }
+    response.url = sfu_url.unwrap_or_default();
+    Ok(response)
+}
+
+fn normalized_sfu_ws_url(raw: &str) -> Option<String> {
+    let raw = raw.trim();
+    if raw.is_empty() {
+        return None;
+    }
+    let with_scheme = if raw.contains("://") {
+        raw.to_owned()
+    } else {
+        format!("wss://{raw}")
+    };
+    let mut url = url::Url::parse(&with_scheme).ok()?;
+    let websocket_scheme = match url.scheme() {
+        "ws" | "wss" => None,
+        "http" => Some("ws"),
+        "https" => Some("wss"),
+        _ => return None,
+    };
+    if let Some(scheme) = websocket_scheme {
+        url.set_scheme(scheme).ok()?;
+    }
+    if !url.has_host() {
+        return None;
+    }
+    if url.path() == "/" {
+        url.set_path("/ws");
+    }
+    Some(url.into())
 }
 
 fn bare_jwt(body: &[u8]) -> Option<String> {
@@ -10461,6 +10951,7 @@ mod tests {
                     api_index: 1,
                     api_name: "X".to_string(),
                     body: vec![0x08, 0x00],
+                    region: 0,
                 },
             )),
         };
@@ -10626,13 +11117,67 @@ mod tests {
             legacy.to_content_token().user_id.as_deref(),
             Some(MENTION_HERE_USER_ID)
         );
-        let sent = build_send_content("@here", std::slice::from_ref(&legacy), &[], &[]);
+        let sent = build_send_content(
+            "@here",
+            std::slice::from_ref(&legacy),
+            &OutgoingHashtags::default(),
+            &[],
+        );
         let parsed: ApiMessageContent =
             serde_json::from_str(&sent.json).expect("wire content json");
         assert_eq!(
             parsed.mentions[0].user_id.as_deref(),
             Some(MENTION_HERE_USER_ID)
         );
+    }
+
+    #[test]
+    fn buzz_content_keeps_markdown_markers_as_plain_text() {
+        let sent = build_send_content_with_code(
+            "```jb```",
+            &[],
+            &OutgoingHashtags::default(),
+            &[],
+            MESSAGE_BUZZ_CODE,
+        );
+        let parsed: ApiMessageContent =
+            serde_json::from_str(&sent.json).expect("wire content json");
+        assert_eq!(sent.text, "```jb```");
+        assert_eq!(parsed.t, "```jb```");
+        assert!(parsed.mk.is_empty());
+    }
+
+    #[test]
+    fn buzz_content_keeps_links_and_canvas_titles() {
+        let text = "```jb``` https://mezon.ai/chat/clans/1/channels/2/canvas/abc";
+        let sent = build_send_content_with_code(
+            text,
+            &[],
+            &OutgoingHashtags::default(),
+            &[],
+            MESSAGE_BUZZ_CODE,
+        );
+        let parsed: ApiMessageContent =
+            serde_json::from_str(&sent.json).expect("wire content json");
+        assert_eq!(parsed.t, text);
+        assert_eq!(parsed.mk.len(), 1);
+        assert!(
+            parsed.mk[0]
+                .kind
+                .as_deref()
+                .is_some_and(is_link_markdown_kind)
+        );
+        assert_eq!(parsed.cvtt.get("abc").map(String::as_str), Some("Untitled"));
+    }
+
+    #[test]
+    fn regular_content_still_parses_markdown() {
+        let sent =
+            build_send_content_with_code("```jb```", &[], &OutgoingHashtags::default(), &[], 0);
+        let parsed: ApiMessageContent =
+            serde_json::from_str(&sent.json).expect("wire content json");
+        assert_eq!(sent.text, "jb");
+        assert!(!parsed.mk.is_empty());
     }
 
     #[test]
@@ -10850,6 +11395,78 @@ mod tests {
     }
 
     #[test]
+    fn forward_blocked_for_inline_attachment_data_uri() {
+        let attachments = vec![ApiAttachment {
+            url: "data:image/png;base64,abcd".into(),
+            ..Default::default()
+        }];
+        let message = build_forward_channel_message_send(
+            1,
+            2,
+            r#"{"t":"hi"}"#,
+            "hi",
+            false,
+            2,
+            &attachments,
+            &[],
+        );
+        assert!(forward_blocked_for_realtime_message(&message));
+    }
+
+    #[test]
+    fn forward_realtime_ok_for_small_https_attachment() {
+        let attachments = vec![ApiAttachment {
+            url: "https://cdn.example/a.png".into(),
+            ..Default::default()
+        }];
+        let message = build_forward_channel_message_send(
+            1,
+            2,
+            r#"{"t":"hi"}"#,
+            "hi",
+            false,
+            2,
+            &attachments,
+            &[],
+        );
+        assert!(!forward_blocked_for_realtime_message(&message));
+    }
+
+    #[test]
+    fn forward_blocked_when_wire_exceeds_proto_server_cap() {
+        let pad = "x".repeat(4200);
+        let attachments = vec![ApiAttachment {
+            url: format!("https://cdn.example/{pad}.png"),
+            ..Default::default()
+        }];
+        let message = build_forward_channel_message_send(
+            1,
+            2,
+            r#"{"t":"hi"}"#,
+            "hi",
+            false,
+            2,
+            &attachments,
+            &[],
+        );
+        assert!(forward_blocked_for_realtime_message(&message));
+    }
+
+    #[test]
+    fn encoded_envelope_cid_last_len_matches_encode() {
+        let message =
+            build_forward_channel_message_send(1, 2, r#"{"t":"hi"}"#, "hi", false, 2, &[], &[]);
+        let envelope = realtime::Envelope {
+            cid: 9,
+            message: Some(realtime::envelope::Message::ChannelMessageSend(message)),
+        };
+        assert_eq!(
+            encoded_envelope_cid_last_len(&envelope),
+            encode_envelope_cid_last(envelope).len()
+        );
+    }
+
+    #[test]
     fn message_from_proto_presign_finish_absent_is_none() {
         let msg = api::ChannelMessage {
             message_id: 1,
@@ -10862,14 +11479,21 @@ mod tests {
 
     #[test]
     fn content_json_plain_has_no_mentions_key() {
-        let json = build_message_content_json("hello", &[], &[], &[], &[]);
+        let json =
+            build_message_content_json("hello", &[], &[], &[], &[], &OutgoingHashtags::default());
         assert_eq!(json, r#"{"t":"hello"}"#);
     }
 
     #[test]
     fn content_json_includes_mentions_with_utf16_offsets() {
-        let json =
-            build_message_content_json("@bob hi", &[user_mention("42", 0, 4)], &[], &[], &[]);
+        let json = build_message_content_json(
+            "@bob hi",
+            &[user_mention("42", 0, 4)],
+            &[],
+            &[],
+            &[],
+            &OutgoingHashtags::default(),
+        );
         let parsed: ApiMessageContent = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed.t, "@bob hi");
         assert_eq!(parsed.mentions.len(), 1);
@@ -10927,7 +11551,14 @@ mod tests {
 
     #[test]
     fn content_json_keeps_here_mention_for_receive_colouring() {
-        let json = build_message_content_json("@here", &[here_mention(0, 5)], &[], &[], &[]);
+        let json = build_message_content_json(
+            "@here",
+            &[here_mention(0, 5)],
+            &[],
+            &[],
+            &[],
+            &OutgoingHashtags::default(),
+        );
         let parsed: ApiMessageContent = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed.mentions.len(), 1);
         assert_eq!(
@@ -10953,7 +11584,14 @@ mod tests {
             s: 0,
             e: 8,
         }];
-        let json = build_message_content_json("#general hi", &[], &hashtags, &[], &[]);
+        let json = build_message_content_json(
+            "#general hi",
+            &[],
+            &hashtags,
+            &[],
+            &[],
+            &OutgoingHashtags::default(),
+        );
         let parsed: ApiMessageContent = serde_json::from_str(&json).unwrap();
         assert!(parsed.mentions.is_empty());
         assert_eq!(parsed.hg.len(), 1);
@@ -10969,12 +11607,143 @@ mod tests {
             s: 0,
             e: 7,
         }];
-        let json = build_message_content_json(":smile:", &[], &[], &emojis, &[]);
+        let json = build_message_content_json(
+            ":smile:",
+            &[],
+            &[],
+            &emojis,
+            &[],
+            &OutgoingHashtags::default(),
+        );
         let parsed: ApiMessageContent = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed.ej.len(), 1);
         assert_eq!(parsed.ej[0].emojiid.as_deref(), Some("55"));
         assert_eq!(parsed.ej[0].s, Some(0));
         assert_eq!(parsed.ej[0].e, Some(7));
+    }
+
+    fn voice_link_meta() -> ChannelLinkMeta {
+        ChannelLinkMeta {
+            channel_id: "900".into(),
+            channel_label: "voice elsewhere".into(),
+            clan_id: "5".into(),
+            parent_id: None,
+            channel_type: 10,
+            private: false,
+        }
+    }
+
+    #[test]
+    fn channel_id_in_channel_url_reads_the_channel_segment() {
+        assert_eq!(
+            channel_id_in_channel_url("https://mezon.ai/chat/clans/5/channels/900"),
+            Some("900")
+        );
+        assert_eq!(
+            channel_id_in_channel_url("https://mezon.ai/chat/clans/5/channels/900?code=1"),
+            Some("900")
+        );
+        assert_eq!(
+            channel_id_in_channel_url("https://mezon.ai/chat/clans/x/channels/900"),
+            None
+        );
+        assert_eq!(
+            channel_id_in_channel_url("https://mezon.ai/chat/direct/message/900"),
+            None
+        );
+    }
+
+    #[test]
+    fn content_json_marks_private_channel_meta_only() {
+        let url = "https://mezon.ai/chat/clans/5/channels/900";
+        let text = format!("#vé {url}");
+        let hashtag = OutgoingHashtag {
+            channel_id: "900".into(),
+            s: 0,
+            e: 3,
+        };
+        let public = OutgoingHashtags::new(vec![hashtag.clone()], vec![voice_link_meta()]);
+        let parsed: ApiMessageContent =
+            serde_json::from_str(&build_send_content(&text, &[], &public, &[]).json).unwrap();
+        assert_eq!(parsed.hg[0].channel_private, None);
+        let private = OutgoingHashtags::new(
+            vec![hashtag],
+            vec![ChannelLinkMeta {
+                private: true,
+                ..voice_link_meta()
+            }],
+        );
+        let parsed: ApiMessageContent =
+            serde_json::from_str(&build_send_content(&text, &[], &private, &[]).json).unwrap();
+        assert_eq!(parsed.hg[0].channel_private, Some(1));
+        assert_eq!(
+            parsed.hg[0].channel_label.as_deref(),
+            Some("voice elsewhere")
+        );
+        let channel_link = parsed
+            .mk
+            .iter()
+            .find(|token| token.channel_id.as_deref() == Some("900"))
+            .expect("channel link");
+        assert_eq!(channel_link.channel_private, Some(1));
+    }
+
+    #[test]
+    fn content_json_carries_channel_meta_on_hashtags_and_channel_links() {
+        let url = "https://mezon.ai/chat/clans/5/channels/900";
+        let text = format!("#vé 👋 {url} https://example.com/a");
+        let hashtags = OutgoingHashtags::new(
+            vec![OutgoingHashtag {
+                channel_id: "900".into(),
+                s: 0,
+                e: 3,
+            }],
+            vec![voice_link_meta()],
+        );
+        let sent = build_send_content(&text, &[], &hashtags, &[]);
+        let parsed: ApiMessageContent = serde_json::from_str(&sent.json).unwrap();
+        assert_eq!(
+            parsed.hg[0].channel_label.as_deref(),
+            Some("voice elsewhere")
+        );
+        assert_eq!(parsed.hg[0].clan_id.as_deref(), Some("5"));
+        assert_eq!(parsed.hg[0].channel_type, Some(10));
+        let utf16: Vec<u16> = parsed.t.encode_utf16().collect();
+        let slice = |token: &ContentToken| {
+            String::from_utf16_lossy(&utf16[token.s.unwrap() as usize..token.e.unwrap() as usize])
+        };
+        let links: Vec<&ContentToken> = parsed
+            .mk
+            .iter()
+            .filter(|token| token.kind.as_deref() == Some("lk"))
+            .collect();
+        assert_eq!(links.len(), 2);
+        let channel_link = links
+            .iter()
+            .find(|token| slice(token) == url)
+            .expect("channel link");
+        assert_eq!(
+            channel_link.channel_label.as_deref(),
+            Some("voice elsewhere")
+        );
+        assert_eq!(channel_link.channel_id.as_deref(), Some("900"));
+        let other_link = links
+            .iter()
+            .find(|token| slice(token) != url)
+            .expect("other link");
+        assert!(other_link.channel_label.is_none());
+        assert!(!sent.json.contains("parentId"));
+    }
+
+    #[test]
+    fn content_json_without_channel_meta_adds_no_channel_fields() {
+        let sent = build_send_content(
+            "https://mezon.ai/chat/clans/5/channels/900",
+            &[],
+            &OutgoingHashtags::default(),
+            &[],
+        );
+        assert!(!sent.json.contains("channelLabel"));
     }
 
     fn md(kind: &str, s: i32, e: i32) -> OutgoingMarkdown {
@@ -11045,7 +11814,7 @@ mod tests {
                 e: 8,
                 ..Default::default()
             }],
-            &[],
+            &OutgoingHashtags::default(),
             &[],
         );
         let value: serde_json::Value = serde_json::from_str(&sent.json).unwrap();
@@ -11085,6 +11854,45 @@ mod tests {
     #[test]
     fn detect_markdown_link_has_no_trailing_punctuation_trim() {
         assert_eq!(detect_markdown("see https://a.com."), vec![md("lk", 4, 18)]);
+    }
+
+    #[test]
+    fn detect_markdown_link_wrapped_in_parens_leaves_the_close_paren_out() {
+        assert_eq!(
+            detect_markdown("(https://www.youtube.com/)"),
+            vec![md("lk", 1, 25)]
+        );
+        assert_eq!(
+            detect_markdown("(see https://a.com))"),
+            vec![md("lk", 5, 18)]
+        );
+        assert_eq!(
+            detect_markdown("(https://www.youtube.com/)."),
+            vec![md("lk", 1, 25)]
+        );
+        assert_eq!(
+            detect_markdown("(see https://a.com)!)"),
+            vec![md("lk", 5, 18)]
+        );
+    }
+
+    #[test]
+    fn detect_markdown_link_keeps_a_close_paren_it_opened() {
+        let url = "https://en.wikipedia.org/wiki/Rust_(programming_language)";
+        assert_eq!(detect_markdown(url), vec![md("lk", 0, 57)]);
+        assert_eq!(detect_markdown(&format!("{url}.")), vec![md("lk", 0, 58)]);
+        assert_eq!(detect_markdown(&format!("({url})")), vec![md("lk", 1, 58)]);
+    }
+
+    #[test]
+    fn send_content_link_wrapped_in_parens_stops_before_the_close_paren() {
+        let sent = build_send_content(
+            "(https://www.youtube.com/)",
+            &[],
+            &OutgoingHashtags::default(),
+            &[],
+        );
+        assert_eq!(sent.markdowns, vec![md("lk", 1, 25)]);
     }
 
     #[test]
@@ -11152,7 +11960,14 @@ mod tests {
 
     #[test]
     fn content_json_includes_markdown_mk() {
-        let json = build_message_content_json("**hey**", &[], &[], &[], &[md("b", 0, 7)]);
+        let json = build_message_content_json(
+            "**hey**",
+            &[],
+            &[],
+            &[],
+            &[md("b", 0, 7)],
+            &OutgoingHashtags::default(),
+        );
         let parsed: ApiMessageContent = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed.t, "**hey**");
         assert_eq!(parsed.mk.len(), 1);
@@ -11169,6 +11984,7 @@ mod tests {
             &[],
             &[],
             &[md("b", 0, 6)],
+            &OutgoingHashtags::default(),
         );
         let parsed: ApiMessageContent = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed.t, "**hi** @bob");
@@ -11190,28 +12006,54 @@ mod tests {
 
     #[test]
     fn mention_or_reply_plain_message_is_false() {
-        let content = build_message_content_json("hello world", &[], &[], &[], &[]);
+        let content = build_message_content_json(
+            "hello world",
+            &[],
+            &[],
+            &[],
+            &[],
+            &OutgoingHashtags::default(),
+        );
         assert!(!is_mention_or_reply(&content, &[], &[], 42, &[]));
     }
 
     #[test]
     fn mention_or_reply_detects_here() {
-        let content = build_message_content_json("@here", &[here_mention(0, 5)], &[], &[], &[]);
+        let content = build_message_content_json(
+            "@here",
+            &[here_mention(0, 5)],
+            &[],
+            &[],
+            &[],
+            &OutgoingHashtags::default(),
+        );
         assert!(is_mention_or_reply(&content, &[], &[], 42, &[]));
     }
 
     #[test]
     fn mention_or_reply_detects_current_user_only() {
-        let content =
-            build_message_content_json("@bob", &[user_mention("42", 0, 4)], &[], &[], &[]);
+        let content = build_message_content_json(
+            "@bob",
+            &[user_mention("42", 0, 4)],
+            &[],
+            &[],
+            &[],
+            &OutgoingHashtags::default(),
+        );
         assert!(is_mention_or_reply(&content, &[], &[], 42, &[]));
         assert!(!is_mention_or_reply(&content, &[], &[], 7, &[]));
     }
 
     #[test]
     fn mention_or_reply_detects_matching_role_only() {
-        let content =
-            build_message_content_json("@mods", &[role_mention("99", 0, 5)], &[], &[], &[]);
+        let content = build_message_content_json(
+            "@mods",
+            &[role_mention("99", 0, 5)],
+            &[],
+            &[],
+            &[],
+            &OutgoingHashtags::default(),
+        );
         assert!(is_mention_or_reply(&content, &[], &[], 42, &[99]));
         assert!(!is_mention_or_reply(&content, &[], &[], 42, &[100]));
     }
@@ -11219,7 +12061,8 @@ mod tests {
     #[test]
     fn mention_or_reply_detects_reply_to_user() {
         let refs = reply_reference_bytes(42);
-        let content = build_message_content_json("re", &[], &[], &[], &[]);
+        let content =
+            build_message_content_json("re", &[], &[], &[], &[], &OutgoingHashtags::default());
         assert!(is_mention_or_reply(&content, &refs, &[], 42, &[]));
         assert!(!is_mention_or_reply(&content, &refs, &[], 7, &[]));
     }
@@ -11241,7 +12084,8 @@ mod tests {
             }],
         };
         let bytes = list.encode_to_vec();
-        let content = build_message_content_json("hello", &[], &[], &[], &[]);
+        let content =
+            build_message_content_json("hello", &[], &[], &[], &[], &OutgoingHashtags::default());
         assert!(is_mention_or_reply(&content, &[], &bytes, 42, &[]));
         assert!(!is_mention_or_reply(&content, &[], &bytes, 7, &[]));
     }
@@ -11258,7 +12102,8 @@ mod tests {
             }],
         }
         .encode_to_vec();
-        let content = build_message_content_json("hello", &[], &[], &[], &[]);
+        let content =
+            build_message_content_json("hello", &[], &[], &[], &[], &OutgoingHashtags::default());
         assert!(is_mention_or_reply(&content, &[], &bytes, 42, &[99]));
         assert!(!is_mention_or_reply(&content, &[], &bytes, 42, &[100]));
     }
@@ -11276,7 +12121,8 @@ mod tests {
             }],
         }
         .encode_to_vec();
-        let content = build_message_content_json("@here", &[], &[], &[], &[]);
+        let content =
+            build_message_content_json("@here", &[], &[], &[], &[], &OutgoingHashtags::default());
         assert!(is_mention_or_reply(&content, &[], &bytes, 7, &[]));
         assert!(!is_inbox_mention_or_reply(&content, &[], &bytes, 7, &[]));
     }
@@ -11316,14 +12162,16 @@ mod tests {
             }],
         }
         .encode_to_vec();
-        let content = build_message_content_json("reply", &[], &[], &[], &[]);
+        let content =
+            build_message_content_json("reply", &[], &[], &[], &[], &OutgoingHashtags::default());
 
         assert!(is_inbox_mention_or_reply(&content, &refs, &[], 42, &[]));
     }
 
     #[test]
     fn mention_or_reply_malformed_proto_mentions_is_false() {
-        let content = build_message_content_json("hello", &[], &[], &[], &[]);
+        let content =
+            build_message_content_json("hello", &[], &[], &[], &[], &OutgoingHashtags::default());
         assert!(!is_mention_or_reply(
             &content,
             &[],
@@ -11457,11 +12305,36 @@ mod tests {
                 let counters = counters.clone();
                 tokio::spawn(async move {
                     use tokio::io::{AsyncReadExt, AsyncWriteExt};
-                    let mut buf = vec![0u8; 8192];
-                    let Ok(n) = stream.read(&mut buf).await else {
-                        return;
+                    let mut buf = Vec::new();
+                    let mut chunk = [0u8; 4096];
+                    let (head_end, body_len) = loop {
+                        let Ok(n) = stream.read(&mut chunk).await else {
+                            return;
+                        };
+                        if n == 0 {
+                            return;
+                        }
+                        buf.extend_from_slice(&chunk[..n]);
+                        if let Some(end) = buf.windows(4).position(|w| w == b"\r\n\r\n") {
+                            let head = String::from_utf8_lossy(&buf[..end]).to_ascii_lowercase();
+                            let len = head
+                                .lines()
+                                .find_map(|line| line.strip_prefix("content-length:"))
+                                .and_then(|value| value.trim().parse::<usize>().ok())
+                                .unwrap_or(0);
+                            break (end + 4, len);
+                        }
                     };
-                    let head = String::from_utf8_lossy(&buf[..n]).to_string();
+                    while buf.len() < head_end + body_len {
+                        let Ok(n) = stream.read(&mut chunk).await else {
+                            return;
+                        };
+                        if n == 0 {
+                            break;
+                        }
+                        buf.extend_from_slice(&chunk[..n]);
+                    }
+                    let head = String::from_utf8_lossy(&buf[..head_end]).to_string();
                     let path = head.split_whitespace().nth(1).unwrap_or("").to_string();
                     *counters.lock().entry(path.clone()).or_insert(0) += 1;
 
@@ -11472,6 +12345,13 @@ mod tests {
                         out.extend_from_slice(jwt.as_bytes());
                         out.extend_from_slice(&[0x1a, 0x03, b'n', b'e', b'w']);
                         out
+                    } else if path.ends_with("GenerateCDNSignature") {
+                        let request =
+                            api::GenerateCdnSignatureRequest::decode(&buf[head_end..]).unwrap();
+                        api::GenerateCdnSignatureResponse {
+                            signature: format!("1700000000-{}", request.channel_id),
+                        }
+                        .encode_to_vec()
                     } else if path.ends_with("SendChannelMessage") {
                         realtime::ChannelMessageAck {
                             message_id: 42,
@@ -11482,8 +12362,16 @@ mod tests {
                     } else {
                         Vec::new()
                     };
+                    let linked_twice = path.ends_with("LinkCDNFile")
+                        && api::LinkCdnFileRequest::decode(&buf[head_end..])
+                            .is_ok_and(|request| request.dst == LINKED_DST);
+                    let status = if linked_twice {
+                        "409 Conflict"
+                    } else {
+                        "200 OK"
+                    };
                     let response = format!(
-                        "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                        "HTTP/1.1 {status}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
                         body.len()
                     );
                     let _ = stream.write_all(response.as_bytes()).await;
@@ -11493,6 +12381,133 @@ mod tests {
             }
         });
         (port, hits)
+    }
+
+    #[tokio::test]
+    async fn cdn_signature_asks_for_the_given_channel_and_returns_the_signature() {
+        let (port, hits) = fake_api().await;
+        let t = MezonTransport::new(Box::new(ClosedAdapter), String::new());
+        let mut fallback = expired_fallback(port);
+        fallback.token = fake_jwt_expiring_in(600);
+        fallback.expires_at = crate::server_clock::now_secs() + 600;
+        t.set_http_fallback(Some(fallback));
+
+        let signature = t
+            .generate_cdn_signature(2087764882924507136)
+            .await
+            .expect("the signature request should succeed");
+        assert_eq!(signature, "1700000000-2087764882924507136");
+        assert_eq!(
+            hits.lock().get("/mezon.api.Mezon/GenerateCDNSignature"),
+            Some(&1)
+        );
+    }
+
+    #[tokio::test]
+    async fn cdn_signature_for_channel_zero_is_refused_before_any_request() {
+        let error = transport(false)
+            .generate_cdn_signature(0)
+            .await
+            .expect_err("channel 0 has no signature");
+        assert!(error.to_string().contains("channel id"), "{error}");
+    }
+
+    const LINK_SRC: &str = "1cf93b197d401000/2090000000000000001_photo.png";
+    const LINK_DST: &str = "1d0000000000abcd/2090000000000000001_photo.png";
+    const LINKED_DST: &str = "1d0000000000abcd/2090000000000000002_linked.png";
+
+    fn live_fallback(port: u16) -> HttpFallbackSession {
+        let mut fallback = expired_fallback(port);
+        fallback.token = fake_jwt_expiring_in(600);
+        fallback.expires_at = crate::server_clock::now_secs() + 600;
+        fallback
+    }
+
+    fn open_transport(port: u16) -> MezonTransport {
+        let mut t = transport(true);
+        t.connect_gate = Duration::from_millis(50);
+        t.connected_tx.send(true).unwrap();
+        t.set_http_fallback(Some(live_fallback(port)));
+        t
+    }
+
+    fn answer_next_socket_request(
+        t: &MezonTransport,
+        code: u32,
+        body: Vec<u8>,
+    ) -> Arc<std::sync::atomic::AtomicBool> {
+        let answered = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let flag = answered.clone();
+        let pending = t.pending_requests.clone();
+        tokio::spawn(async move {
+            loop {
+                let executor = {
+                    let mut pending = pending.lock();
+                    let cid = pending.keys().next().copied();
+                    cid.and_then(|cid| pending.remove(&cid))
+                };
+                if let Some(executor) = executor {
+                    flag.store(true, std::sync::atomic::Ordering::SeqCst);
+                    let _ = executor.sender.send((code, body));
+                    return;
+                }
+                tokio::time::sleep(Duration::from_millis(1)).await;
+            }
+        });
+        answered
+    }
+
+    fn unknown_api_envelope() -> Vec<u8> {
+        realtime::Envelope {
+            message: Some(realtime::envelope::Message::Error(realtime::Error {
+                code: 404,
+                message: "Not found.".to_string(),
+                ..Default::default()
+            })),
+            ..Default::default()
+        }
+        .encode_to_vec()
+    }
+
+    #[tokio::test]
+    async fn link_cdn_file_goes_over_http_when_the_socket_does_not_know_it() {
+        let (port, hits) = fake_api().await;
+        let t = open_transport(port);
+        let answered = answer_next_socket_request(&t, 0, unknown_api_envelope());
+
+        t.link_cdn_file(LINK_SRC, LINK_DST)
+            .await
+            .expect("the link should go through over HTTP");
+        assert!(answered.load(std::sync::atomic::Ordering::SeqCst));
+        assert_eq!(hits.lock().get("/mezon.api.Mezon/LinkCDNFile"), Some(&1));
+    }
+
+    #[tokio::test]
+    async fn link_cdn_file_already_linked_over_the_socket_is_not_sent_again() {
+        let (port, hits) = fake_api().await;
+        let t = open_transport(port);
+        answer_next_socket_request(&t, ApiStatusError::ALREADY_EXISTS, Vec::new());
+
+        let error = t
+            .link_cdn_file(LINK_SRC, LINK_DST)
+            .await
+            .expect_err("the destination already holds the file");
+        assert!(api_status_from_error(&error).is_some_and(ApiStatusError::is_already_exists));
+        assert_eq!(hits.lock().get("/mezon.api.Mezon/LinkCDNFile"), None);
+    }
+
+    #[tokio::test]
+    async fn link_cdn_file_conflict_over_http_reads_as_already_linked() {
+        let (port, hits) = fake_api().await;
+        let t = MezonTransport::new(Box::new(ClosedAdapter), String::new());
+        t.set_http_fallback(Some(live_fallback(port)));
+
+        let error = t
+            .link_cdn_file(LINK_SRC, LINKED_DST)
+            .await
+            .expect_err("the destination already holds the file");
+        assert!(api_status_from_error(&error).is_some_and(ApiStatusError::is_already_exists));
+        assert_eq!(hits.lock().get("/mezon.api.Mezon/LinkCDNFile"), Some(&1));
     }
 
     fn fake_jwt_expiring_in(secs: i64) -> String {
@@ -11859,6 +12874,10 @@ mod tests {
         assert_eq!(t.get_api_index("UploadBatchAttachmentFile"), Some(209));
         assert_eq!(t.get_api_index("SearchCtrlK"), Some(210));
         assert_eq!(t.get_api_index("SearchMentionUsers"), Some(211));
+        assert_eq!(t.get_api_index("GenerateCDNSignature"), Some(212));
+        assert_eq!(t.get_api_index("LinkCDNFile"), Some(214));
+        assert_eq!(t.get_api_index("SfuBreakoutRoom"), Some(215));
+        assert_eq!(t.get_api_index("SfuBreakoutMerge"), Some(216));
         assert_eq!(t.get_api_index("DefinitelyNotAnApi"), None);
     }
 
@@ -12165,7 +13184,7 @@ mod tests {
         let (json, _) = build_presign_finish_content(
             "hi :joy: #gen @bob",
             &mentions,
-            &hashtags,
+            &OutgoingHashtags::from(hashtags),
             &emojis,
             &["key-1".to_string()],
             1700,
@@ -12212,7 +13231,7 @@ mod tests {
         }
         .encode_to_vec();
         assert_eq!(encoded[0], MEET_TOKEN_PROTOBUF_TAG);
-        assert_eq!(meet_token_from_raw_body(0, &encoded).unwrap(), jwt);
+        assert_eq!(meet_token_from_raw_body(0, &encoded).unwrap().token, jwt);
     }
 
     #[test]
@@ -12223,7 +13242,9 @@ mod tests {
         encoded.extend_from_slice(jwt.as_bytes());
         encoded.extend_from_slice(&[0x12, url.len() as u8]);
         encoded.extend_from_slice(url.as_bytes());
-        assert_eq!(meet_token_from_raw_body(0, &encoded).unwrap(), jwt);
+        let response = meet_token_from_raw_body(0, &encoded).unwrap();
+        assert_eq!(response.token, jwt);
+        assert_eq!(response.url, url);
     }
 
     #[test]
@@ -12273,7 +13294,10 @@ mod tests {
     #[test]
     fn meet_token_raw_jwt_is_accepted() {
         let jwt = "eyJhbGciOiJIUzI1NiJ9.eyJyb29tIjoxfQ.c2ln";
-        assert_eq!(meet_token_from_raw_body(0, jwt.as_bytes()).unwrap(), jwt);
+        assert_eq!(
+            meet_token_from_raw_body(0, jwt.as_bytes()).unwrap().token,
+            jwt
+        );
     }
 
     #[test]
@@ -12307,6 +13331,10 @@ mod tests {
         assert!(
             message.contains("join_clan_chat error: code=403 Not allowed"),
             "{message}"
+        );
+        assert!(
+            err.downcast_ref::<RealtimeControlError>()
+                .is_some_and(RealtimeControlError::is_forbidden)
         );
     }
 
@@ -12380,5 +13408,49 @@ mod tests {
         assert_eq!(bare_jwt(b"eyJhbGciOiJIUzI1NiJ9.eyJyb29tIjoxfQ."), None);
         assert_eq!(bare_jwt(b"not a token"), None);
         assert_eq!(bare_jwt(&[0xff, 0xfe, 0x00]), None);
+    }
+
+    #[test]
+    fn pin_message_from_proto_hides_attachment_metadata_without_text() {
+        for content in [
+            r#"{"presign_finish":["photo-1","photo-2"],"create_time_seconds":1790856620}"#,
+            r#"{"presign_finish":["photo-1","photo-2"],"create_time_seconds":1790856620,"fwd":true}"#,
+        ] {
+            let pin = api::PinMessage {
+                content: content.into(),
+                ..Default::default()
+            };
+            let parsed = MezonTransport::pin_message_from_proto(pin);
+            assert!(parsed.content_text.is_empty());
+            assert_eq!(parsed.content, content);
+        }
+    }
+
+    #[test]
+    fn pin_message_from_proto_preserves_visible_text_behavior() {
+        let json_pin = api::PinMessage {
+            content: r#"{"t":"caption","presign_finish":["photo"]}"#.into(),
+            ..Default::default()
+        };
+        let plain_pin = api::PinMessage {
+            content: "legacy plain text".into(),
+            ..Default::default()
+        };
+        let invalid_text_pin = api::PinMessage {
+            content: r#"{"t":123}"#.into(),
+            ..Default::default()
+        };
+        assert_eq!(
+            MezonTransport::pin_message_from_proto(json_pin).content_text,
+            "caption"
+        );
+        assert_eq!(
+            MezonTransport::pin_message_from_proto(plain_pin).content_text,
+            "legacy plain text"
+        );
+        assert_eq!(
+            MezonTransport::pin_message_from_proto(invalid_text_pin).content_text,
+            r#"{"t":123}"#
+        );
     }
 }

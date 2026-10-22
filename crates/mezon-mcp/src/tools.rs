@@ -1714,7 +1714,7 @@ impl McpBackend {
                 is_public,
                 mode,
                 Vec::new(),
-                Vec::new(),
+                Default::default(),
                 emojis,
                 None,
             )
@@ -1746,7 +1746,7 @@ impl McpBackend {
                 mode,
                 reply,
                 Vec::new(),
-                Vec::new(),
+                Default::default(),
                 Vec::new(),
                 None,
                 Default::default(),
@@ -1888,7 +1888,7 @@ impl McpBackend {
                 message_id,
                 content,
                 Vec::new(),
-                Vec::new(),
+                Default::default(),
                 Vec::new(),
                 mode,
                 is_public,
@@ -1975,7 +1975,7 @@ impl McpBackend {
         mode: i32,
     ) -> anyhow::Result<Value> {
         let path = PathBuf::from(path);
-        let upload = build_upload_file(&path).await?;
+        let upload = build_upload_file(&path, channel_id).await?;
         let presigned = self.api.presign_file(upload).await?;
         let key = normalize_presign_key(&presigned.attachment.url);
         let attachment = presigned.attachment.clone();
@@ -1990,7 +1990,7 @@ impl McpBackend {
                 vec![attachment],
                 None,
                 Vec::new(),
-                Vec::new(),
+                Default::default(),
                 Vec::new(),
                 Some(Vec::new()),
                 Default::default(),
@@ -2004,7 +2004,7 @@ impl McpBackend {
                 sent.message_id,
                 content,
                 Vec::new(),
-                Vec::new(),
+                Default::default(),
                 Vec::new(),
                 vec![key],
                 sent.create_time.max(0) as u32,
@@ -2541,7 +2541,7 @@ fn normalize_presign_key(key: &str) -> String {
     }
 }
 
-async fn build_upload_file(path: &Path) -> anyhow::Result<UploadFile> {
+async fn build_upload_file(path: &Path, channel_id: i64) -> anyhow::Result<UploadFile> {
     if !path.is_file() {
         anyhow::bail!("file not found: {}", path.display());
     }
@@ -2566,6 +2566,7 @@ async fn build_upload_file(path: &Path) -> anyhow::Result<UploadFile> {
         height: 0,
         duration: 0,
         thumbnail: None,
+        channel_id,
     })
 }
 

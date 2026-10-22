@@ -59,6 +59,10 @@ pub fn init_theme_settings_provider(cx: &mut App) {
     );
 }
 
+pub fn ui_font_family(cx: &App) -> gpui::SharedString {
+    ::theme::theme_settings(cx).ui_font(cx).family.clone()
+}
+
 pub fn set_theme(theme: Theme, cx: &mut App) {
     apply_zed_palette(&theme, cx);
     cx.set_global(GlobalTheme(Arc::new(theme)));

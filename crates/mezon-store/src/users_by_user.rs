@@ -1,5 +1,5 @@
 use crate::ids::UserId;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use gpui::{App, AppContext, Context, Entity, EventEmitter, Global, Task};
@@ -16,6 +16,65 @@ pub enum UsersByUserEvent {
     SearchSettled,
 }
 
+#[derive(Clone, PartialEq, Eq)]
+pub(crate) struct ProfileUpdate {
+    display_name: String,
+    avatar: String,
+    about_me: String,
+}
+
+impl From<&mezon_proto::realtime::UserProfileUpdatedEvent> for ProfileUpdate {
+    fn from(event: &mezon_proto::realtime::UserProfileUpdatedEvent) -> Self {
+        Self {
+            display_name: event.display_name.clone(),
+            avatar: event.avatar.clone(),
+            about_me: event.about_me.clone(),
+        }
+    }
+}
+
+fn channel_profile(
+    users: mezon_proto::api::AllUsersAddChannelResponse,
+    user_id: UserId,
+    cached: Option<User>,
+    update: &ProfileUpdate,
+) -> anyhow::Result<User> {
+    let index = users
+        .user_ids
+        .iter()
+        .position(|id| *id == user_id.0)
+        .ok_or_else(|| anyhow::anyhow!("profile snapshot did not contain the updated user"))?;
+    let mut user = cached.unwrap_or(User {
+        id: user_id,
+        ..Default::default()
+    });
+    user.username = users
+        .usernames
+        .get(index)
+        .cloned()
+        .ok_or_else(|| anyhow::anyhow!("profile snapshot omitted username"))?;
+    user.display_name = users
+        .display_names
+        .get(index)
+        .cloned()
+        .ok_or_else(|| anyhow::anyhow!("profile snapshot omitted display name"))?;
+    user.avatar_url = users
+        .avatars
+        .get(index)
+        .cloned()
+        .ok_or_else(|| anyhow::anyhow!("profile snapshot omitted avatar"))?;
+    if !update.about_me.is_empty() {
+        user.about_me.clone_from(&update.about_me);
+    }
+    Ok(user)
+}
+
+#[derive(Clone, Copy)]
+enum ProfileSource {
+    Clan(i64),
+    Channel(i64),
+}
+
 pub struct UsersByUserStore {
     by_id: HashMap<UserId, User>,
     loading: bool,
@@ -24,6 +83,11 @@ pub struct UsersByUserStore {
     search_generation: u64,
     search_query: String,
     search_hits: Vec<UserId>,
+    profile_updates: HashMap<UserId, ProfileUpdate>,
+    profile_pending: HashMap<UserId, (ProfileUpdate, ProfileSource)>,
+    confirmed_profiles: HashSet<UserId>,
+    profile_task: Option<Task<()>>,
+    reset_generation: u64,
     _search_task: Task<()>,
     _conn_watch: Task<()>,
 }
@@ -50,6 +114,7 @@ impl UsersByUserStore {
     }
 
     pub fn reset(&mut self, cx: &mut Context<Self>) {
+        self.reset_profiles();
         self.by_id.clear();
         self.search_hits.clear();
         self.search_query.clear();
@@ -70,6 +135,11 @@ impl UsersByUserStore {
             search_generation: 0,
             search_query: String::new(),
             search_hits: Vec::new(),
+            profile_updates: HashMap::new(),
+            profile_pending: HashMap::new(),
+            confirmed_profiles: HashSet::new(),
+            profile_task: None,
+            reset_generation: 0,
             _search_task: Task::ready(()),
             _conn_watch: conn_watch,
         }
@@ -81,6 +151,11 @@ impl UsersByUserStore {
             dispatch.on(RealtimeKind::AddClanUser, &entity, |this, event, cx| {
                 this.handle_event(event, cx)
             });
+            dispatch.on(
+                RealtimeKind::UserProfileUpdated,
+                &entity,
+                |this, event, cx| this.handle_event(event, cx),
+            );
             dispatch.on_lagged(&entity, |this, cx| this.refresh(cx));
         });
     }
@@ -204,7 +279,7 @@ impl UsersByUserStore {
         let mut users_changed = false;
         for user in users.into_iter().filter_map(user_from_api) {
             match self.by_id.get_mut(&user.id) {
-                Some(existing) => {
+                Some(existing) if !self.confirmed_profiles.contains(&user.id) => {
                     if existing.username != user.username
                         || existing.display_name != user.display_name
                         || existing.avatar_url != user.avatar_url
@@ -215,6 +290,7 @@ impl UsersByUserStore {
                         users_changed = true;
                     }
                 }
+                Some(_) => {}
                 None => {
                     self.by_id.insert(user.id, user);
                     users_changed = true;
@@ -232,7 +308,196 @@ impl UsersByUserStore {
     }
 
     fn invalidate(&mut self) {
+        self.reset_profiles();
+        self.loading = false;
+        self.search_generation = self.search_generation.wrapping_add(1);
+        self._search_task = Task::ready(());
         self.freshness.mark_stale();
+    }
+
+    fn reset_profiles(&mut self) {
+        self.reset_generation = self.reset_generation.wrapping_add(1);
+        self.profile_task = None;
+        self.profile_pending.clear();
+        self.profile_updates.clear();
+        self.confirmed_profiles.clear();
+    }
+
+    pub(crate) fn confirmed_profile(&self, user_id: UserId) -> Option<&User> {
+        self.confirmed_profiles
+            .contains(&user_id)
+            .then(|| self.by_id.get(&user_id))
+            .flatten()
+    }
+
+    pub(crate) fn apply_user_profile(&mut self, user: User, cx: &mut Context<Self>) {
+        let changed = match self.by_id.get_mut(&user.id) {
+            Some(existing) => existing.update_profile(&user),
+            None => {
+                self.by_id.insert(user.id, user.clone());
+                true
+            }
+        };
+        let first_confirmation = self.confirmed_profiles.insert(user.id);
+        if changed || first_confirmation {
+            crate::user_profile::apply_user_profile(&user, cx);
+        }
+        if changed {
+            cx.emit(UsersByUserEvent::Changed);
+            cx.notify();
+        }
+    }
+
+    fn queue_profile(
+        &mut self,
+        event: &mezon_proto::realtime::UserProfileUpdatedEvent,
+        cx: &mut Context<Self>,
+    ) {
+        let user_id = UserId(event.user_id);
+        if user_id.0 == 0
+            || crate::account::AccountStore::try_global(cx).is_some_and(|store| {
+                store
+                    .read(cx)
+                    .account
+                    .as_ref()
+                    .is_some_and(|account| account.user_id == user_id.0)
+            })
+        {
+            return;
+        }
+        let update = ProfileUpdate::from(event);
+        if self.profile_updates.get(&user_id) == Some(&update)
+            && self.profile_pending.contains_key(&user_id)
+        {
+            return;
+        }
+        let source = (event.clan_id != 0)
+            .then_some(ProfileSource::Clan(event.clan_id))
+            .or_else(|| {
+                crate::clan_members::ClanMembersStore::try_global(cx).and_then(|store| {
+                    store
+                        .read(cx)
+                        .profile_clan(user_id)
+                        .map(|id| ProfileSource::Clan(id.0))
+                })
+            })
+            .or_else(|| (event.channel_id != 0).then_some(ProfileSource::Channel(event.channel_id)))
+            .or_else(|| {
+                crate::direct::DirectMessageStore::try_global(cx).and_then(|store| {
+                    store
+                        .read(cx)
+                        .dm_with_peer(user_id)
+                        .map(|dm| ProfileSource::Channel(dm.id.0))
+                })
+            })
+            .or_else(|| {
+                crate::group_members::GroupMembersStore::try_global(cx).and_then(|store| {
+                    store
+                        .read(cx)
+                        .profile_channel(user_id)
+                        .map(|id| ProfileSource::Channel(id.0))
+                })
+            });
+        let Some(source) = source else {
+            self.confirmed_profiles.remove(&user_id);
+            tracing::warn!("profile update has no accessible snapshot source");
+            return;
+        };
+        self.profile_updates.insert(user_id, update.clone());
+        self.profile_pending.insert(user_id, (update, source));
+        if self.profile_task.is_some() {
+            return;
+        }
+        let api = self.api.clone();
+        let generation = self.reset_generation;
+        self.profile_task = Some(cx.spawn(async move |this, cx| {
+            loop {
+                let Ok(Some((user_id, update, source))) = this.update(cx, |this, _| {
+                    if this.reset_generation != generation {
+                        return None;
+                    }
+                    let Some(&user_id) = this.profile_pending.keys().next() else {
+                        this.profile_task = None;
+                        return None;
+                    };
+                    let (update, source) = this.profile_pending.remove(&user_id)?;
+                    Some((user_id, update, source))
+                }) else {
+                    break;
+                };
+                let cached = this
+                    .update(cx, |this, _| this.by_id.get(&user_id).cloned())
+                    .ok()
+                    .flatten();
+                let result = match source {
+                    ProfileSource::Clan(clan_id) => api
+                        .list_clan_users(clan_id)
+                        .await
+                        .map(|users| {
+                            users
+                                .into_iter()
+                                .filter_map(|member| member.user)
+                                .find(|user| user.id == user_id.0)
+                                .and_then(user_from_api)
+                        })
+                        .and_then(|user| {
+                            user.ok_or_else(|| {
+                                anyhow::anyhow!("profile snapshot did not contain the updated user")
+                            })
+                        }),
+                    ProfileSource::Channel(channel_id) => api
+                        .list_channel_users_uc(
+                            channel_id,
+                            crate::group_members::GROUP_MEMBER_FETCH_LIMIT,
+                        )
+                        .await
+                        .and_then(|users| channel_profile(users, user_id, cached, &update)),
+                };
+                if this
+                    .update(cx, |this, cx| {
+                        this.apply_profile_result(user_id, &update, generation, result, cx)
+                    })
+                    .is_err()
+                {
+                    break;
+                }
+            }
+        }));
+    }
+
+    fn apply_profile_result(
+        &mut self,
+        user_id: UserId,
+        update: &ProfileUpdate,
+        generation: u64,
+        result: anyhow::Result<User>,
+        cx: &mut Context<Self>,
+    ) {
+        if generation != self.reset_generation
+            || self.profile_updates.get(&user_id) != Some(update)
+            || self.profile_pending.contains_key(&user_id)
+        {
+            return;
+        }
+        match result {
+            Ok(mut user) if user.id == user_id => {
+                self.profile_updates.remove(&user_id);
+                if !update.display_name.is_empty() {
+                    user.display_name.clone_from(&update.display_name);
+                }
+                self.apply_user_profile(user, cx);
+            }
+            Ok(_) => {
+                self.profile_updates.remove(&user_id);
+                self.confirmed_profiles.remove(&user_id);
+                tracing::warn!("profile snapshot identity did not match");
+            }
+            Err(error) => {
+                self.profile_updates.remove(&user_id);
+                self.confirmed_profiles.remove(&user_id);
+                tracing::warn!("profile snapshot failed: {error}");
+            }
+        }
     }
 
     fn fetch(&mut self, cx: &mut Context<Self>) {
@@ -241,15 +506,21 @@ impl UsersByUserStore {
         }
         self.loading = true;
         let api = self.api.clone();
+        let generation = self.reset_generation;
         cx.spawn(async move |this, cx| {
             let result = api.list_user_clans_by_user().await;
             let _ = this.update(cx, |this, cx| {
+                if generation != this.reset_generation {
+                    return;
+                }
                 this.loading = false;
                 match result {
                     Ok(users) => {
                         this.freshness.mark_fetched();
                         for user in users {
-                            if let Some(user) = user_from_api(user) {
+                            if let Some(user) = user_from_api(user)
+                                && !this.confirmed_profiles.contains(&user.id)
+                            {
                                 this.by_id.insert(user.id, user);
                             }
                         }
@@ -265,6 +536,10 @@ impl UsersByUserStore {
     }
 
     fn handle_event(&mut self, event: &RealtimeEvent, cx: &mut Context<Self>) {
+        if let RealtimeEvent::UserProfileUpdated(event) = event {
+            self.queue_profile(event, cx);
+            return;
+        }
         if let RealtimeEvent::AddClanUser(e) = event {
             let Some(redis) = e.user.as_ref() else {
                 return;
@@ -281,6 +556,9 @@ impl UsersByUserStore {
                 create_time_seconds: redis.create_time_second,
                 join_time_seconds: 0,
             };
+            if self.confirmed_profiles.contains(&user.id) {
+                return;
+            }
             self.by_id.insert(user.id, user);
             cx.emit(UsersByUserEvent::Changed);
             cx.notify();
@@ -290,6 +568,243 @@ impl UsersByUserStore {
 
 #[cfg(test)]
 mod tests {
+    #[gpui::test]
+    fn duplicate_clan_events_coalesce_and_stale_results_cannot_replace_profile(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (store, api) = cx.update(|cx| {
+            let store = init_store(cx);
+            store.update(cx, |store, cx| {
+                store.profile_task =
+                    Some(cx.spawn(async |_, _| std::future::pending::<()>().await));
+            });
+            (store.clone(), store.read(cx).api.clone())
+        });
+        cx.run_until_parked();
+        let mut event = mezon_proto::realtime::UserProfileUpdatedEvent {
+            user_id: 7,
+            clan_id: 1,
+            display_name: "New".into(),
+            ..Default::default()
+        };
+        for clan_id in [1, 2, 3] {
+            event.clan_id = clan_id;
+            api.publish_event(RealtimeEvent::UserProfileUpdated(event.clone()));
+        }
+        cx.run_until_parked();
+        cx.update(|cx| {
+            store.update(cx, |store, cx| {
+                assert_eq!(store.profile_pending.len(), 1);
+                assert_eq!(store.profile_updates.len(), 1);
+                assert!(store.user(UserId(7)).is_none());
+                let old_update = store.profile_updates[&UserId(7)].clone();
+                let generation = store.reset_generation;
+                event.display_name = "Newest".into();
+                store.queue_profile(&event, cx);
+                let new_update = store.profile_updates[&UserId(7)].clone();
+                store.apply_profile_result(
+                    UserId(7),
+                    &old_update,
+                    generation,
+                    Ok(User {
+                        id: UserId(7),
+                        display_name: "Old".into(),
+                        ..Default::default()
+                    }),
+                    cx,
+                );
+                assert!(store.user(UserId(7)).is_none());
+                store.profile_pending.remove(&UserId(7));
+                store.apply_profile_result(
+                    UserId(7),
+                    &new_update,
+                    generation,
+                    Ok(User {
+                        id: UserId(7),
+                        username: "user".into(),
+                        display_name: "Old snapshot".into(),
+                        about_me: "Bio".into(),
+                        ..Default::default()
+                    }),
+                    cx,
+                );
+                let user = store.user(UserId(7)).unwrap();
+                assert_eq!(user.display_name, "Newest");
+                assert_eq!(user.about_me, "Bio");
+                store.merge_users("old".into(), vec![hit(7, "old", "Old")], cx);
+                assert_eq!(store.user(UserId(7)).unwrap().display_name, "Newest");
+                store.reset(cx);
+                store.apply_profile_result(
+                    UserId(7),
+                    &new_update,
+                    generation,
+                    Ok(User {
+                        id: UserId(7),
+                        display_name: "Late".into(),
+                        ..Default::default()
+                    }),
+                    cx,
+                );
+                assert!(store.user(UserId(7)).is_none());
+                assert!(store.profile_pending.is_empty());
+                assert!(store.profile_task.is_none());
+                assert!(store.confirmed_profiles.is_empty());
+            })
+        });
+    }
+
+    #[gpui::test]
+    fn empty_profile_event_uses_snapshot_and_failure_keeps_known_profile(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        cx.update(|cx| {
+            let store = init_store(cx);
+            store.update(cx, |store, cx| {
+                let event = mezon_proto::realtime::UserProfileUpdatedEvent {
+                    user_id: 7,
+                    clan_id: 1,
+                    ..Default::default()
+                };
+                store.by_id.insert(
+                    UserId(7),
+                    User {
+                        id: UserId(7),
+                        username: "user".into(),
+                        display_name: "Old".into(),
+                        avatar_url: "old.png".into(),
+                        about_me: "Bio".into(),
+                        ..Default::default()
+                    },
+                );
+                store.profile_task =
+                    Some(cx.spawn(async |_, _| std::future::pending::<()>().await));
+                let known = store.user(UserId(7)).unwrap().clone();
+                store.apply_user_profile(known, cx);
+                store.queue_profile(&event, cx);
+                assert_eq!(store.user(UserId(7)).unwrap().about_me, "Bio");
+                let update = store.profile_updates[&UserId(7)].clone();
+                let generation = store.reset_generation;
+                store.profile_pending.remove(&UserId(7));
+                store.apply_profile_result(
+                    UserId(7),
+                    &update,
+                    generation,
+                    Err(anyhow::anyhow!("offline")),
+                    cx,
+                );
+                assert_eq!(store.user(UserId(7)).unwrap().display_name, "Old");
+                assert!(!store.profile_updates.contains_key(&UserId(7)));
+                assert!(store.confirmed_profile(UserId(7)).is_none());
+                store.queue_profile(&event, cx);
+                store.profile_pending.remove(&UserId(7));
+                store.apply_profile_result(
+                    UserId(7),
+                    &update,
+                    generation,
+                    Ok(User {
+                        id: UserId(7),
+                        username: "user".into(),
+                        about_me: "Bio".into(),
+                        ..Default::default()
+                    }),
+                    cx,
+                );
+                let user = store.confirmed_profile(UserId(7)).unwrap();
+                assert!(user.display_name.is_empty());
+                assert!(user.avatar_url.is_empty());
+                assert_eq!(user.about_me, "Bio");
+                store.profile_pending.clear();
+                store.queue_profile(&event, cx);
+                assert!(store.profile_pending.contains_key(&UserId(7)));
+                store.invalidate();
+                assert!(store.confirmed_profile(UserId(7)).is_none());
+                assert!(store.profile_task.is_none());
+            });
+        });
+    }
+
+    #[gpui::test]
+    fn identical_sparse_event_during_request_requires_a_new_snapshot(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        cx.update(|cx| {
+            let store = init_store(cx);
+            store.update(cx, |store, cx| {
+                store.profile_task =
+                    Some(cx.spawn(async |_, _| std::future::pending::<()>().await));
+                let event = mezon_proto::realtime::UserProfileUpdatedEvent {
+                    user_id: 7,
+                    clan_id: 1,
+                    ..Default::default()
+                };
+                store.queue_profile(&event, cx);
+                let update = store.profile_updates[&UserId(7)].clone();
+                let generation = store.reset_generation;
+                store.profile_pending.remove(&UserId(7));
+                store.queue_profile(&event, cx);
+                store.apply_profile_result(
+                    UserId(7),
+                    &update,
+                    generation,
+                    Ok(User {
+                        id: UserId(7),
+                        display_name: "Stale".into(),
+                        ..Default::default()
+                    }),
+                    cx,
+                );
+                assert!(store.user(UserId(7)).is_none());
+                store.profile_pending.remove(&UserId(7));
+                store.apply_profile_result(
+                    UserId(7),
+                    &update,
+                    generation,
+                    Ok(User {
+                        id: UserId(7),
+                        username: "user".into(),
+                        ..Default::default()
+                    }),
+                    cx,
+                );
+                assert!(store.user(UserId(7)).unwrap().display_name.is_empty());
+                assert!(store.profile_updates.is_empty());
+            });
+        });
+    }
+
+    #[test]
+    fn channel_snapshot_distinguishes_empty_fields_from_missing_columns() {
+        let event = mezon_proto::realtime::UserProfileUpdatedEvent {
+            user_id: 7,
+            ..Default::default()
+        };
+        let update = ProfileUpdate::from(&event);
+        let known = User {
+            id: UserId(7),
+            username: "old".into(),
+            display_name: "Old".into(),
+            avatar_url: "old.png".into(),
+            about_me: "Bio".into(),
+            ..Default::default()
+        };
+        let mut response = mezon_proto::api::AllUsersAddChannelResponse {
+            user_ids: vec![7],
+            usernames: vec!["user".into()],
+            display_names: vec![String::new()],
+            avatars: vec![String::new()],
+            ..Default::default()
+        };
+        let user =
+            channel_profile(response.clone(), UserId(7), Some(known.clone()), &update).unwrap();
+        assert!(user.display_name.is_empty());
+        assert!(user.avatar_url.is_empty());
+        assert_eq!(user.about_me, "Bio");
+        assert_eq!(user.username, "user");
+        assert!(channel_profile(response.clone(), UserId(8), None, &update).is_err());
+        response.display_names.clear();
+        assert!(channel_profile(response, UserId(7), Some(known), &update).is_err());
+    }
+
     use super::*;
     use mezon_proto::api;
 

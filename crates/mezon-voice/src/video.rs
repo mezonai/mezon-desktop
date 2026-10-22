@@ -23,6 +23,10 @@ impl VideoSurface {
     pub fn into_inner(self) -> core_video::pixel_buffer::CVPixelBuffer {
         self.0
     }
+
+    pub fn dimensions(&self) -> (u32, u32) {
+        (self.0.get_width() as u32, self.0.get_height() as u32)
+    }
 }
 
 #[derive(Clone)]
@@ -35,8 +39,18 @@ pub struct VideoFrameData {
     pub seq: u64,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct SharedMonitor {
+    pub x: f64,
+    pub y: f64,
+    pub width: f64,
+    pub height: f64,
+}
+
 pub struct VideoFrameStore {
     pub screen_views: Arc<crate::screen_recovery::ScreenViews>,
+    pub screen_annotations: Arc<crate::annotation::ScreenAnnotations>,
+    shared_monitor: Mutex<Option<SharedMonitor>>,
     state: Mutex<VideoFrameState>,
     seq: AtomicU64,
     recording: AtomicBool,
@@ -48,6 +62,8 @@ impl Default for VideoFrameStore {
         Self {
             state: Mutex::new(VideoFrameState::default()),
             screen_views: Arc::default(),
+            screen_annotations: Arc::default(),
+            shared_monitor: Mutex::new(None),
             seq: AtomicU64::new(0),
             recording: AtomicBool::new(false),
             frame_tx: watch::channel(0).0,
@@ -72,6 +88,14 @@ struct VideoFrameState {
 }
 
 impl VideoFrameStore {
+    pub fn shared_monitor(&self) -> Option<SharedMonitor> {
+        *self.shared_monitor.lock()
+    }
+
+    pub(crate) fn set_shared_monitor(&self, monitor: Option<SharedMonitor>) {
+        *self.shared_monitor.lock() = monitor;
+    }
+
     pub fn publish(&self, key: u64, width: u32, height: u32, bgra: Vec<u8>) -> Option<Vec<u8>> {
         let seq = self.seq.fetch_add(1, Ordering::Relaxed);
         let required = bgra.len();
@@ -231,15 +255,15 @@ fn clamp_u8(v: i32) -> u8 {
 }
 
 #[inline]
-fn rgb_to_y(r: i32, g: i32, b: i32) -> u8 {
+pub(crate) fn rgb_to_y(r: i32, g: i32, b: i32) -> u8 {
     clamp_u8(((66 * r + 129 * g + 25 * b + 128) >> 8) + 16)
 }
 #[inline]
-fn rgb_to_u(r: i32, g: i32, b: i32) -> u8 {
+pub(crate) fn rgb_to_u(r: i32, g: i32, b: i32) -> u8 {
     clamp_u8(((-38 * r - 74 * g + 112 * b + 128) >> 8) + 128)
 }
 #[inline]
-fn rgb_to_v(r: i32, g: i32, b: i32) -> u8 {
+pub(crate) fn rgb_to_v(r: i32, g: i32, b: i32) -> u8 {
     clamp_u8(((112 * r - 94 * g - 18 * b + 128) >> 8) + 128)
 }
 

@@ -16,6 +16,7 @@ pub struct Avatar {
     image_cache: Option<gpui::Entity<crate::image_cache::LruImageCache>>,
     is_anonymous: bool,
     group_default: bool,
+    skeleton: bool,
 }
 
 const ANONYMOUS_AVATAR_ICON: &str = "icons/anonymous-avatar.svg";
@@ -34,6 +35,7 @@ impl Avatar {
             image_cache: None,
             is_anonymous: false,
             group_default: false,
+            skeleton: false,
         }
     }
 
@@ -55,6 +57,11 @@ impl Avatar {
 
     pub fn anonymous(mut self, is_anonymous: bool) -> Self {
         self.is_anonymous = is_anonymous;
+        self
+    }
+
+    pub fn skeleton(mut self, skeleton: bool) -> Self {
+        self.skeleton = skeleton;
         self
     }
 
@@ -245,6 +252,15 @@ fn anonymous_circle(d: Pixels) -> AnyElement {
         .into_any_element()
 }
 
+fn skeleton_circle(d: Pixels, fill: Hsla) -> AnyElement {
+    div()
+        .size(d)
+        .flex_shrink_0()
+        .rounded_full()
+        .bg(fill)
+        .into_any_element()
+}
+
 fn group_default_circle(d: Pixels) -> AnyElement {
     div()
         .size(d)
@@ -313,6 +329,11 @@ impl RenderOnce for Avatar {
         let initials = name_initials(name.as_ref());
         let is_anonymous = self.is_anonymous;
         let group_default = self.group_default;
+        let skeleton_bg = self.skeleton.then(|| Hsla::from(cx.theme().bg_hover));
+        let loading_circle = move |initials: String| match skeleton_bg {
+            Some(fill) => skeleton_circle(image_size, fill),
+            None => initials_circle(image_size, bg, text_color, initials),
+        };
 
         div()
             .size(container_size)
@@ -335,9 +356,7 @@ impl RenderOnce for Avatar {
                         src,
                         grayscale,
                         element_bg,
-                        move || {
-                            initials_circle(image_size, bg, text_color, loading_initials.clone())
-                        },
+                        move || loading_circle(loading_initials.clone()),
                         move || {
                             if let Some(raw) = raw_fallback.clone()
                                 && !raw.is_empty()
@@ -350,14 +369,7 @@ impl RenderOnce for Avatar {
                                     element_bg,
                                     {
                                         let retry_loading = fallback_initials.clone();
-                                        move || {
-                                            initials_circle(
-                                                image_size,
-                                                bg,
-                                                text_color,
-                                                retry_loading.clone(),
-                                            )
-                                        }
+                                        move || loading_circle(retry_loading.clone())
                                     },
                                     {
                                         let final_initials = fallback_initials.clone();
@@ -377,7 +389,7 @@ impl RenderOnce for Avatar {
                     )
                 }
                 None if group_default => group_default_circle(image_size),
-                None => initials_circle(image_size, bg, text_color, initials),
+                None => loading_circle(initials),
             })
             .children(self.indicator.map(|indicator| div().child(indicator)))
     }

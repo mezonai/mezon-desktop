@@ -13,12 +13,13 @@ use mezon_audio::{AudioPlayer, decode_audio};
 use mezon_client::transport::{
     ApiActionRow, ApiAnimationComponent, ApiComponentPayload, ApiEmbed, ApiEmbedInputWrapper,
     ApiEmbedShapeWrapper, ApiMessage, ApiMessageComponent, ApiMessageContent, ApiMessageInput,
-    ApiRadioOption, ApiSelectComponent, EPHEMERAL_MESSAGE_CODE, LOCATION_CODE, MESSAGE_BUZZ_CODE,
-    OutgoingEmoji as TransportEmoji, OutgoingHashtag as TransportHashtag,
-    OutgoingMention as TransportMention, OutgoingMessageFlags, OutgoingOgp, OutgoingReply,
-    SHARE_CONTACT_CODE, build_send_content, build_share_contact_content_json, detect_markdown,
-    emoji_content_tokens, hashtag_content_tokens, is_here_user_id, markdown_content_tokens,
-    mention_content_tokens, with_create_time_seconds,
+    ApiRadioOption, ApiSelectComponent, ChannelLinkMeta, EPHEMERAL_MESSAGE_CODE, LOCATION_CODE,
+    MESSAGE_BUZZ_CODE, OutgoingEmoji as TransportEmoji, OutgoingHashtag as TransportHashtag,
+    OutgoingHashtags, OutgoingMention as TransportMention, OutgoingMessageFlags, OutgoingOgp,
+    OutgoingReply, SHARE_CONTACT_CODE, build_send_content, build_send_content_with_code,
+    build_share_contact_content_json, detect_markdown, emoji_content_tokens,
+    hashtag_content_tokens, is_here_user_id, markdown_content_tokens, mention_content_tokens,
+    with_create_time_seconds,
 };
 use mezon_client::{
     ApiStatusError, AppApi, AttachmentUploadOutcome, ConnectionStatus, InboxCategory,
@@ -34,7 +35,9 @@ use crate::account::{AccountStore, UserAccount};
 use crate::album_layout::{AlbumLayout, calculate_album_layout};
 use crate::badge::BadgeService;
 use crate::buzz::BuzzStore;
-use crate::channel::{ChannelEvent, ChannelList, ChannelType, STREAM_MODE_THREAD};
+use crate::channel::{
+    ChannelEvent, ChannelList, ChannelType, STREAM_MODE_THREAD, joins_through_clan_stream,
+};
 use crate::channel_members::ChannelMembersStore;
 use crate::clan_members::ClanMembersStore;
 use crate::direct::{DirectChannel, DirectKind, DirectMessageStore};
@@ -78,6 +81,7 @@ const CHANNEL_TYPE_THREAD: i32 = 7;
 use crate::message::STICKER_FILETYPE;
 const AUDIO_FILETYPE: &str = "audio/mpeg";
 pub const ANONYMOUS_SENDER_NAME: &str = "Anonymous";
+const ANONYMOUS_PERSONA_WINDOW_SECS: i64 = 600;
 const MAX_MESSAGES_PER_CHANNEL: usize = 200;
 const COMMAND_RESPONSE_TIMEOUT: Duration = Duration::from_secs(30);
 const MAX_PENDING_BELOW: usize = 500;
@@ -302,7 +306,7 @@ pub struct OutgoingAttachment {
 }
 
 impl OutgoingAttachment {
-    pub fn into_upload(self) -> UploadFile {
+    pub fn into_upload(self, channel_id: i64) -> UploadFile {
         let thumbnail = self.poster_jpeg.map(|jpeg| UploadThumbnail {
             filename: format!("{}.jpg", self.filename),
             data: jpeg,
@@ -315,6 +319,7 @@ impl OutgoingAttachment {
             height: self.height,
             duration: self.duration,
             thumbnail,
+            channel_id,
         }
     }
 }
@@ -667,6 +672,7 @@ pub struct MessagesStore {
     api: Arc<AppApi>,
     _channel_sub: Subscription,
     _conn_watch: Task<()>,
+    _cdn_access_sub: Option<Subscription>,
     pending_last_seen: HashMap<ChannelId, PendingLastSeen>,
     _last_seen_timer: Option<Task<()>>,
     last_seen_fingerprint: HashMap<ChannelId, String>,
@@ -698,6 +704,7 @@ pub struct MessagesStore {
     commands_in_flight: HashMap<(ChannelId, i64), usize>,
     consumed_command_replies: HashSet<MessageId>,
     anonymous_clans: HashSet<ClanId>,
+    own_anonymous_persona: Option<AnonymousPersona>,
     topic_anonymous_mode: bool,
     last_anonymous_mode: (bool, bool),
     last_typing_sent: Option<(ChannelId, Instant)>,
@@ -708,6 +715,13 @@ pub struct MessagesStore {
 /// Longest additional note that may ride along with a forward
 /// (React `MAX_FORWARD_MESSAGE_LENGTH`).
 pub const MAX_FORWARD_MESSAGE_LENGTH: usize = 2000;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ForwardStart {
+    Started,
+    NotStarted,
+    PayloadTooLarge,
+}
 
 /// A forward destination. A friend has no channel yet — the DM is created on
 /// send (React `createDirectMessageWithUser`).
@@ -878,9 +892,42 @@ fn forward_source(msg: &Message) -> ForwardSource {
     }
 }
 
+fn start_target_clan_joins(targets: &[ForwardTarget], cx: &mut App) {
+    let channels = ChannelList::global(cx);
+    for target in targets {
+        if let ForwardTarget::Channel {
+            clan_id, is_public, ..
+        } = target
+            && joins_through_clan_stream(*clan_id, *is_public)
+        {
+            drop(channels.update(cx, |channels, cx| channels.ensure_clan_joined(*clan_id, cx)));
+        }
+    }
+}
+
 /// Turn a picked destination into a real channel. A friend row has no DM yet,
 /// so one is created first (React `createDirectMessageWithUser`).
 async fn resolve_forward_target(
+    target: &ForwardTarget,
+    cx: &mut AsyncApp,
+) -> anyhow::Result<ResolvedTarget> {
+    let dest = forward_destination(target, cx).await?;
+    cx.update(|cx| {
+        ChannelList::global(cx).update(cx, |channels, cx| {
+            channels.join_channel(
+                ClanId(dest.clan_id),
+                ChannelId(dest.channel_id),
+                dest.channel_type,
+                dest.is_public,
+                cx,
+            )
+        })
+    })
+    .await?;
+    Ok(dest)
+}
+
+async fn forward_destination(
     target: &ForwardTarget,
     cx: &mut AsyncApp,
 ) -> anyhow::Result<ResolvedTarget> {
@@ -935,13 +982,6 @@ async fn send_forward(
     source_channel_id: ChannelId,
     note: Option<&str>,
 ) -> anyhow::Result<()> {
-    api.join_chat(
-        dest.clan_id,
-        dest.channel_id,
-        dest.channel_type,
-        dest.is_public,
-    )
-    .await?;
     let same_channel = dest.channel_id == source_channel_id.get();
     let mut failures = 0usize;
     for source in sources {
@@ -950,6 +990,9 @@ async fn send_forward(
         } else {
             Vec::new()
         };
+        let attachments = api
+            .link_attachments_into_channel(source.attachments.clone(), dest.channel_id)
+            .await;
         if let Err(e) = api
             .forward_channel_message(
                 dest.clan_id,
@@ -958,7 +1001,7 @@ async fn send_forward(
                 &source.text,
                 dest.is_public,
                 dest.mode,
-                source.attachments.clone(),
+                attachments,
                 mentions,
             )
             .await
@@ -981,7 +1024,7 @@ async fn send_forward(
                 dest.is_public,
                 dest.mode,
                 Vec::new(),
-                Vec::new(),
+                OutgoingHashtags::default(),
                 Vec::new(),
                 None,
             )
@@ -1012,13 +1055,6 @@ async fn send_share_contact_to_target(
     dest: ResolvedTarget,
     content_json: &str,
 ) -> anyhow::Result<()> {
-    api.join_chat(
-        dest.clan_id,
-        dest.channel_id,
-        dest.channel_type,
-        dest.is_public,
-    )
-    .await?;
     let flags = OutgoingMessageFlags {
         anonymous_message: false,
         message_code: SHARE_CONTACT_CODE,
@@ -1110,6 +1146,7 @@ impl MessagesStore {
         self.commands_in_flight.clear();
         self.consumed_command_replies.clear();
         self.anonymous_clans.clear();
+        self.own_anonymous_persona = None;
         self.topic_anonymous_mode = false;
         self.sync_anonymous_mode(cx);
         self.last_typing_sent = None;
@@ -1141,6 +1178,8 @@ impl MessagesStore {
         });
 
         let conn_watch = Self::spawn_connection_watch(api.clone(), cx);
+        let cdn_access_sub = crate::CdnAccess::try_global(cx)
+            .map(|access| cx.observe(&access, |this, _, cx| this.refresh_private_source_media(cx)));
 
         Self {
             cache: KeyedCache::new(Some(MAX_CACHED_CHANNELS)),
@@ -1181,6 +1220,7 @@ impl MessagesStore {
             api,
             _channel_sub: channel_sub,
             _conn_watch: conn_watch,
+            _cdn_access_sub: cdn_access_sub,
             pending_last_seen: HashMap::new(),
             _last_seen_timer: None,
             last_seen_fingerprint: HashMap::new(),
@@ -1205,6 +1245,7 @@ impl MessagesStore {
             commands_in_flight: HashMap::new(),
             consumed_command_replies: HashSet::new(),
             anonymous_clans: HashSet::new(),
+            own_anonymous_persona: None,
             topic_anonymous_mode: false,
             last_anonymous_mode: (false, false),
             last_typing_sent: None,
@@ -1491,6 +1532,14 @@ impl MessagesStore {
         self.last_read_message_by_channel.remove(&channel_id);
     }
 
+    pub fn has_read_message(&self, channel_id: ChannelId, message_id: MessageId) -> bool {
+        !message_id.is_zero()
+            && self
+                .last_read_message_by_channel
+                .get(&channel_id)
+                .is_some_and(|read| message_id <= *read)
+    }
+
     /// Schedule a last-seen write when the viewport tail is visible (cf. React
     /// `useChannelSeen` + `updateLastSeenMessage`).
     pub fn note_viewport_seen(
@@ -1542,7 +1591,7 @@ impl MessagesStore {
             mode: self.mode,
             badge_count,
         };
-        if live_badge > 0 || self.channel_is_unread(channel_id, clan_id, cx) {
+        if self.channel_is_unread(channel_id, clan_id, cx) {
             self.apply_local_last_seen(&pending, cx);
         } else {
             self.set_last_read_message(channel_id, message_id);
@@ -1671,6 +1720,95 @@ impl MessagesStore {
         self.set_pending_last_seen(pending, cx);
     }
 
+    pub fn note_reopened_seen(&mut self, cx: &mut Context<Self>) {
+        let (Some(channel_id), Some(clan_id)) = (self.active_channel_id, self.active_clan_id)
+        else {
+            return;
+        };
+        let live_badge = self.channel_badge_count(channel_id, clan_id, cx);
+        if live_badge == 0 && !self.channel_is_unread(channel_id, clan_id, cx) {
+            return;
+        }
+        let Some((message_id, create_time)) = self.newest_known_message(channel_id, clan_id, cx)
+        else {
+            return;
+        };
+        if !should_write_last_seen(
+            self.known_last_seen_id(channel_id, cx),
+            self.last_message_by_channel.get(&channel_id).copied(),
+            message_id,
+        ) {
+            return;
+        }
+        tracing::debug!(
+            target: "badge_flow",
+            clan = clan_id.get(),
+            channel = channel_id.get(),
+            message = message_id.get(),
+            badge_count = live_badge,
+            "reopened at a saved scroll position — marking the channel read"
+        );
+        let pending = PendingLastSeen {
+            clan_id,
+            channel_id,
+            message_id,
+            create_time,
+            mode: self.mode,
+            badge_count: live_badge,
+        };
+        self.apply_local_last_seen(&pending, cx);
+        self.set_pending_last_seen(pending, cx);
+    }
+
+    fn newest_known_message(
+        &self,
+        channel_id: ChannelId,
+        clan_id: ClanId,
+        cx: &App,
+    ) -> Option<(MessageId, i64)> {
+        let buffered = self.cache.get(&channel_id).and_then(|channel| {
+            channel
+                .messages
+                .as_slice()
+                .iter()
+                .rev()
+                .find(|m| !m.id.is_optimistic())
+                .map(|m| (m.id, m.create_time))
+        });
+        if !self.tail_detached(channel_id) {
+            return buffered;
+        }
+        let Some(tail) = self
+            .last_message_by_channel
+            .get(&channel_id)
+            .copied()
+            .filter(|id| !id.is_zero() && !id.is_optimistic())
+        else {
+            return buffered;
+        };
+        let buffered_time = buffered.map_or(0, |(_, time)| time);
+        let tail_time = self
+            .channel_last_sent_timestamp(channel_id, clan_id, cx)
+            .max(buffered_time);
+        Some((tail, tail_time))
+    }
+
+    fn channel_last_sent_timestamp(&self, channel_id: ChannelId, clan_id: ClanId, cx: &App) -> i64 {
+        if self.is_dm {
+            DirectMessageStore::try_global(cx)
+                .and_then(|dm| dm.read(cx).find(channel_id).map(|c| c.last_sent_timestamp))
+                .unwrap_or(0)
+        } else {
+            ChannelList::try_global(cx)
+                .and_then(|cl| {
+                    cl.read(cx)
+                        .channel(clan_id, channel_id)
+                        .map(|c| c.last_sent_timestamp)
+                })
+                .unwrap_or(0)
+        }
+    }
+
     fn channel_is_unread(&self, channel_id: ChannelId, clan_id: ClanId, cx: &App) -> bool {
         if self.is_dm {
             DirectMessageStore::try_global(cx).is_some_and(|dm| {
@@ -1679,11 +1817,9 @@ impl MessagesStore {
                 })
             })
         } else {
-            ChannelList::try_global(cx).is_some_and(|cl| {
-                cl.read(cx)
-                    .channel(clan_id, channel_id)
-                    .is_some_and(|c| c.is_unread())
-            })
+            ChannelList::try_global(cx)
+                .and_then(|cl| cl.read(cx).own_unread(clan_id, channel_id))
+                .is_some_and(|(_, unread)| unread)
         }
     }
 
@@ -1728,13 +1864,24 @@ impl MessagesStore {
         if self.api.connection_status() != ConnectionStatus::Connected {
             return;
         }
-        let queue = std::mem::take(&mut self.queued_last_seen);
+        let queue = last_seen_retries(
+            std::mem::take(&mut self.queued_last_seen),
+            &self.last_read_message_by_channel,
+        );
         for pending in queue {
             self.send_last_seen(pending, cx);
         }
     }
 
     fn send_last_seen(&mut self, pending: PendingLastSeen, cx: &mut Context<Self>) {
+        if pending.message_id.get() <= 0 {
+            tracing::debug!(
+                target: "badge_flow",
+                channel = pending.channel_id.get(),
+                "send_last_seen skipped: the server rejects a last seen without a message id"
+            );
+            return;
+        }
         let fingerprint = format!(
             "{}|{}|{}|{}|{}",
             pending.clan_id.get(),
@@ -1797,6 +1944,11 @@ impl MessagesStore {
                     message_id,
                     "write_last_seen_message failed: {e}"
                 );
+                if e.downcast_ref::<mezon_client::RealtimeControlError>()
+                    .is_some_and(mezon_client::RealtimeControlError::is_forbidden)
+                {
+                    return;
+                }
                 this.update(cx, |this, _| {
                     if this.reset_generation != generation {
                         return;
@@ -1851,6 +2003,10 @@ impl MessagesStore {
         self.tail_detached(channel_id)
     }
 
+    pub fn is_reading_live_tail(&self, channel_id: ChannelId) -> bool {
+        !self.is_viewing_older(channel_id) && !self.tail_detached(channel_id)
+    }
+
     fn tail_detached(&self, channel_id: ChannelId) -> bool {
         let Some(channel) = self.cache.get(&channel_id) else {
             return false;
@@ -1883,6 +2039,11 @@ impl MessagesStore {
 
     pub fn active_clan_id(&self) -> Option<ClanId> {
         self.active_clan_id
+    }
+
+    #[cfg(test)]
+    pub(crate) fn seed_active_clan_for_test(&mut self, clan_id: ClanId) {
+        self.active_clan_id = Some(clan_id);
     }
 
     pub fn active_topic_id(&self) -> Option<ChannelId> {
@@ -1985,6 +2146,7 @@ impl MessagesStore {
         let api = self.api.clone();
         let cfg = AppConfig::try_global(cx).cloned();
         let viewer_id = viewer_user_id(cx);
+        let emoji_generation = crate::emoji::emoji_sources_generation();
         cx.spawn(async move |this, cx| {
             if !backoff.is_zero() {
                 cx.background_executor().timer(backoff).await;
@@ -2014,7 +2176,7 @@ impl MessagesStore {
                 fetched = msgs.len(),
                 "load_more: page received"
             );
-            let parsed: Vec<Message> = cx
+            let mut parsed: Vec<Message> = cx
                 .background_executor()
                 .spawn(async move {
                     msgs.into_iter()
@@ -2023,6 +2185,7 @@ impl MessagesStore {
                 })
                 .await;
             let _ = this.update(cx, |this, cx| {
+                settle_parsed_messages(&mut parsed, emoji_generation, cx);
                 let (prepended, dropped_bottom) = {
                     let Some(channel) = this.cache.get_mut(&channel_id) else {
                         this.finish_loading_more(cx);
@@ -2114,6 +2277,7 @@ impl MessagesStore {
         let api = self.api.clone();
         let cfg = AppConfig::try_global(cx).cloned();
         let viewer_id = viewer_user_id(cx);
+        let emoji_generation = crate::emoji::emoji_sources_generation();
         cx.spawn(async move |this, cx| {
             let result = api
                 .list_channel_messages(
@@ -2145,7 +2309,7 @@ impl MessagesStore {
                 raw_max = msgs.iter().map(|m| m.message_id).max().unwrap_or(0),
                 "load_more_bottom: page received (raw server ids)"
             );
-            let parsed: Vec<Message> = cx
+            let mut parsed: Vec<Message> = cx
                 .background_executor()
                 .spawn(async move {
                     msgs.into_iter()
@@ -2154,6 +2318,7 @@ impl MessagesStore {
                 })
                 .await;
             let _ = this.update(cx, |this, cx| {
+                settle_parsed_messages(&mut parsed, emoji_generation, cx);
                 let (added, dropped) = {
                     let Some(channel) = this.cache.get_mut(&channel_id) else {
                         this.finish_loading_more(cx);
@@ -2314,6 +2479,7 @@ impl MessagesStore {
         let api = self.api.clone();
         let cfg = AppConfig::try_global(cx).cloned();
         let viewer_id = viewer_user_id(cx);
+        let emoji_generation = crate::emoji::emoji_sources_generation();
         cx.spawn(async move |this, cx| {
             let result = api
                 .list_channel_messages(
@@ -2335,7 +2501,7 @@ impl MessagesStore {
                     return;
                 }
             };
-            let parsed: Vec<Message> = cx
+            let mut parsed: Vec<Message> = cx
                 .background_executor()
                 .spawn(async move {
                     msgs.into_iter()
@@ -2344,6 +2510,7 @@ impl MessagesStore {
                 })
                 .await;
             let _ = this.update(cx, |this, cx| {
+                settle_parsed_messages(&mut parsed, emoji_generation, cx);
                 let mut window: Vec<Message> = parsed;
                 sort_messages(&mut window);
                 if window.len() > MAX_MESSAGES_PER_CHANNEL {
@@ -2404,29 +2571,42 @@ impl MessagesStore {
     }
 
     pub fn set_reply_to(&mut self, target: MessageRef, cx: &mut Context<Self>) {
-        let Some(draft) = self.reply_draft_for(target) else {
+        let Some(draft) = self.reply_draft_for_with_config(target, AppConfig::try_global(cx))
+        else {
             return;
         };
         self.set_reply(draft, cx);
     }
 
     pub fn reply_draft_for(&self, target: MessageRef) -> Option<ReplyDraft> {
+        self.reply_draft_for_with_config(target, None)
+    }
+
+    pub fn reply_draft_for_with_config(
+        &self,
+        target: MessageRef,
+        cfg: Option<&AppConfig>,
+    ) -> Option<ReplyDraft> {
         let message_id = target.id;
         let storage_id = self.bucket_of(target);
         self.cache
             .get(&storage_id)
             .and_then(|c| c.messages.get_by_id(message_id))
-            .map(|msg| ReplyDraft {
-                message_ref_id: msg.id,
-                sender_id: msg.sender_user_id.unwrap_or_default(),
-                sender_name: msg.sender_name.to_string(),
-                sender_avatar: msg.avatar_url.to_string(),
-                content_preview: msg.content.clone(),
-                content_raw: reply_reference_content(msg),
-                preview_spans: crate::message::reply_preview_spans(&msg.spans),
-                has_attachment: !msg.attachments.is_empty(),
-                has_embed: msg.content.is_empty() && !msg.embeds.is_empty(),
-                is_poll: msg.poll.is_some(),
+            .map(|msg| {
+                let mut preview_spans = crate::message::reply_preview_spans(&msg.spans);
+                crate::message::fill_reply_emoji_sources(&mut preview_spans, cfg);
+                ReplyDraft {
+                    message_ref_id: msg.id,
+                    sender_id: msg.sender_user_id.unwrap_or_default(),
+                    sender_name: msg.sender_name.to_string(),
+                    sender_avatar: msg.avatar_url.to_string(),
+                    content_preview: msg.content.clone(),
+                    content_raw: reply_reference_content(msg),
+                    preview_spans,
+                    has_attachment: !msg.attachments.is_empty(),
+                    has_embed: msg.content.is_empty() && !msg.embeds.is_empty(),
+                    is_poll: msg.poll.is_some(),
+                }
             })
     }
 
@@ -2462,7 +2642,7 @@ impl MessagesStore {
     }
 
     pub fn topic_anonymous_mode(&self) -> bool {
-        self.topic_anonymous_mode
+        self.active_topic_id.is_some() && self.topic_anonymous_mode
     }
 
     pub fn is_anonymous_mode(&self) -> bool {
@@ -2470,8 +2650,15 @@ impl MessagesStore {
             .is_some_and(|id| !id.is_zero() && self.anonymous_clans.contains(&id))
     }
 
+    fn current_anonymous_persona(&self) -> Option<AnonymousPersona> {
+        self.own_anonymous_persona
+            .as_ref()
+            .filter(|persona| persona.still_current(unix_now_seconds()))
+            .cloned()
+    }
+
     pub(crate) fn sync_anonymous_mode(&mut self, cx: &mut Context<Self>) {
-        let next = (self.is_anonymous_mode(), self.topic_anonymous_mode);
+        let next = (self.is_anonymous_mode(), self.topic_anonymous_mode());
         if self.last_anonymous_mode == next {
             return;
         }
@@ -2479,8 +2666,8 @@ impl MessagesStore {
         cx.emit(MessagesEvent::AnonymousModeChanged);
     }
 
-    pub fn toggle_anonymous_mode(&mut self, cx: &mut Context<Self>) {
-        if self.active_topic_id.is_some() {
+    pub fn toggle_anonymous_mode(&mut self, in_topic: bool, cx: &mut Context<Self>) {
+        if in_topic && self.active_topic_id.is_some() {
             self.topic_anonymous_mode = !self.topic_anonymous_mode;
             self.sync_anonymous_mode(cx);
             cx.notify();
@@ -2582,16 +2769,35 @@ impl MessagesStore {
             .cache
             .get(&storage_id)
             .and_then(|channel| channel.messages.get_by_id(message_id))
-            .map(|msg| (!msg.attachments.is_empty(), msg.create_time.max(0) as u32));
-        let (spans, transport_mentions, transport_hashtags, transport_emojis, raw_content) =
-            edit_content_spans(&content, content_tokens);
+            .map(|msg| {
+                (
+                    !msg.attachments.is_empty(),
+                    msg.create_time.max(0) as u32,
+                    if msg.code == MessageCode::MessageBuzz {
+                        MESSAGE_BUZZ_CODE
+                    } else {
+                        0
+                    },
+                )
+            });
+        let message_code = edit_meta.map_or(0, |(_, _, message_code)| message_code);
+        let (spans, transport_mentions, _transport_hashtags, _transport_emojis, raw_content) =
+            edit_content_spans(&content, content_tokens, message_code, |tokens| {
+                channel_link_metas(&content, tokens, cx)
+            });
         let Some(channel) = self.cache.get_mut(&storage_id) else {
             return;
         };
         if !channel.messages.contains_id(message_id) {
             return;
         }
-        patch_reply_previews_after_update(&mut channel.messages, message_id, &content, &spans);
+        patch_reply_previews_after_update(
+            &mut channel.messages,
+            message_id,
+            &content,
+            &spans,
+            AppConfig::try_global(cx),
+        );
         let Some(msg) = channel.messages.get_mut_by_id(message_id) else {
             return;
         };
@@ -2615,19 +2821,18 @@ impl MessagesStore {
                 (storage_id.get(), 0, false)
             };
         let create_time_seconds = edit_meta
-            .filter(|(has_attachments, _)| *has_attachments)
-            .map(|(_, ts)| ts)
+            .filter(|(has_attachments, _, _)| *has_attachments)
+            .map(|(_, ts, _)| ts)
             .unwrap_or(0);
+        let content_json = with_create_time_seconds(raw_content, create_time_seconds);
         cx.spawn(async move |_this, _cx| {
             if let Err(e) = api
-                .update_channel_message(
+                .update_channel_message_content(
                     clan_id,
                     api_channel_id,
                     message_num,
-                    &content,
+                    content_json,
                     transport_mentions,
-                    transport_hashtags,
-                    transport_emojis,
                     mode,
                     is_public,
                     api_topic_id,
@@ -2909,6 +3114,11 @@ impl MessagesStore {
         }
         self.apply_message_remove(storage_id, message_id, cx);
         let anonymous = is_anonymous_sender_id(&failed.sender_id, cx);
+        let message_code = if failed.code == MessageCode::MessageBuzz {
+            MESSAGE_BUZZ_CODE
+        } else {
+            0
+        };
         self.send_message_with_payload(
             content,
             failed.sender_id.clone(),
@@ -2918,7 +3128,7 @@ impl MessagesStore {
             None,
             None,
             anonymous,
-            0,
+            message_code,
             cx,
         );
     }
@@ -3186,7 +3396,9 @@ impl MessagesStore {
             .as_deref()
             .filter(|raw| !raw.is_empty())
             .map(str::to_string)
-            .unwrap_or_else(|| build_send_content(&msg.content, &[], &[], &[]).json);
+            .unwrap_or_else(|| {
+                build_send_content(&msg.content, &[], &OutgoingHashtags::default(), &[]).json
+            });
         let mentions: Vec<mezon_proto::api::MessageMention> = msg
             .mention_targets
             .iter()
@@ -3635,6 +3847,7 @@ impl MessagesStore {
         {
             self.retained_topic = None;
         }
+        self.topic_anonymous_mode = false;
         self.active_topic_id = next;
         self.active_topic_parent = None;
         self.pending_topic_jump = None;
@@ -3935,6 +4148,7 @@ impl MessagesStore {
         let api = self.api.clone();
         let cfg = AppConfig::try_global(cx).cloned();
         let viewer_id = viewer_user_id(cx);
+        let emoji_generation = crate::emoji::emoji_sources_generation();
         cx.spawn(async move |this, cx| {
             if !backoff.is_zero() {
                 cx.background_executor().timer(backoff).await;
@@ -3961,11 +4175,12 @@ impl MessagesStore {
                 }
             };
             let batch_len = msgs.len();
-            let parsed: Vec<Message> = cx
+            let mut parsed: Vec<Message> = cx
                 .background_executor()
                 .spawn(async move { prepare_messages(msgs, cfg.as_ref(), viewer_id) })
                 .await;
             let _ = this.update(cx, |this, cx| {
+                settle_parsed_messages(&mut parsed, emoji_generation, cx);
                 this.topic_loading_more = false;
                 if this.active_topic_id != Some(topic_key) {
                     cx.notify();
@@ -4047,6 +4262,7 @@ impl MessagesStore {
         let api = self.api.clone();
         let cfg = AppConfig::try_global(cx).cloned();
         let viewer_id = viewer_user_id(cx);
+        let emoji_generation = crate::emoji::emoji_sources_generation();
         cx.spawn(async move |this, cx| {
             let result = api
                 .list_topic_messages(
@@ -4073,11 +4289,12 @@ impl MessagesStore {
                 }
             };
             let batch_len = msgs.len();
-            let parsed: Vec<Message> = cx
+            let mut parsed: Vec<Message> = cx
                 .background_executor()
                 .spawn(async move { prepare_messages(msgs, cfg.as_ref(), viewer_id) })
                 .await;
             let _ = this.update(cx, |this, cx| {
+                settle_parsed_messages(&mut parsed, emoji_generation, cx);
                 this.topic_loading_more = false;
                 if this.active_topic_id != Some(topic_key) {
                     cx.notify();
@@ -4150,7 +4367,10 @@ impl MessagesStore {
         let cfg = AppConfig::try_global(cx);
         let viewer_id = viewer_user_id(cx);
         let mut msg = message_from_api(api_msg, cfg, viewer_id);
-        let masked = anonymous && anonymize_sender(&mut msg, cfg);
+        let persona = anonymous
+            .then(|| self.current_anonymous_persona())
+            .flatten();
+        let masked = anonymous && anonymize_sender(&mut msg, cfg, persona.as_ref());
         enrich_sparse_topic_ack(&mut msg, viewer_id, self.active_clan_id, masked, cx);
         mark_pending_attachments_uploading(&mut msg.attachments);
         apply_local_sources(&mut msg.attachments, &local_sources);
@@ -4171,6 +4391,9 @@ impl MessagesStore {
                     let mut changed = false;
                     if let Some(existing) = channel.messages.get_mut_by_id(msg.id) {
                         changed = apply_local_sources(&mut existing.attachments, &local_sources);
+                        if masked {
+                            remember_anonymous_persona(&mut self.own_anonymous_persona, existing);
+                        }
                     }
                     if changed {
                         // The topic list renders from a clone it only refreshes on
@@ -4247,21 +4470,22 @@ impl MessagesStore {
     /// the copies land in order (React awaits each `forwardToSingleDestination`).
     /// The note rides along after the last message of each destination.
     ///
-    /// Returns `false` when nothing was started — the caller must not enter a
-    /// "sending" state it would never be released from, since `ForwardProgress`
-    /// / `ForwardFinished` are only emitted for a send that actually began.
+    /// Returns [`ForwardStart::NotStarted`] or [`ForwardStart::PayloadTooLarge`]
+    /// when nothing was started — the caller must not enter a "sending" state it
+    /// would never be released from, since `ForwardProgress` / `ForwardFinished`
+    /// are only emitted for a send that actually began.
     pub fn forward(
         &mut self,
         messages: Vec<MessageRef>,
         targets: Vec<ForwardTarget>,
         note: Option<String>,
         cx: &mut Context<Self>,
-    ) -> bool {
+    ) -> ForwardStart {
         if messages.is_empty() || targets.is_empty() || self.forward_in_flight {
-            return false;
+            return ForwardStart::NotStarted;
         }
         let Some(source_channel_id) = self.active_channel_id else {
-            return false;
+            return ForwardStart::NotStarted;
         };
         let sources: Vec<ForwardSource> = messages
             .iter()
@@ -4269,14 +4493,24 @@ impl MessagesStore {
             .map(forward_source)
             .collect();
         if sources.is_empty() {
-            return false;
+            return ForwardStart::NotStarted;
         }
+        if sources.iter().any(|source| {
+            mezon_client::transport::forward_blocked_for_realtime(
+                &source.content_raw,
+                &source.text,
+                &source.attachments,
+                &source.mentions,
+            )
+        }) {
+            return ForwardStart::PayloadTooLarge;
+        }
+        let api = self.api.clone();
         let note = note
             .map(|n| n.trim().to_string())
             .filter(|n| !n.is_empty() && n.chars().count() <= MAX_FORWARD_MESSAGE_LENGTH);
-
-        let api = self.api.clone();
         let total = targets.len();
+        start_target_clan_joins(&targets, cx);
         self.forward_in_flight = true;
         let task = cx.spawn(async move |this, cx| {
             let mut failed: Vec<SharedString> = Vec::new();
@@ -4310,7 +4544,7 @@ impl MessagesStore {
             });
         });
         self.forward_task = Some(task);
-        true
+        ForwardStart::Started
     }
 
     /// Re-run the presign gate so attachments whose upload never completed are
@@ -4367,6 +4601,54 @@ impl MessagesStore {
         } else {
             self.emit_upload_row_updates(rows, cx);
         }
+    }
+
+    pub(crate) fn refresh_emoji_sources(
+        &mut self,
+        emoji_ids: &HashSet<String>,
+        cx: &mut Context<Self>,
+    ) {
+        let config = AppConfig::try_global(cx).cloned();
+        let shown = self.probe_buckets();
+        let mut touched = Vec::new();
+        for (bucket, channel) in self.cache.iter_mut() {
+            let is_shown = shown.contains(bucket);
+            for message in channel.messages.items.iter_mut() {
+                if refill_emoji_sources(message, Some(emoji_ids), config.as_ref()) && is_shown {
+                    touched.push(message.id);
+                }
+            }
+        }
+        if touched.is_empty() {
+            return;
+        }
+        for message_id in touched {
+            cx.emit(MessagesEvent::Updated {
+                message_id: Some(message_id),
+            });
+        }
+        cx.notify();
+    }
+
+    fn refresh_private_source_media(&mut self, cx: &mut Context<Self>) {
+        let config = AppConfig::try_global(cx).cloned();
+        let mut touched = Vec::new();
+        for channel in self.cache.values_mut() {
+            for message in channel.messages.items.iter_mut() {
+                if remark_private_source_media(message, config.as_ref()) {
+                    touched.push(message.id);
+                }
+            }
+        }
+        if touched.is_empty() {
+            return;
+        }
+        for message_id in touched {
+            cx.emit(MessagesEvent::Updated {
+                message_id: Some(message_id),
+            });
+        }
+        cx.notify();
     }
 
     /// Buckets a probe may look at: whatever the user is actually looking at.
@@ -4509,10 +4791,19 @@ impl MessagesStore {
             let probes = due.into_iter().enumerate().map(|(index, url)| {
                 let nonce = unix_now_seconds() as u64 ^ ((index as u64) << 32);
                 async move {
-                    let exists = mezon_client::transport_runtime::object_exists(
+                    let mut exists = mezon_client::transport_runtime::object_exists(
                         &presign_probe_url(&url, nonce),
                     )
                     .await;
+                    if !exists
+                        && let Some(playlist) =
+                            mezon_client::video_source::master_playlist_url(&url)
+                    {
+                        exists = mezon_client::transport_runtime::object_exists(
+                            &presign_probe_url(&playlist, nonce),
+                        )
+                        .await;
+                    }
                     tracing::debug!(url = %url, exists, "presign probe");
                     exists.then_some(url)
                 }
@@ -4568,6 +4859,7 @@ impl MessagesStore {
             &contact.avatar,
         );
         let api = self.api.clone();
+        start_target_clan_joins(&targets, cx);
         cx.spawn(async move |this, cx| {
             let mut failed = Vec::new();
             let total = targets.len();
@@ -4902,10 +5194,14 @@ impl MessagesStore {
             .into_iter()
             .map(OutgoingMention::into_transport)
             .collect();
-        let transport_hashtags: Vec<TransportHashtag> = hashtags
-            .into_iter()
-            .map(OutgoingHashtag::into_transport)
-            .collect();
+        let transport_hashtags = outgoing_hashtags(
+            &content,
+            hashtags
+                .into_iter()
+                .map(OutgoingHashtag::into_transport)
+                .collect(),
+            cx,
+        );
         let transport_emojis: Vec<TransportEmoji> = emojis
             .into_iter()
             .map(OutgoingEmoji::into_transport)
@@ -4938,7 +5234,8 @@ impl MessagesStore {
         let clan_num = clan_id.get();
         let channel_num = channel_id.get();
         cx.spawn(async move |_this, _cx| {
-            let proto_attachments = match upload_attachments_now(&api, attachments).await {
+            let uploaded = upload_attachments_now(&api, attachments, channel_num).await;
+            let proto_attachments = match uploaded {
                 Ok(attachments) => attachments,
                 Err(e) => {
                     tracing::error!("send_ephemeral_message attachments failed: {e}");
@@ -5054,10 +5351,14 @@ impl MessagesStore {
             .into_iter()
             .map(OutgoingMention::into_transport)
             .collect();
-        let transport_hashtags: Vec<TransportHashtag> = hashtags
-            .into_iter()
-            .map(OutgoingHashtag::into_transport)
-            .collect();
+        let transport_hashtags = outgoing_hashtags(
+            &content,
+            hashtags
+                .into_iter()
+                .map(OutgoingHashtag::into_transport)
+                .collect(),
+            cx,
+        );
         let transport_emojis: Vec<TransportEmoji> = emojis
             .into_iter()
             .map(OutgoingEmoji::into_transport)
@@ -5097,7 +5398,8 @@ impl MessagesStore {
         let clan_num = clan_id.get();
         let channel_num = channel_id.get();
         cx.spawn(async move |this, cx| {
-            let proto_attachments = match upload_attachments_now(&api, attachments).await {
+            let uploaded = upload_attachments_now(&api, attachments, channel_num).await;
+            let proto_attachments = match uploaded {
                 Ok(attachments) => attachments,
                 Err(e) => {
                     tracing::error!("send_message_to_bot attachments failed: {e}");
@@ -5651,19 +5953,24 @@ impl MessagesStore {
             .into_iter()
             .map(OutgoingMention::into_transport)
             .collect();
-        let transport_hashtags: Vec<TransportHashtag> = hashtags
-            .into_iter()
-            .map(OutgoingHashtag::into_transport)
-            .collect();
+        let transport_hashtags = outgoing_hashtags(
+            &content,
+            hashtags
+                .into_iter()
+                .map(OutgoingHashtag::into_transport)
+                .collect(),
+            cx,
+        );
         let transport_emojis: Vec<TransportEmoji> = emojis
             .into_iter()
             .map(OutgoingEmoji::into_transport)
             .collect();
-        let sent = build_send_content(
+        let sent = build_send_content_with_code(
             &content,
             &transport_mentions,
             &transport_hashtags,
             &transport_emojis,
+            message_code,
         );
         let (display_name, avatar_url, avatar_proxied) =
             outgoing_sender_profile(&sender_id, &sender_name, clan_id, cx);
@@ -5746,8 +6053,15 @@ impl MessagesStore {
                 .with_attachments(optimistic_attachments)
                 .with_media_presentation(album_layout, viewer_media);
         }
+        let anonymous_persona = anonymous
+            .then(|| self.current_anonymous_persona())
+            .flatten();
         if anonymous {
-            let _ = anonymize_sender(&mut optimistic, AppConfig::try_global(cx));
+            let _ = anonymize_sender(
+                &mut optimistic,
+                AppConfig::try_global(cx),
+                anonymous_persona.as_ref(),
+            );
         }
         if message_code == MESSAGE_BUZZ_CODE {
             optimistic.code = MessageCode::MessageBuzz;
@@ -5801,7 +6115,7 @@ impl MessagesStore {
             if has_attachments {
                 let files: Vec<UploadFile> = attachments
                     .into_iter()
-                    .map(OutgoingAttachment::into_upload)
+                    .map(|attachment| attachment.into_upload(channel_id.get()))
                     .collect();
                 let presigned = match api.presign_files(files).await {
                     Ok(presigned) => presigned,
@@ -5838,6 +6152,7 @@ impl MessagesStore {
                             hashtags: transport_hashtags,
                             emojis: transport_emojis,
                             flags: send_flags,
+                            persona: anonymous_persona,
                         },
                         cx,
                     )
@@ -5901,7 +6216,8 @@ impl MessagesStore {
                     is_public,
                     content: content.clone(),
                     mentions: update_mentions,
-                    hashtags: update_hashtags,
+                    hashtags: update_hashtags.tokens,
+                    hashtag_channels: update_hashtags.channels,
                     emojis: update_emojis,
                     create_time_seconds,
                     started_at: now_unix_seconds(),
@@ -5951,8 +6267,11 @@ impl MessagesStore {
                                     viewer_user_id(cx),
                                 );
                                 if anonymous {
-                                    let _ =
-                                        anonymize_sender(&mut confirmed, AppConfig::try_global(cx));
+                                    let _ = anonymize_sender(
+                                        &mut confirmed,
+                                        AppConfig::try_global(cx),
+                                        anonymous_persona.as_ref(),
+                                    );
                                 }
                                 let create_time = confirmed.create_time;
                                 let message_id = confirmed.id;
@@ -6013,7 +6332,10 @@ impl MessagesStore {
         reply_to: MessageId,
         cx: &mut Context<Self>,
     ) {
-        let reply = self.reply_draft_for(MessageRef::unbucketed(reply_to));
+        let reply = self.reply_draft_for_with_config(
+            MessageRef::unbucketed(reply_to),
+            AppConfig::try_global(cx),
+        );
         self.send_url_attachment(
             url,
             filename,
@@ -6214,8 +6536,15 @@ impl MessagesStore {
         if let Some(reference) = reply_reference {
             optimistic = optimistic.with_references(vec![reference]);
         }
+        let anonymous_persona = anonymous
+            .then(|| self.current_anonymous_persona())
+            .flatten();
         if anonymous {
-            let _ = anonymize_sender(&mut optimistic, AppConfig::try_global(cx));
+            let _ = anonymize_sender(
+                &mut optimistic,
+                AppConfig::try_global(cx),
+                anonymous_persona.as_ref(),
+            );
         }
         let appended = self.append_optimistic(channel_id, optimistic);
         if let Some(old_len) = appended {
@@ -6255,7 +6584,11 @@ impl MessagesStore {
                                 viewer_user_id(cx),
                             );
                             if anonymous {
-                                let _ = anonymize_sender(&mut confirmed, AppConfig::try_global(cx));
+                                let _ = anonymize_sender(
+                                    &mut confirmed,
+                                    AppConfig::try_global(cx),
+                                    anonymous_persona.as_ref(),
+                                );
                             }
                             let create_time = confirmed.create_time;
                             let message_id = confirmed.id;
@@ -6465,6 +6798,13 @@ impl MessagesStore {
         if self.pending_jump.is_some_and(|(pc, _, _)| pc != channel_id) {
             self.pending_jump = None;
         }
+        if let Some(previous) = self
+            .active_channel_id
+            .filter(|previous| *previous != channel_id)
+            && !self.tail_detached(previous)
+        {
+            self.viewing_older_by_channel.remove(&previous);
+        }
         self.active_channel_id = Some(channel_id);
         self.active_clan_id = Some(clan_id);
         self.is_public = is_public;
@@ -6530,20 +6870,13 @@ impl MessagesStore {
         is_public: bool,
         cx: &mut Context<Self>,
     ) {
-        let api = self.api.clone();
-        let clan_joined = (!clan_id.is_zero()).then(|| {
-            ChannelList::global(cx)
-                .update(cx, |channels, cx| channels.ensure_clan_joined(clan_id, cx))
+        let join = ChannelList::global(cx).update(cx, |channels, cx| {
+            channels.join_channel(clan_id, channel_id, join_type, is_public, cx)
         });
-        cx.spawn(async move |_this, _cx| {
-            if let Some(clan_joined) = clan_joined {
-                clan_joined.await;
-            }
-            if let Err(e) = api
-                .join_chat(clan_id.get(), channel_id.get(), join_type, is_public)
-                .await
-            {
+        cx.spawn(async move |this, cx| {
+            if let Err(e) = join.await {
                 tracing::warn!("join_chat failed: {e}");
+                let _ = this.update(cx, |this, _| this.joined_channels.remove(&channel_id));
             }
         })
         .detach();
@@ -6785,6 +7118,13 @@ impl MessagesStore {
             return;
         };
         if channel.messages.contains_id(msg.id) {
+            if channel
+                .messages
+                .get_by_id(msg.id)
+                .is_some_and(is_own_anonymous_send)
+            {
+                remember_anonymous_persona(&mut self.own_anonymous_persona, &msg);
+            }
             if channel.messages.merge_existing(msg.id, msg) {
                 if is_active_topic {
                     cx.emit(MessagesEvent::TopicUpdated {
@@ -6811,6 +7151,9 @@ impl MessagesStore {
         {
             Some(idx) => {
                 let prior = channel.messages.items[idx].clone();
+                if prior.anonymous_sender {
+                    remember_anonymous_persona(&mut self.own_anonymous_persona, &msg);
+                }
                 let merged = merge_sparse_sender(&prior, msg);
                 channel.messages.replace_resort(idx, merged);
                 false
@@ -6885,6 +7228,7 @@ impl MessagesStore {
             message_id,
             &preview,
             &preview_spans,
+            AppConfig::try_global(cx),
         );
         if arms_expiry {
             self.schedule_presign_expiry(cx);
@@ -8366,6 +8710,34 @@ pub(crate) fn snowflake_seq(id: MessageId) -> i64 {
     id.get() >> SNOWFLAKE_TIME_SHIFT
 }
 
+fn last_seen_retries(
+    queue: Vec<PendingLastSeen>,
+    last_read: &HashMap<ChannelId, MessageId>,
+) -> Vec<PendingLastSeen> {
+    let mut newest: Vec<PendingLastSeen> = Vec::new();
+    for pending in queue {
+        let superseded = last_read
+            .get(&pending.channel_id)
+            .is_some_and(|read| snowflake_seq(pending.message_id) < snowflake_seq(*read));
+        if superseded {
+            continue;
+        }
+        match newest
+            .iter_mut()
+            .find(|queued| queued.channel_id == pending.channel_id)
+        {
+            Some(queued)
+                if snowflake_seq(pending.message_id) >= snowflake_seq(queued.message_id) =>
+            {
+                *queued = pending;
+            }
+            Some(_) => {}
+            None => newest.push(pending),
+        }
+    }
+    newest
+}
+
 fn should_write_last_seen(
     last_seen_id: Option<MessageId>,
     channel_tail: Option<MessageId>,
@@ -8380,7 +8752,7 @@ fn should_write_last_seen(
     channel_tail == Some(viewport_id)
 }
 
-fn channel_join_params(
+pub fn channel_join_params(
     channel_type: ChannelType,
     parent_id: Option<ChannelId>,
     private: bool,
@@ -8575,6 +8947,9 @@ fn merge_message_update(existing: &mut Message, incoming: &Message) {
                 att.upload_failed = prior_att.upload_failed;
             }
         }
+        if existing.is_forwarded {
+            mark_private_source_media(&mut new_attachments);
+        }
         existing.attachments = new_attachments;
     }
     let kept_prior_references = incoming.references.is_empty();
@@ -8613,8 +8988,10 @@ fn patch_reply_previews_after_update(
     updated_id: MessageId,
     new_content: &str,
     new_spans: &[MessageSpan],
+    cfg: Option<&AppConfig>,
 ) {
-    let preview_spans = crate::message::reply_preview_spans(new_spans);
+    let mut preview_spans = crate::message::reply_preview_spans(new_spans);
+    crate::message::fill_reply_emoji_sources(&mut preview_spans, cfg);
     for msg in messages.items.iter_mut() {
         for reference in msg.references.iter_mut() {
             if reference.message_ref_id == updated_id {
@@ -8969,7 +9346,7 @@ pub(crate) async fn run_upload_job(
             job.message_id,
             &job.content,
             job.mentions,
-            job.hashtags,
+            OutgoingHashtags::new(job.hashtags, job.hashtag_channels),
             job.emojis,
             job.create_time_seconds,
             presigned,
@@ -9042,9 +9419,10 @@ struct AnonymousAttachmentSend<'a> {
     keys: Vec<String>,
     reply_ref: Option<OutgoingReply>,
     mentions: Vec<TransportMention>,
-    hashtags: Vec<TransportHashtag>,
+    hashtags: OutgoingHashtags,
     emojis: Vec<TransportEmoji>,
     flags: OutgoingMessageFlags,
+    persona: Option<AnonymousPersona>,
 }
 
 async fn send_anonymous_attachment_message(
@@ -9068,6 +9446,7 @@ async fn send_anonymous_attachment_message(
         hashtags,
         emojis,
         flags,
+        persona,
     } = send;
     if let Err(e) = api.upload_presigned_all(presigned).await {
         tracing::error!("anonymous attachment upload failed: {e}");
@@ -9107,7 +9486,7 @@ async fn send_anonymous_attachment_message(
         .update(cx, |this, cx| {
             let mut confirmed =
                 message_from_api(sent, AppConfig::try_global(cx), viewer_user_id(cx));
-            let _ = anonymize_sender(&mut confirmed, AppConfig::try_global(cx));
+            let _ = anonymize_sender(&mut confirmed, AppConfig::try_global(cx), persona.as_ref());
             let create_time = confirmed.create_time;
             this.reconcile_temp(channel_id, temp_id, confirmed, cx);
             for key in keys {
@@ -9135,13 +9514,14 @@ async fn send_anonymous_attachment_message(
 pub(crate) async fn upload_attachments_now(
     api: &AppApi,
     attachments: Vec<OutgoingAttachment>,
+    channel_id: i64,
 ) -> anyhow::Result<Vec<mezon_proto::api::MessageAttachment>> {
     if attachments.is_empty() {
         return Ok(Vec::new());
     }
     let files: Vec<UploadFile> = attachments
         .into_iter()
-        .map(OutgoingAttachment::into_upload)
+        .map(|attachment| attachment.into_upload(channel_id))
         .collect();
     let presigned = api.presign_files(files).await?;
     let uploaded: Vec<mezon_proto::api::MessageAttachment> =
@@ -9161,7 +9541,54 @@ pub fn is_anonymous_user_id(user_id: UserId, cx: &App) -> bool {
         .is_some_and(|anonymous| anonymous == user_id.get())
 }
 
-fn anonymize_sender(msg: &mut Message, cfg: Option<&AppConfig>) -> bool {
+#[derive(Clone)]
+struct AnonymousPersona {
+    name: SharedString,
+    avatar_url: SharedString,
+    avatar_proxied: SharedString,
+    window: i64,
+}
+
+impl AnonymousPersona {
+    fn assigned_to(msg: &Message) -> Option<Self> {
+        (msg.anonymous_sender && !msg.avatar_url.is_empty() && msg.create_time > 0).then(|| Self {
+            name: msg.sender_name.clone(),
+            avatar_url: msg.avatar_url.clone(),
+            avatar_proxied: msg.avatar_proxied.clone(),
+            window: anonymous_persona_window(msg.create_time),
+        })
+    }
+
+    fn still_current(&self, now_seconds: i64) -> bool {
+        self.window == anonymous_persona_window(now_seconds)
+    }
+}
+
+fn anonymous_persona_window(unix_seconds: i64) -> i64 {
+    unix_seconds.div_euclid(ANONYMOUS_PERSONA_WINDOW_SECS)
+}
+
+fn is_own_anonymous_send(msg: &Message) -> bool {
+    msg.anonymous_sender && msg.row_anchor_id.is_optimistic()
+}
+
+fn remember_anonymous_persona(known: &mut Option<AnonymousPersona>, msg: &Message) {
+    let Some(persona) = AnonymousPersona::assigned_to(msg) else {
+        return;
+    };
+    if known
+        .as_ref()
+        .is_none_or(|current| current.window <= persona.window)
+    {
+        *known = Some(persona);
+    }
+}
+
+fn anonymize_sender(
+    msg: &mut Message,
+    cfg: Option<&AppConfig>,
+    persona: Option<&AnonymousPersona>,
+) -> bool {
     let Some(anonymous_user_id) = cfg
         .map(|c| c.anonymous_user_id.as_str())
         .filter(|id| !id.is_empty())
@@ -9170,9 +9597,19 @@ fn anonymize_sender(msg: &mut Message, cfg: Option<&AppConfig>) -> bool {
     };
     msg.sender_id = anonymous_user_id.to_string();
     msg.sender_user_id = anonymous_user_id.parse::<i64>().ok().map(UserId);
-    msg.sender_name = ANONYMOUS_SENDER_NAME.into();
-    msg.avatar_url = SharedString::default();
-    msg.avatar_proxied = SharedString::default();
+    match persona {
+        Some(persona) => {
+            msg.sender_name = persona.name.clone();
+            msg.avatar_url = persona.avatar_url.clone();
+            msg.avatar_proxied = persona.avatar_proxied.clone();
+        }
+        None => {
+            msg.sender_name = ANONYMOUS_SENDER_NAME.into();
+            msg.avatar_url = SharedString::default();
+            msg.avatar_proxied = SharedString::default();
+        }
+    }
+    msg.anonymous_sender = true;
     true
 }
 
@@ -9180,6 +9617,7 @@ fn merge_sparse_sender(prior: &Message, mut incoming: Message) -> Message {
     if incoming.sender_id.is_empty() || incoming.sender_id == "0" {
         incoming.sender_id = prior.sender_id.clone();
         incoming.sender_user_id = prior.sender_user_id;
+        incoming.anonymous_sender = prior.anonymous_sender;
     }
     if incoming.sender_name.is_empty() {
         incoming.sender_name = prior.sender_name.clone();
@@ -9498,6 +9936,9 @@ fn now_unix_seconds() -> i64 {
 }
 
 fn message_from_api(m: ApiMessage, cfg: Option<&AppConfig>, viewer_id: Option<UserId>) -> Message {
+    let anonymous_sender = cfg.is_some_and(|c| {
+        !c.anonymous_user_id.is_empty() && c.anonymous_user_id == m.sender_id.to_string()
+    });
     let avatar_proxied = cfg
         .map(|c| c.avatar_proxy(&m.avatar))
         .unwrap_or_else(|| m.avatar.clone());
@@ -9534,8 +9975,11 @@ fn message_from_api(m: ApiMessage, cfg: Option<&AppConfig>, viewer_id: Option<Us
         let base_img = cfg.map(|c| c.base_img_url.as_str()).unwrap_or_default();
         apply_presign_gate(&mut attachments, &keys, base_img, m.create_time);
     }
-    let (album_layout, viewer_media) = build_media_presentation(&attachments, cfg);
     let is_forwarded = m.content_tokens.fwd;
+    if is_forwarded {
+        mark_private_source_media(&mut attachments);
+    }
+    let (album_layout, viewer_media) = build_media_presentation(&attachments, cfg);
     let ogp = build_ogp_preview(&m.content_tokens, cfg);
     let code = MessageCode::from_raw(m.code);
     let poll = build_poll_data(&m.content_tokens, &m.content, cfg);
@@ -9593,6 +10037,7 @@ fn message_from_api(m: ApiMessage, cfg: Option<&AppConfig>, viewer_id: Option<Us
     .with_viewer_highlight(highlight)
     .with_avatar(m.avatar)
     .with_avatar_proxied(avatar_proxied)
+    .with_anonymous_sender(anonymous_sender)
     .with_attachments(attachments)
     .with_media_presentation(album_layout, viewer_media)
 }
@@ -9854,7 +10299,31 @@ type EditTransportTokens = (
     String,
 );
 
-fn edit_content_spans(content: &str, content_tokens: OutgoingContent) -> EditTransportTokens {
+pub(crate) fn outgoing_hashtags(
+    content: &str,
+    tokens: Vec<TransportHashtag>,
+    cx: &App,
+) -> OutgoingHashtags {
+    let channels = channel_link_metas(content, &tokens, cx);
+    OutgoingHashtags::new(tokens, channels)
+}
+
+fn channel_link_metas(
+    content: &str,
+    tokens: &[TransportHashtag],
+    cx: &App,
+) -> Vec<ChannelLinkMeta> {
+    crate::ChannelList::try_global(cx)
+        .map(|channels| channels.read(cx).channel_link_metas(content, tokens))
+        .unwrap_or_default()
+}
+
+fn edit_content_spans(
+    content: &str,
+    content_tokens: OutgoingContent,
+    message_code: i32,
+    link_metas: impl FnOnce(&[TransportHashtag]) -> Vec<ChannelLinkMeta>,
+) -> EditTransportTokens {
     let OutgoingContent {
         mentions,
         hashtags,
@@ -9872,17 +10341,19 @@ fn edit_content_spans(content: &str, content_tokens: OutgoingContent) -> EditTra
         .into_iter()
         .map(OutgoingEmoji::into_transport)
         .collect();
-    let markdowns = detect_markdown(content);
-    let tokens = ApiMessageContent {
-        t: content.to_string(),
-        mentions: mention_content_tokens(&transport_mentions),
-        hg: hashtag_content_tokens(&transport_hashtags),
-        ej: emoji_content_tokens(&transport_emojis),
-        mk: markdown_content_tokens(&markdowns),
-        ..Default::default()
-    };
+    let channels = link_metas(&transport_hashtags);
+    let transport_hashtags = OutgoingHashtags::new(transport_hashtags, channels);
+    let sent = build_send_content_with_code(
+        content,
+        &transport_mentions,
+        &transport_hashtags,
+        &transport_emojis,
+        message_code,
+    );
+    let transport_hashtags = transport_hashtags.tokens;
+    let raw_content = sent.json;
+    let tokens: ApiMessageContent = serde_json::from_str(&raw_content).unwrap_or_default();
     let spans = parse_spans(&tokens);
-    let raw_content = serde_json::to_string(&tokens).unwrap_or_default();
     (
         spans,
         transport_mentions,
@@ -10464,13 +10935,76 @@ fn parse_poll_markdown(text: &str) -> Option<ParsedPollMarkdown> {
     })
 }
 
+fn settle_parsed_messages(messages: &mut [Message], emoji_generation: u64, cx: &App) {
+    let config = AppConfig::try_global(cx);
+    let emoji_sources_moved = emoji_generation != crate::emoji::emoji_sources_generation();
+    for message in messages.iter_mut() {
+        remark_private_source_media(message, config);
+        if emoji_sources_moved {
+            refill_emoji_sources(message, None, config);
+        }
+    }
+}
+
+fn refill_emoji_sources(
+    message: &mut Message,
+    emoji_ids: Option<&HashSet<String>>,
+    cfg: Option<&AppConfig>,
+) -> bool {
+    let mut changed = false;
+    if crate::message::spans_use_any_emoji(&message.spans, emoji_ids) {
+        changed |= refill_span_sources(&mut message.spans, cfg, crate::message::fill_emoji_sources);
+    }
+    for reference in message.references.iter_mut() {
+        if crate::message::spans_use_any_emoji(&reference.preview_spans, emoji_ids) {
+            changed |= refill_span_sources(
+                &mut reference.preview_spans,
+                cfg,
+                crate::message::fill_reply_emoji_sources,
+            );
+        }
+    }
+    changed
+}
+
+fn refill_span_sources(
+    spans: &mut [MessageSpan],
+    cfg: Option<&AppConfig>,
+    fill: fn(&mut [MessageSpan], Option<&AppConfig>),
+) -> bool {
+    let before: Vec<SharedString> = crate::message::emoji_span_sources(spans).cloned().collect();
+    fill(spans, cfg);
+    !crate::message::emoji_span_sources(spans).eq(before.iter())
+}
+
+fn remark_private_source_media(message: &mut Message, cfg: Option<&AppConfig>) -> bool {
+    if !message.is_forwarded || !mark_private_source_media(&mut message.attachments) {
+        return false;
+    }
+    let (album_layout, viewer_media) = build_media_presentation(&message.attachments, cfg);
+    message.album_layout = album_layout;
+    message.viewer_media = viewer_media;
+    true
+}
+
+fn mark_private_source_media(attachments: &mut [MessageAttachment]) -> bool {
+    let mut changed = false;
+    for att in attachments.iter_mut().filter(|att| att.is_visual_media()) {
+        mezon_client::cdn_signature::check_access(&att.url);
+        let denied = mezon_client::cdn_signature::is_denied(&att.url);
+        changed |= att.source_denied != denied;
+        att.source_denied = denied;
+    }
+    changed
+}
+
 fn build_media_presentation(
     attachments: &[MessageAttachment],
     cfg: Option<&AppConfig>,
 ) -> (Option<AlbumLayout>, Arc<[ViewerMedia]>) {
     let images: Vec<&MessageAttachment> = attachments
         .iter()
-        .filter(|a| !a.is_unsupported_media() && !a.is_video() && a.is_image())
+        .filter(|a| !a.is_unsupported_media() && !a.is_video() && a.is_image() && !a.source_denied)
         .collect();
     if images.is_empty() {
         return (None, Vec::new().into());
@@ -10538,8 +11072,13 @@ fn message_reference_from_api(
     let content_preview = crate::message::reply_preview_line(&content).into();
     let preview_spans = parsed
         .as_ref()
-        .filter(|c| !c.hg.is_empty())
-        .map(|c| crate::message::reply_preview_spans(&parse_spans(c)))
+        .filter(|content| !content.hg.is_empty() || !content.ej.is_empty())
+        .map(|content| {
+            let spans = parse_spans(content);
+            let mut preview_spans = crate::message::reply_preview_spans(&spans);
+            crate::message::fill_reply_emoji_sources(&mut preview_spans, cfg);
+            preview_spans
+        })
         .unwrap_or_default();
     MessageReference {
         message_ref_id: MessageId(r.message_ref_id),
@@ -10585,7 +11124,7 @@ impl MessageAttachment {
         let height = a.height.max(0) as u32;
         let tenor_mp4 = crate::message::tenor_mp4_url(&a.url);
         let is_sticker = a.filetype == STICKER_FILETYPE && tenor_mp4.is_none();
-        let is_video = MessageAttachment::media_is_video(&a.filetype, &a.url);
+        let is_video = MessageAttachment::plays_as_video(&a.filetype, &a.filename, &a.url);
         let (proxied_src, display_width, display_height) = if is_sticker {
             cfg.map(|c| c.sticker_attachment_proxy(&a.url, width, height))
                 .unwrap_or_else(|| {
@@ -10638,6 +11177,7 @@ impl MessageAttachment {
             local_source: None,
             uploading: false,
             upload_failed: false,
+            source_denied: false,
         }
     }
 
@@ -10670,6 +11210,7 @@ impl MessageAttachment {
             local_source: is_image.then(|| att.path.clone()),
             uploading: true,
             upload_failed: false,
+            source_denied: false,
         }
     }
 }
@@ -11163,6 +11704,127 @@ mod tests {
                     "a second page must not start while one is in flight"
                 );
             });
+        });
+    }
+
+    #[gpui::test]
+    fn topic_viewport_seen_writes_the_topic_last_seen_not_the_parent(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        cx.update(|cx| {
+            let api = Arc::new(mezon_client::AppApi::new(
+                Arc::new(mezon_client::TransportClient::new(String::new())),
+                String::new(),
+            ));
+            crate::realtime::RealtimeDispatch::init(api.clone(), cx);
+            crate::clan::ClanList::init(api.clone(), cx);
+            ChannelList::init(api.clone(), cx);
+            let store = MessagesStore::init(api, cx);
+
+            let clan = ClanId(1);
+            let parent = ChannelId(10);
+            let topic = ChannelId(77);
+            let seen = MessageId(100);
+
+            store.update(cx, |store, cx| {
+                store.activate(clan, parent, true, false, 1, 2, cx);
+                store.set_active_topic(Some(topic.get()), cx);
+                store.note_topic_viewport_seen(topic, seen, 50, true, cx);
+            });
+
+            store.read_with(cx, |store, _| {
+                let pending = store.pending_last_seen.get(&topic).expect("pending");
+                assert_eq!(pending.channel_id, topic);
+                assert_eq!(pending.message_id, seen);
+                assert!(!store.pending_last_seen.contains_key(&parent));
+                assert_eq!(store.last_read_message_by_channel.get(&topic), Some(&seen));
+            });
+        });
+    }
+
+    fn init_forward_stores(cx: &mut App) -> (Entity<ChannelList>, Entity<MessagesStore>) {
+        let store = test_store(cx);
+        (ChannelList::global(cx), store)
+    }
+
+    fn channel_target(clan_id: ClanId) -> ForwardTarget {
+        ForwardTarget::Channel {
+            clan_id,
+            channel_id: ChannelId(20),
+            channel_type: 1,
+            mode: 2,
+            is_public: true,
+            label: "#general".into(),
+        }
+    }
+
+    fn thread_target(clan_id: ClanId) -> ForwardTarget {
+        ForwardTarget::Channel {
+            clan_id,
+            channel_id: ChannelId(21),
+            channel_type: 7,
+            mode: 6,
+            is_public: false,
+            label: "#thread".into(),
+        }
+    }
+
+    #[gpui::test]
+    fn a_forward_starts_every_destination_clan_join_up_front(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            let (channels, store) = init_forward_stores(cx);
+            let source = ChannelId(10);
+            let started = store.update(cx, |store, cx| {
+                store.activate(ClanId(1), source, true, false, 1, 2, cx);
+                store.set_channel(
+                    source,
+                    vec![Message::new(MessageId(1), "hi", "u1", "U1", 100)],
+                );
+                store.forward(
+                    vec![MessageRef {
+                        bucket: source,
+                        id: MessageId(1),
+                    }],
+                    vec![
+                        channel_target(ClanId(2)),
+                        channel_target(ClanId(3)),
+                        thread_target(ClanId(4)),
+                    ],
+                    None,
+                    cx,
+                )
+            });
+            assert_eq!(started, ForwardStart::Started);
+            let channels = channels.read(cx);
+            assert!(
+                channels.is_loading_clan(ClanId(2)) && channels.is_loading_clan(ClanId(3)),
+                "the second clan's listing must not wait for the first destination's send"
+            );
+            assert!(
+                !channels.is_loading_clan(ClanId(4)),
+                "a thread join never rides the clan stream, so its clan needs no listing"
+            );
+        });
+    }
+
+    #[gpui::test]
+    fn a_public_channel_target_waits_for_its_clan_join(cx: &mut gpui::TestAppContext) {
+        use futures::FutureExt as _;
+        let (channels, _store) = cx.update(init_forward_stores);
+        let unopened = ClanId(2);
+        let mut async_cx = cx.to_async();
+
+        assert!(
+            resolve_forward_target(&channel_target(unopened), &mut async_cx)
+                .now_or_never()
+                .is_none(),
+            "the send must not start before clan_join has gone out"
+        );
+        cx.update(|cx| {
+            assert!(
+                channels.read(cx).is_loading_clan(unopened),
+                "clan_join needs the channel listing first"
+            );
         });
     }
 
@@ -12626,6 +13288,61 @@ mod tests {
         assert_eq!(source.mentions[0].e, 8);
     }
 
+    #[gpui::test]
+    fn forward_returns_payload_too_large_for_inline_data_attachment(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            let store = test_store(cx);
+            store.update(cx, |store, cx| {
+                store.activate(ClanId(1), ChannelId(10), true, false, 1, 2, cx);
+                let mut msg = Message::new(MessageId(1), "report", "w1", "hook", 100);
+                msg.raw_content = Some(r#"{"t":"report"}"#.into());
+                msg.attachments = vec![MessageAttachment {
+                    url: "data:image/png;base64,YWJj".into(),
+                    filename: "chart.png".into(),
+                    filetype: "image/png".into(),
+                    ..Default::default()
+                }];
+                store.set_channel(ChannelId(10), vec![msg]);
+                assert!(!store.is_forwarding());
+                let started = store.forward(
+                    vec![MessageRef {
+                        bucket: ChannelId(10),
+                        id: MessageId(1),
+                    }],
+                    vec![channel_target(ClanId(2))],
+                    None,
+                    cx,
+                );
+                assert_eq!(started, ForwardStart::PayloadTooLarge);
+                assert!(!store.is_forwarding());
+            });
+        });
+    }
+
+    #[test]
+    fn forward_preflight_uses_shared_realtime_size_estimate() {
+        let mut msg = Message::new(MessageId(1), "report", "w1", "hook", 100);
+        msg.raw_content = Some(r#"{"t":"report"}"#.into());
+        msg.attachments = vec![MessageAttachment {
+            url: "đường.png".into(),
+            filename: "chart.png".into(),
+            filetype: "image/png".into(),
+            ..Default::default()
+        }];
+        let source = forward_source(&msg);
+        let message = mezon_client::transport::build_forward_channel_message_send(
+            1,
+            1,
+            &source.content_raw,
+            &source.text,
+            false,
+            2,
+            &source.attachments,
+            &source.mentions,
+        );
+        assert!(!mezon_client::transport::forward_blocked_for_realtime_message(&message));
+    }
+
     #[test]
     fn forward_source_falls_back_to_plain_text_for_optimistic_messages() {
         let msg = Message::new(
@@ -12836,6 +13553,41 @@ mod tests {
     }
 
     #[test]
+    fn a_container_the_transcoder_converts_gets_a_video_box_without_dimensions() {
+        let sent_from_desktop = |url: &str| mezon_client::transport::ApiAttachment {
+            url: url.into(),
+            filename: "b5_h264.mkv".into(),
+            filetype: "doc".into(),
+            width: 0,
+            height: 0,
+            thumbnail: String::new(),
+            duration: 0,
+            size: 61_022_429,
+        };
+        let on_minio = MessageAttachment::from_api(
+            sent_from_desktop(
+                "https://cdn.mezon.ai/1c6eb6c3e6c01000/2110590466519994368_b5_h264.mkv",
+            ),
+            None,
+        );
+        assert!(on_minio.is_video());
+        assert_eq!(
+            (on_minio.display_width, on_minio.display_height),
+            crate::config::video_attachment_display_dimensions(0, 0)
+        );
+        assert!(on_minio.display_width > on_minio.display_height);
+
+        let on_r2 = MessageAttachment::from_api(
+            sent_from_desktop(
+                "https://cdn.komu.vn/1c6eb6c3e6c01000/2110590466519994368_b5_h264.mkv",
+            ),
+            None,
+        );
+        assert!(on_r2.is_video());
+        assert!(!on_r2.is_unsupported_media());
+    }
+
+    #[test]
     fn sticker_attachment_keeps_aspect_with_fit_proxy() {
         let cfg = AppConfig {
             imgproxy_base_url: "https://imgproxy.example".into(),
@@ -13024,8 +13776,12 @@ mod tests {
         .into_iter()
         .map(OutgoingMention::into_transport)
         .collect();
-        let sent =
-            mezon_client::transport::build_send_content("@Everyone hi", &transport, &[], &[]);
+        let sent = mezon_client::transport::build_send_content(
+            "@Everyone hi",
+            &transport,
+            &Default::default(),
+            &[],
+        );
         let parsed: ApiMessageContent =
             serde_json::from_str(&sent.json).expect("wire content json");
         assert_eq!(parsed.mentions.len(), 1);
@@ -13087,7 +13843,7 @@ mod tests {
             emojis: Vec::new(),
         };
         let (spans, transport_mentions, _, _, raw_content) =
-            edit_content_spans("@bob hi", content_tokens);
+            edit_content_spans("@bob hi", content_tokens, 0, |_| Vec::new());
 
         assert!(
             transport_mentions.iter().any(|m| m.user_id == "42"),
@@ -13113,6 +13869,62 @@ mod tests {
         assert_eq!(targets.len(), 1);
         assert_eq!(targets[0].user_id.as_deref(), Some("42"));
         assert_eq!(targets[0].role_id, None);
+    }
+
+    #[test]
+    fn buzz_edit_keeps_markers_links_and_mentions() {
+        let content = "```jb``` https://a.com @bob #room :wave:";
+        let content_tokens = OutgoingContent {
+            mentions: vec![OutgoingMention {
+                user_id: "42".into(),
+                role_id: String::new(),
+                display: "@bob".into(),
+                s: 23,
+                e: 27,
+            }],
+            hashtags: vec![OutgoingHashtag {
+                channel_id: "7".into(),
+                s: 28,
+                e: 33,
+            }],
+            emojis: vec![OutgoingEmoji {
+                emoji_id: "9".into(),
+                s: 34,
+                e: 40,
+            }],
+        };
+        let (spans, transport_mentions, _, _, raw_content) =
+            edit_content_spans(content, content_tokens, MESSAGE_BUZZ_CODE, |_| Vec::new());
+        let parsed: ApiMessageContent =
+            serde_json::from_str(&raw_content).expect("edit raw content is the wire JSON");
+
+        assert_eq!(parsed.t, content);
+        assert!(
+            spans
+                .iter()
+                .all(|span| !matches!(span, MessageSpan::CodeBlock { .. }))
+        );
+        assert!(
+            spans
+                .iter()
+                .any(|span| matches!(span, MessageSpan::Link { .. }))
+        );
+        assert!(
+            spans
+                .iter()
+                .any(|span| matches!(span, MessageSpan::Mention { .. }))
+        );
+        assert!(
+            spans
+                .iter()
+                .any(|span| matches!(span, MessageSpan::Hashtag { .. }))
+        );
+        assert!(
+            spans
+                .iter()
+                .any(|span| matches!(span, MessageSpan::Emoji { .. }))
+        );
+        assert_eq!(transport_mentions[0].user_id, "42");
     }
 
     #[test]
@@ -13238,6 +14050,113 @@ mod tests {
         assert_eq!(m.viewer_media.len(), 2);
         assert_eq!(m.viewer_media[0].url, "https://cdn/1.png");
         assert_eq!(m.viewer_media[0].viewer_src, "https://cdn/1.png");
+    }
+
+    #[test]
+    fn forwarded_media_from_a_channel_the_viewer_cannot_read_is_hidden() {
+        crate::cdn_test_signer::install();
+        let denied = "https://cdn.example/1cb164dbdac01001/2108799850765094912_secret.png";
+        let readable = "https://cdn.example/1cb164dbdac01000/2108799850765094913_open.png";
+        assert!(futures::executor::block_on(
+            mezon_client::cdn_signature::access_denied(denied)
+        ));
+        let image = |url: &str| mezon_client::transport::ApiAttachment {
+            url: url.into(),
+            filename: "photo.png".into(),
+            filetype: "image/png".into(),
+            width: 800,
+            height: 600,
+            thumbnail: String::new(),
+            duration: 0,
+            size: 0,
+        };
+        let msg = |fwd: bool| ApiMessage {
+            message_id: 7,
+            content: String::new(),
+            content_raw: String::new(),
+            content_tokens: mezon_client::transport::ApiMessageContent {
+                fwd,
+                ..Default::default()
+            },
+            code: 0,
+            sender_id: 1,
+            sender_name: "Alice".into(),
+            avatar: String::new(),
+            create_time: 0,
+            update_time: 0,
+            hide_editted: false,
+            attachments: vec![image(denied), image(readable)],
+            references: vec![],
+            reactions: vec![],
+            entity_mentions: vec![],
+            topic_id: 0,
+        };
+
+        let forwarded = message_from_api(msg(true), None, None);
+        assert!(forwarded.attachments[0].source_denied);
+        assert!(!forwarded.attachments[1].source_denied);
+        assert_eq!(forwarded.viewer_media.len(), 1);
+        assert_eq!(forwarded.viewer_media[0].url, readable);
+        assert!(forwarded.album_layout.is_none());
+
+        let original = message_from_api(msg(false), None, None);
+        assert!(original.attachments.iter().all(|a| !a.source_denied));
+        assert_eq!(original.viewer_media.len(), 2);
+        assert!(original.album_layout.is_some());
+    }
+
+    #[test]
+    fn a_forwarded_row_parsed_before_its_denial_landed_is_settled_before_insert() {
+        crate::cdn_test_signer::install();
+        let denied = "https://cdn.example/1cb164dbdac01001/2108799850765094915_secret.png";
+        let readable = "https://cdn.example/1cb164dbdac01000/2108799850765094916_open.png";
+        let image = |url: &str| MessageAttachment {
+            url: url.to_string(),
+            filetype: "image/png".to_string(),
+            width: 800,
+            height: 600,
+            ..Default::default()
+        };
+        let attachments = vec![image(denied), image(readable)];
+        let (album_layout, viewer_media) = build_media_presentation(&attachments, None);
+        let mut parsed = Message::new(MessageId(11), "", "1", "Alice", 0)
+            .with_forwarded(true)
+            .with_attachments(attachments)
+            .with_media_presentation(album_layout, viewer_media);
+        assert!(futures::executor::block_on(
+            mezon_client::cdn_signature::access_denied(denied)
+        ));
+
+        assert!(remark_private_source_media(&mut parsed, None));
+        assert!(parsed.attachments[0].source_denied);
+        assert_eq!(parsed.viewer_media.len(), 1);
+        assert!(parsed.album_layout.is_none());
+        assert!(!remark_private_source_media(&mut parsed, None));
+    }
+
+    #[test]
+    fn an_update_to_a_forwarded_message_keeps_its_private_media_hidden() {
+        crate::cdn_test_signer::install();
+        let denied = "https://cdn.example/1cb164dbdac01001/2108799850765094914_secret.png";
+        assert!(futures::executor::block_on(
+            mezon_client::cdn_signature::access_denied(denied)
+        ));
+        let attachment = MessageAttachment {
+            url: denied.to_string(),
+            filetype: "image/png".to_string(),
+            width: 800,
+            height: 600,
+            ..Default::default()
+        };
+        let mut existing = Message::new(MessageId(9), "", "1", "Alice", 0)
+            .with_forwarded(true)
+            .with_attachments(vec![attachment.clone()]);
+        let incoming = Message::new(MessageId(9), "edited", "1", "Alice", 0)
+            .with_attachments(vec![attachment]);
+
+        merge_message_update(&mut existing, &incoming);
+
+        assert!(existing.attachments[0].source_denied);
     }
 
     #[test]
@@ -13444,6 +14363,49 @@ mod tests {
     }
 
     #[test]
+    fn chat_update_keeps_buzz_semantic_type() {
+        let mut existing =
+            Message::new(MessageId(1), "old", "3", "Bob", 100).with_code(MessageCode::MessageBuzz);
+        let incoming = Message::new(MessageId(1), "```jb```", "3", "Bob", 101)
+            .with_code(MessageCode::ChatUpdate)
+            .with_spans(vec![MessageSpan::Text("```jb```".into())]);
+
+        merge_message_update(&mut existing, &incoming);
+
+        assert_eq!(existing.code, MessageCode::MessageBuzz);
+        assert_eq!(existing.content, "```jb```");
+        assert!(
+            matches!(existing.spans.as_slice(), [MessageSpan::Text(text)] if text == "```jb```")
+        );
+    }
+
+    #[test]
+    fn buzz_message_ingest_keeps_canonical_server_content() {
+        let mut message = plain_api_message(MESSAGE_BUZZ_CODE, vec![]);
+        message.content = "jb".into();
+        message.content_tokens =
+            serde_json::from_str(r#"{"t":"jb","mk":[{"s":0,"e":2,"type":"pre"}]}"#)
+                .expect("buzz content");
+        let rows = prepare_messages(vec![message], None, None);
+        assert_eq!(rows[0].content, "jb");
+        assert!(
+            matches!(rows[0].spans.as_slice(), [MessageSpan::CodeBlock { text, .. }] if text == "jb")
+        );
+    }
+
+    #[test]
+    fn web_buzz_literal_markers_remain_literal_text() {
+        let mut message = plain_api_message(MESSAGE_BUZZ_CODE, vec![]);
+        message.content = "```jb```".into();
+        message.content_tokens.t = "```jb```".into();
+        let rows = prepare_messages(vec![message], None, None);
+        assert_eq!(rows[0].content, "```jb```");
+        assert!(
+            matches!(rows[0].spans.as_slice(), [MessageSpan::Text(text)] if text == "```jb```")
+        );
+    }
+
+    #[test]
     fn reply_to_viewer_sets_highlights_viewer_direct() {
         let reply = || {
             plain_api_message(
@@ -13459,6 +14421,237 @@ mod tests {
         assert!(message_from_api(reply(), None, Some(UserId(42))).highlights_viewer_direct);
         assert!(!message_from_api(reply(), None, Some(UserId(7))).highlights_viewer_direct);
         assert!(!message_from_api(reply(), None, None).highlights_viewer_direct);
+    }
+
+    fn anonymous_api_message(sender_id: i64, name: &str, avatar: &str) -> ApiMessage {
+        ApiMessage {
+            message_id: 1,
+            content: "hi".into(),
+            content_raw: String::new(),
+            content_tokens: mezon_client::transport::ApiMessageContent {
+                t: "hi".into(),
+                ..Default::default()
+            },
+            code: 0,
+            sender_id,
+            sender_name: name.into(),
+            avatar: avatar.into(),
+            create_time: 100,
+            update_time: 0,
+            hide_editted: false,
+            attachments: vec![],
+            references: vec![],
+            reactions: vec![],
+            entity_mentions: vec![],
+            topic_id: 0,
+        }
+    }
+
+    #[test]
+    fn message_from_api_marks_the_anonymous_sender_and_keeps_its_persona() {
+        let cfg = AppConfig {
+            anonymous_user_id: "9876".into(),
+            ..Default::default()
+        };
+        let persona = message_from_api(
+            anonymous_api_message(9876, "money", "https://cdn/money.webp"),
+            Some(&cfg),
+            None,
+        );
+        assert!(persona.anonymous_sender);
+        assert_eq!(persona.sender_name, "money");
+        assert_eq!(persona.avatar_url, "https://cdn/money.webp");
+
+        let named = message_from_api(anonymous_api_message(42, "Alice", ""), Some(&cfg), None);
+        assert!(!named.anonymous_sender);
+    }
+
+    #[test]
+    fn merge_sparse_sender_keeps_the_anonymous_flag_of_the_row_it_fills() {
+        let mut optimistic =
+            Message::new(MessageId::next_optimistic(), "hi", "9876", "Anonymous", 100);
+        optimistic.anonymous_sender = true;
+        let sparse_ack = Message::new(MessageId(99), "hi", "0", String::new(), 0);
+        assert!(merge_sparse_sender(&optimistic, sparse_ack).anonymous_sender);
+    }
+
+    #[test]
+    fn api_reply_reference_preserves_emoji_tokens_without_hashtags() {
+        let reference = mezon_client::transport::ApiMessageRef {
+            message_ref_id: 9,
+            content: r#"{"t":"yoyohohoh :melon:","ej":[{"s":10,"e":17,"emojiid":"123"}]}"#.into(),
+            ..Default::default()
+        };
+
+        let mapped = message_reference_from_api(&reference, None);
+
+        assert_eq!(
+            mapped.preview_spans,
+            vec![
+                MessageSpan::Text("yoyohohoh ".into()),
+                MessageSpan::Emoji {
+                    name: ":melon:".into(),
+                    emoji_id: "123".into(),
+                    src: SharedString::default(),
+                },
+            ]
+        );
+    }
+
+    fn komu_base_config() -> AppConfig {
+        AppConfig {
+            base_img_url: "https://cdn.komu.vn".into(),
+            ..AppConfig::dev_defaults()
+        }
+    }
+
+    fn catalog_emoji(id: &str, src: &str) -> crate::emoji::Emoji {
+        crate::emoji::Emoji {
+            id: id.into(),
+            shortname: id.into(),
+            src: src.into(),
+            category: "Custom".into(),
+            clan_id: "1".into(),
+            clan_logo: String::new(),
+            creator_id: "2".into(),
+            is_for_sale: false,
+        }
+    }
+
+    fn emoji_message(id: i64, emoji_id: &str, cfg: &AppConfig) -> Message {
+        let mut message = Message::new(MessageId(id), ":e:", "u1", "U1", 1_700_000_000);
+        message.spans = vec![MessageSpan::Emoji {
+            name: ":e:".into(),
+            emoji_id: emoji_id.into(),
+            src: SharedString::default(),
+        }];
+        crate::message::fill_emoji_sources(&mut message.spans, Some(cfg));
+        message
+    }
+
+    fn first_emoji_src(message: &Message) -> SharedString {
+        match &message.spans[0] {
+            MessageSpan::Emoji { src, .. } => src.clone(),
+            _ => unreachable!(),
+        }
+    }
+
+    #[test]
+    fn an_emoji_stored_on_a_new_cdn_renders_from_its_source_once_the_catalog_arrives() {
+        let cfg = komu_base_config();
+        let source = "https://cdn.mezon.ai/emojis/990011.webp";
+        let mut message = emoji_message(1, "990011", &cfg);
+        assert_eq!(
+            first_emoji_src(&message).as_ref(),
+            cfg.imgproxy_url("https://cdn.komu.vn/emojis/990011.webp", 96, 96, "fit")
+        );
+
+        let changed = crate::emoji::publish_emoji_sources(&[catalog_emoji("990011", source)]);
+        assert!(changed.contains("990011"));
+        assert_eq!(
+            cfg.emoji_src("990011"),
+            cfg.imgproxy_url(source, 100, 100, "fit")
+        );
+
+        assert!(refill_emoji_sources(
+            &mut message,
+            Some(&changed),
+            Some(&cfg)
+        ));
+        assert_eq!(
+            first_emoji_src(&message).as_ref(),
+            cfg.imgproxy_url(source, 96, 96, "fit")
+        );
+        assert!(!refill_emoji_sources(
+            &mut message,
+            Some(&changed),
+            Some(&cfg)
+        ));
+        assert!(!refill_emoji_sources(&mut message, None, Some(&cfg)));
+    }
+
+    #[gpui::test]
+    fn a_moved_emoji_source_redraws_only_shown_rows_whose_url_changed(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let cfg = komu_base_config();
+        let updated = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        let sink = updated.clone();
+        cx.update(|cx| {
+            AppConfig::init_global(Arc::new(cfg.clone()), cx);
+            let store = test_store(cx);
+            cx.subscribe(&store, move |_, event: &MessagesEvent, _| {
+                if let MessagesEvent::Updated { message_id } = event {
+                    sink.borrow_mut().push(*message_id);
+                }
+            })
+            .detach();
+            store.update(cx, |store, cx| {
+                let (shown, hidden) = (ChannelId(10), ChannelId(11));
+                store.set_channel(
+                    shown,
+                    vec![
+                        emoji_message(5, "990031", &cfg),
+                        emoji_message(6, "990032", &cfg),
+                    ],
+                );
+                store.set_channel(hidden, vec![emoji_message(7, "990031", &cfg)]);
+                store.active_channel_id = Some(shown);
+
+                let changed = crate::emoji::publish_emoji_sources(&[
+                    catalog_emoji("990031", "https://cdn.mezon.ai/emojis/990031.webp"),
+                    catalog_emoji("990032", "https://cdn.komu.vn/emojis/990032.webp"),
+                ]);
+                store.refresh_emoji_sources(&changed, cx);
+
+                let moved =
+                    cfg.imgproxy_url("https://cdn.mezon.ai/emojis/990031.webp", 96, 96, "fit");
+                for (bucket, id) in [(shown, 5), (hidden, 7)] {
+                    let message = store.message_in_channel(bucket, MessageId(id)).unwrap();
+                    assert_eq!(first_emoji_src(message).as_ref(), moved);
+                }
+            });
+        });
+        assert_eq!(*updated.borrow(), vec![Some(MessageId(5))]);
+    }
+
+    #[gpui::test]
+    fn a_page_parsed_while_the_catalog_lands_is_refilled_when_it_is_settled(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let cfg = komu_base_config();
+        let source = "https://cdn.mezon.ai/emojis/990041.webp";
+        let emoji_generation = crate::emoji::emoji_sources_generation();
+        let mut parsed = vec![emoji_message(8, "990041", &cfg)];
+        crate::emoji::publish_emoji_sources(&[catalog_emoji("990041", source)]);
+        cx.update(|cx| {
+            AppConfig::init_global(Arc::new(cfg.clone()), cx);
+            settle_parsed_messages(&mut parsed, emoji_generation, cx);
+        });
+        assert_eq!(
+            first_emoji_src(&parsed[0]).as_ref(),
+            cfg.imgproxy_url(source, 96, 96, "fit")
+        );
+    }
+
+    #[test]
+    fn api_reply_reference_resolves_reply_sized_emoji_source_once() {
+        let reference = mezon_client::transport::ApiMessageRef {
+            message_ref_id: 9,
+            content: r#"{"t":":melon:","ej":[{"s":0,"e":7,"emojiid":"123"}]}"#.into(),
+            ..Default::default()
+        };
+        let cfg = AppConfig {
+            base_img_url: "https://cdn.example.com".into(),
+            ..AppConfig::dev_defaults()
+        };
+
+        let mapped = message_reference_from_api(&reference, Some(&cfg));
+
+        assert!(matches!(
+            mapped.preview_spans.as_slice(),
+            [MessageSpan::Emoji { src, .. }] if !src.is_empty()
+        ));
     }
 
     #[test]
@@ -13967,7 +15160,7 @@ mod tests {
         let mut msg = Message::new(MessageId(1), "hi", "42", "gia.chuvan", 1_700_000_000)
             .with_avatar("avatar.png")
             .with_avatar_proxied(gpui::SharedString::from("proxy.png"));
-        anonymize_sender(&mut msg, Some(&cfg));
+        anonymize_sender(&mut msg, Some(&cfg), None);
         assert_eq!(msg.sender_id, "9876");
         assert_eq!(msg.sender_user_id, Some(UserId(9876)));
         assert_eq!(msg.sender_name, "Anonymous");
@@ -13978,7 +15171,7 @@ mod tests {
     #[test]
     fn anonymize_sender_keeps_identity_when_config_missing() {
         let mut msg = Message::new(MessageId(1), "hi", "42", "gia.chuvan", 1_700_000_000);
-        anonymize_sender(&mut msg, None);
+        anonymize_sender(&mut msg, None, None);
         assert_eq!(msg.sender_id, "42");
         assert_eq!(msg.sender_user_id, Some(UserId(42)));
         assert_eq!(msg.sender_name, "gia.chuvan");
@@ -14042,7 +15235,7 @@ mod tests {
 
     #[test]
     fn optimistic_markdown_content_matches_stripped_echo() {
-        let optimistic_text = build_send_content("**bold**", &[], &[], &[]).text;
+        let optimistic_text = build_send_content("**bold**", &[], &Default::default(), &[]).text;
         assert_eq!(
             optimistic_text, "bold",
             "optimistic text must be stripped like the server-stored text"
@@ -15653,7 +16846,12 @@ mod tests {
             store.update(cx, |store, cx| {
                 let channel = ChannelId(500);
                 open_command_channel(store, channel);
-                let sent = mezon_client::transport::build_send_content("*roll 2d6", &[], &[], &[]);
+                let sent = mezon_client::transport::build_send_content(
+                    "*roll 2d6",
+                    &[],
+                    &Default::default(),
+                    &[],
+                );
                 let command = command_card(1, 9).command.map(|command| *command).unwrap();
                 store.record_failed_command(
                     channel,
@@ -15844,6 +17042,7 @@ mod tests {
             content: "clip".into(),
             mentions: Vec::new(),
             hashtags: Vec::new(),
+            hashtag_channels: Vec::new(),
             emojis: Vec::new(),
             create_time_seconds: 0,
             started_at: now_unix_seconds(),
@@ -16218,6 +17417,30 @@ mod tests {
         });
     }
 
+    #[gpui::test]
+    fn the_channel_composer_toggles_anonymous_while_a_topic_is_open(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            let store = test_store(cx);
+            store.update(cx, |store, cx| {
+                store.active_clan_id = Some(ClanId(1));
+                store.active_channel_id = Some(ChannelId(10));
+                store.set_active_topic(Some(77), cx);
+
+                store.toggle_anonymous_mode(false, cx);
+                assert!(store.is_anonymous_mode());
+                assert!(!store.topic_anonymous_mode());
+
+                store.toggle_anonymous_mode(true, cx);
+                assert!(store.is_anonymous_mode());
+                assert!(store.topic_anonymous_mode());
+
+                store.toggle_anonymous_mode(false, cx);
+                assert!(!store.is_anonymous_mode());
+                assert!(store.topic_anonymous_mode());
+            });
+        });
+    }
+
     fn test_store(cx: &mut App) -> Entity<MessagesStore> {
         let api = Arc::new(mezon_client::AppApi::new(
             Arc::new(mezon_client::TransportClient::new(String::new())),
@@ -16228,6 +17451,188 @@ mod tests {
         ChannelList::init(api.clone(), cx);
         crate::account::AccountStore::init(api.clone(), cx);
         MessagesStore::init(api, cx)
+    }
+
+    fn anonymous_test_channel(store: &mut MessagesStore, cx: &mut App) -> ChannelId {
+        AppConfig::init_global(
+            Arc::new(AppConfig {
+                anonymous_user_id: "9876".into(),
+                ..Default::default()
+            }),
+            cx,
+        );
+        let channel = ChannelId(500);
+        store.active_clan_id = Some(ClanId(1));
+        store.active_channel_id = Some(channel);
+        store.cache.insert(
+            channel,
+            ChannelMessages {
+                messages: MessageList::from_messages(channel, Vec::new()),
+                has_more: false,
+                gap_bottom: false,
+            },
+            None,
+        );
+        channel
+    }
+
+    fn send_anonymous(store: &mut MessagesStore, text: &str, cx: &mut Context<MessagesStore>) {
+        store.send_message_with_payload(
+            text.into(),
+            "42".into(),
+            "Alice".into(),
+            OutgoingContent::default(),
+            Vec::new(),
+            None,
+            None,
+            true,
+            0,
+            cx,
+        );
+    }
+
+    fn persona_echo(id: i64, text: &str, create_time: i64) -> Message {
+        Message::new(MessageId(id), text, "9876", "mato", create_time)
+            .with_avatar("https://cdn.example/mato.webp")
+            .with_anonymous_sender(true)
+    }
+
+    fn last_row(store: &MessagesStore, channel: ChannelId) -> Message {
+        store
+            .cache
+            .get(&channel)
+            .and_then(|c| c.messages.items.last().cloned())
+            .expect("channel has rows")
+    }
+
+    #[gpui::test]
+    fn an_anonymous_send_takes_the_persona_its_previous_echo_carried(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        cx.update(|cx| {
+            let store = test_store(cx);
+            store.update(cx, |store, cx| {
+                let channel = anonymous_test_channel(store, cx);
+
+                send_anonymous(store, "first", cx);
+                let first = last_row(store, channel);
+                assert_eq!(first.sender_name, ANONYMOUS_SENDER_NAME);
+                assert!(first.avatar_url.is_empty());
+
+                store.apply_incoming_message(
+                    channel,
+                    persona_echo(100, "first", unix_now_seconds()),
+                    cx,
+                );
+
+                send_anonymous(store, "second", cx);
+                let second = last_row(store, channel);
+                assert!(second.id.is_optimistic());
+                assert!(second.anonymous_sender);
+                assert_eq!(second.sender_name, "mato");
+                assert_eq!(second.avatar_url, "https://cdn.example/mato.webp");
+                assert!(second.combined_with_prev);
+            });
+        });
+    }
+
+    #[gpui::test]
+    fn an_anonymous_send_learns_the_persona_when_the_ack_beats_the_echo(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        cx.update(|cx| {
+            let store = test_store(cx);
+            store.update(cx, |store, cx| {
+                let channel = anonymous_test_channel(store, cx);
+
+                send_anonymous(store, "first", cx);
+                let temp_id = last_row(store, channel).id;
+                let mut ack = Message::new(MessageId(100), "first", "", "", unix_now_seconds());
+                anonymize_sender(&mut ack, AppConfig::try_global(cx), None);
+                store.reconcile_temp(channel, temp_id, ack, cx);
+                assert_eq!(last_row(store, channel).sender_name, ANONYMOUS_SENDER_NAME);
+
+                store.apply_incoming_message(
+                    channel,
+                    persona_echo(100, "first", unix_now_seconds()),
+                    cx,
+                );
+
+                send_anonymous(store, "second", cx);
+                let second = last_row(store, channel);
+                assert_eq!(second.sender_name, "mato");
+                assert!(second.combined_with_prev);
+            });
+        });
+    }
+
+    #[gpui::test]
+    fn an_anonymous_send_drops_a_persona_from_an_earlier_window(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            let store = test_store(cx);
+            store.update(cx, |store, cx| {
+                let channel = anonymous_test_channel(store, cx);
+
+                send_anonymous(store, "first", cx);
+                store.apply_incoming_message(
+                    channel,
+                    persona_echo(
+                        100,
+                        "first",
+                        unix_now_seconds() - 2 * ANONYMOUS_PERSONA_WINDOW_SECS,
+                    ),
+                    cx,
+                );
+
+                send_anonymous(store, "second", cx);
+                let second = last_row(store, channel);
+                assert_eq!(second.sender_name, ANONYMOUS_SENDER_NAME);
+                assert!(second.avatar_url.is_empty());
+            });
+        });
+    }
+
+    #[gpui::test]
+    fn an_echo_from_someone_else_teaches_no_persona(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            let store = test_store(cx);
+            store.update(cx, |store, cx| {
+                let channel = anonymous_test_channel(store, cx);
+
+                store.apply_incoming_message(
+                    channel,
+                    persona_echo(100, "not mine", unix_now_seconds()),
+                    cx,
+                );
+
+                send_anonymous(store, "mine", cx);
+                assert_eq!(last_row(store, channel).sender_name, ANONYMOUS_SENDER_NAME);
+            });
+        });
+    }
+
+    #[gpui::test]
+    fn topic_anonymous_mode_is_only_active_after_the_topic_exists(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            let store = test_store(cx);
+            store.update(cx, |store, cx| {
+                store.topic_anonymous_mode = true;
+
+                assert!(!store.topic_anonymous_mode());
+
+                store.set_active_topic(Some(77), cx);
+                assert!(!store.topic_anonymous_mode());
+
+                store.toggle_anonymous_mode(true, cx);
+                assert!(store.topic_anonymous_mode());
+
+                store.set_active_topic(None, cx);
+                assert!(!store.topic_anonymous_mode());
+
+                store.set_active_topic(Some(88), cx);
+                assert!(!store.topic_anonymous_mode());
+            });
+        });
     }
 
     #[gpui::test]
@@ -16341,6 +17746,38 @@ mod tests {
                         .is_some_and(|c| c.messages.contains_id(MessageId(1))),
                     "a row with nothing left to replay must stay instead of sending empty"
                 );
+            });
+        });
+    }
+
+    #[gpui::test]
+    fn resend_fallback_keeps_buzz_message_code(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            let store = test_store(cx);
+            let channel = ChannelId(7);
+            store.update(cx, |store, cx| {
+                let mut failed = Message::new(MessageId(1), "```jb```", "5", "Bob", 100)
+                    .with_code(MessageCode::MessageBuzz);
+                failed.send_failed = true;
+                store.set_channel(channel, vec![failed]);
+                store.active_channel_id = Some(channel);
+                store.active_clan_id = Some(ClanId(1));
+
+                store.resend_message(MessageRef::unbucketed(MessageId(1)), cx);
+
+                assert!(
+                    store
+                        .pending_send_payloads
+                        .values()
+                        .any(|payload| payload.message_code == MESSAGE_BUZZ_CODE)
+                );
+                assert!(store.cache.get(&channel).is_some_and(|cached| {
+                    cached
+                        .messages
+                        .as_slice()
+                        .iter()
+                        .any(|message| message.code == MessageCode::MessageBuzz)
+                }));
             });
         });
     }
@@ -16511,5 +17948,269 @@ mod tests {
             "a stale index after a mid-list delete renders the WRONG row"
         );
         assert_eq!(list.remove_id(MessageId(404)), None);
+    }
+
+    mod reopen_read {
+        use super::*;
+        use crate::channel::{CHANNEL_ACTIVE_JOINED, Category, Channel, ChannelType};
+
+        const CLAN: ClanId = ClanId(1);
+        const LEFT_SCROLLED_UP: ChannelId = ChannelId(10);
+        const ELSEWHERE: ChannelId = ChannelId(20);
+
+        fn msg(seq: i64) -> MessageId {
+            MessageId(seq << 22)
+        }
+
+        fn row(id: ChannelId, seen: (i64, i64), sent: (i64, i64)) -> Channel {
+            Channel {
+                id,
+                name: id.get().to_string(),
+                channel_type: ChannelType::Text,
+                private: false,
+                clan_id: CLAN,
+                clan_name: String::new(),
+                category_name: String::new(),
+                category_id: Some("5".into()),
+                member_count: 0,
+                badge_count: 0,
+                muted: false,
+                parent_id: None,
+                last_seen_message_id: msg(seen.0),
+                last_seen_timestamp: seen.1,
+                last_sent_message_id: msg(sent.0),
+                last_sent_timestamp: sent.1,
+                voice_members: Vec::new(),
+                is_favorite: false,
+                creator_id: UserId(0),
+                active: CHANNEL_ACTIVE_JOINED,
+                avatar_url: String::new(),
+                topic: String::new(),
+                age_restricted: 0,
+                e2ee: 0,
+                app_id: 0,
+            }
+        }
+
+        fn rows(seqs: &[i64]) -> Vec<Message> {
+            seqs.iter()
+                .map(|seq| Message::new(msg(*seq), "hi", "7", "Ann", seq * 100))
+                .collect()
+        }
+
+        fn seed(
+            cx: &mut App,
+            seen: (i64, i64),
+            sent: (i64, i64),
+            cached: &[i64],
+        ) -> Entity<MessagesStore> {
+            let store = test_store(cx);
+            ChannelList::global(cx).update(cx, |channels, _| {
+                channels.seed_clan_channels_for_test(
+                    CLAN,
+                    vec![Category {
+                        id: "5".into(),
+                        clan_id: CLAN,
+                        name: "5".into(),
+                        order: 0,
+                        channels: vec![
+                            row(LEFT_SCROLLED_UP, seen, sent),
+                            row(ELSEWHERE, (1, 100), (1, 100)),
+                        ],
+                    }],
+                );
+            });
+            store.update(cx, |store, cx| {
+                store.set_channel(LEFT_SCROLLED_UP, rows(cached));
+                store.set_channel(ELSEWHERE, rows(&[1]));
+                store.open_channel_in_clan(CLAN, LEFT_SCROLLED_UP, cx);
+            });
+            store
+        }
+
+        fn unread(cx: &App) -> bool {
+            ChannelList::global(cx)
+                .read(cx)
+                .channel(CLAN, LEFT_SCROLLED_UP)
+                .is_some_and(|c| c.is_unread())
+        }
+
+        #[gpui::test]
+        fn reopening_at_a_saved_position_marks_the_cached_tail_read(cx: &mut gpui::TestAppContext) {
+            cx.update(|cx| {
+                let store = seed(cx, (1, 100), (3, 300), &[1, 2, 3]);
+                assert!(unread(cx));
+                store.update(cx, |store, cx| store.note_reopened_seen(cx));
+                assert!(!unread(cx), "reopening must clear the unread row");
+                let pending = store
+                    .read(cx)
+                    .pending_last_seen
+                    .get(&LEFT_SCROLLED_UP)
+                    .cloned();
+                assert_eq!(
+                    pending.map(|p| (p.message_id, p.create_time)),
+                    Some((msg(3), 300))
+                );
+            });
+        }
+
+        #[gpui::test]
+        fn reopening_with_a_detached_tail_marks_read_up_to_the_known_tail(
+            cx: &mut gpui::TestAppContext,
+        ) {
+            cx.update(|cx| {
+                let store = seed(cx, (1, 100), (5, 500), &[1, 2]);
+                store.update(cx, |store, _| {
+                    store.set_last_message(LEFT_SCROLLED_UP, msg(5))
+                });
+                assert!(store.read(cx).has_more_bottom());
+                store.update(cx, |store, cx| store.note_reopened_seen(cx));
+                assert!(
+                    !unread(cx),
+                    "the tail outside the buffer still counts as read"
+                );
+                let pending = store
+                    .read(cx)
+                    .pending_last_seen
+                    .get(&LEFT_SCROLLED_UP)
+                    .cloned();
+                assert_eq!(
+                    pending.map(|p| (p.message_id, p.create_time)),
+                    Some((msg(5), 500))
+                );
+            });
+        }
+
+        #[gpui::test]
+        fn reopening_a_read_channel_writes_nothing(cx: &mut gpui::TestAppContext) {
+            cx.update(|cx| {
+                let store = seed(cx, (3, 300), (3, 300), &[1, 2, 3]);
+                store.update(cx, |store, cx| store.note_reopened_seen(cx));
+                assert!(
+                    !store
+                        .read(cx)
+                        .pending_last_seen
+                        .contains_key(&LEFT_SCROLLED_UP)
+                );
+            });
+        }
+
+        #[gpui::test]
+        fn leaving_a_channel_scrolled_up_lets_new_messages_reach_its_cache(
+            cx: &mut gpui::TestAppContext,
+        ) {
+            cx.update(|cx| {
+                let store = seed(cx, (3, 300), (3, 300), &[1, 2, 3]);
+                store.update(cx, |store, cx| {
+                    store.set_viewing_older(LEFT_SCROLLED_UP, true);
+                    store.open_channel_in_clan(CLAN, ELSEWHERE, cx);
+                    assert!(!store.is_viewing_older(LEFT_SCROLLED_UP));
+                });
+            });
+        }
+
+        #[gpui::test]
+        fn leaving_a_detached_channel_keeps_it_viewing_older(cx: &mut gpui::TestAppContext) {
+            cx.update(|cx| {
+                let store = seed(cx, (3, 300), (9, 900), &[1, 2, 3]);
+                store.update(cx, |store, cx| {
+                    store.set_last_message(LEFT_SCROLLED_UP, msg(9));
+                    store.set_viewing_older(LEFT_SCROLLED_UP, true);
+                    store.open_channel_in_clan(CLAN, ELSEWHERE, cx);
+                    assert!(store.is_viewing_older(LEFT_SCROLLED_UP));
+                });
+            });
+        }
+
+        #[gpui::test]
+        fn opening_through_a_jump_marks_read_like_a_plain_open(cx: &mut gpui::TestAppContext) {
+            cx.update(|cx| {
+                let store = seed(cx, (1, 100), (3, 300), &[1, 2, 3]);
+                store.update(cx, |store, cx| {
+                    store.open_channel_in_clan(CLAN, ELSEWHERE, cx);
+                    store.request_jump(LEFT_SCROLLED_UP, msg(2), cx);
+                    store.open_channel_in_clan(CLAN, LEFT_SCROLLED_UP, cx);
+                    store.note_reopened_seen(cx);
+                });
+                assert!(!unread(cx));
+            });
+        }
+
+        #[gpui::test]
+        fn only_the_live_tail_counts_as_reading(cx: &mut gpui::TestAppContext) {
+            cx.update(|cx| {
+                let store = seed(cx, (3, 300), (3, 300), &[1, 2, 3]);
+                store.update(cx, |store, _| {
+                    assert!(store.is_reading_live_tail(LEFT_SCROLLED_UP));
+                    store.set_viewing_older(LEFT_SCROLLED_UP, true);
+                    assert!(!store.is_reading_live_tail(LEFT_SCROLLED_UP));
+                    store.set_viewing_older(LEFT_SCROLLED_UP, false);
+                    store.set_last_message(LEFT_SCROLLED_UP, msg(9));
+                    assert!(!store.is_reading_live_tail(LEFT_SCROLLED_UP));
+                });
+            });
+        }
+
+        #[gpui::test]
+        fn a_last_seen_without_a_message_id_is_never_sent(cx: &mut gpui::TestAppContext) {
+            cx.update(|cx| {
+                let store = seed(cx, (1, 100), (3, 300), &[1, 2, 3]);
+                store.update(cx, |store, cx| {
+                    let pending = |id| PendingLastSeen {
+                        clan_id: CLAN,
+                        channel_id: LEFT_SCROLLED_UP,
+                        message_id: id,
+                        create_time: 0,
+                        mode: 2,
+                        badge_count: 0,
+                    };
+                    store.send_last_seen(pending(MessageId(0)), cx);
+                    assert!(store.queued_last_seen.is_empty());
+                    store.send_last_seen(pending(msg(3)), cx);
+                    assert_eq!(store.queued_last_seen.len(), 1);
+                });
+            });
+        }
+
+        #[test]
+        fn retries_keep_only_the_newest_unsuperseded_last_seen() {
+            let pending = |channel: ChannelId, seq: i64| PendingLastSeen {
+                clan_id: CLAN,
+                channel_id: channel,
+                message_id: msg(seq),
+                create_time: seq * 100,
+                mode: 2,
+                badge_count: 0,
+            };
+            let queue = vec![
+                pending(LEFT_SCROLLED_UP, 5),
+                pending(LEFT_SCROLLED_UP, 7),
+                pending(LEFT_SCROLLED_UP, 6),
+                pending(ELSEWHERE, 3),
+            ];
+            let read = HashMap::from([(LEFT_SCROLLED_UP, msg(5)), (ELSEWHERE, msg(4))]);
+            let sent: Vec<(ChannelId, MessageId)> = last_seen_retries(queue, &read)
+                .into_iter()
+                .map(|p| (p.channel_id, p.message_id))
+                .collect();
+            assert_eq!(sent, vec![(LEFT_SCROLLED_UP, msg(7))]);
+        }
+
+        #[gpui::test]
+        fn reopening_never_writes_an_id_older_than_the_last_seen(cx: &mut gpui::TestAppContext) {
+            cx.update(|cx| {
+                let store = seed(cx, (5, 500), (6, 600), &[1, 2]);
+                store.update(cx, |store, cx| {
+                    store.last_message_by_channel.remove(&LEFT_SCROLLED_UP);
+                    store.note_reopened_seen(cx);
+                });
+                assert!(
+                    !store
+                        .read(cx)
+                        .pending_last_seen
+                        .contains_key(&LEFT_SCROLLED_UP)
+                );
+            });
+        }
     }
 }

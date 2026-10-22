@@ -72,13 +72,19 @@ void RtpTransceiver::set_direction(RtpTransceiverDirection direction) const {
 }
 
 RtpTransceiverDirection RtpTransceiver::current_direction() const {
-  return static_cast<RtpTransceiverDirection>(
-      transceiver_->current_direction().value());
+  auto direction = transceiver_->current_direction();
+  if (!direction) {
+    throw std::runtime_error("transceiver has no current direction");
+  }
+  return static_cast<RtpTransceiverDirection>(*direction);
 }
 
 RtpTransceiverDirection RtpTransceiver::fired_direction() const {
-  return static_cast<RtpTransceiverDirection>(
-      transceiver_->fired_direction().value());
+  auto direction = transceiver_->fired_direction();
+  if (!direction) {
+    throw std::runtime_error("transceiver has no fired direction");
+  }
+  return static_cast<RtpTransceiverDirection>(*direction);
 }
 
 void RtpTransceiver::stop_standard() const {

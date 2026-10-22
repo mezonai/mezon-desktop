@@ -6,6 +6,7 @@ pub mod overview_tab;
 pub mod permission_overrides;
 pub mod permissions_tab;
 pub mod quick_actions_tab;
+mod remote_members;
 pub mod stream_thumbnail_tab;
 
 use gpui::{

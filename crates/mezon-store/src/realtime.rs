@@ -44,6 +44,7 @@ pub enum RealtimeKind {
     VoiceLeaved,
     VoiceReaction,
     VoiceInteractive,
+    SfuBreakoutRoom,
     ScreenShare,
     AiAgentEnabled,
     StreamingJoined,
@@ -110,6 +111,7 @@ impl RealtimeKind {
             RealtimeEvent::VoiceLeaved(_) => Self::VoiceLeaved,
             RealtimeEvent::VoiceReaction(_) => Self::VoiceReaction,
             RealtimeEvent::VoiceInteractive(_) => Self::VoiceInteractive,
+            RealtimeEvent::SfuBreakoutRoom(_) => Self::SfuBreakoutRoom,
             RealtimeEvent::ScreenShare(_) => Self::ScreenShare,
             RealtimeEvent::AiAgentEnabled(_) => Self::AiAgentEnabled,
             RealtimeEvent::StreamingJoined(_) => Self::StreamingJoined,
@@ -410,6 +412,16 @@ mod tests {
                 realtime::VoiceInteractiveEvent::default()
             )),
             Some(RealtimeKind::VoiceInteractive)
+        );
+    }
+
+    #[test]
+    fn kind_of_maps_sfu_breakout_room() {
+        assert_eq!(
+            RealtimeKind::of(&RealtimeEvent::SfuBreakoutRoom(
+                realtime::SfuBreakoutRoomEvent::default()
+            )),
+            Some(RealtimeKind::SfuBreakoutRoom)
         );
     }
 

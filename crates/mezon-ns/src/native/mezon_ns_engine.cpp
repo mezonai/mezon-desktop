@@ -384,9 +384,6 @@ int NoiseSuppressionEngine::process_frame_float(const float* in_frame, float* ou
         }
     }
 
-    // Bring quiet microphones into the model's expected level range without
-    // amplifying the original signal used for reconstruction. Follow rises
-    // immediately and release slowly so a pause does not pump the mask.
     const float* model_input = mag_spec_.data();
     if (model_target_rms_ > 0.0f) {
         float sum_sq = 0.0f;
@@ -396,7 +393,7 @@ int NoiseSuppressionEngine::process_frame_float(const float* in_frame, float* ou
             peak = std::max(peak, std::abs(in_frame[i]));
         }
         const float frame_rms = std::sqrt(sum_sq / static_cast<float>(HOP_LENGTH));
-        model_level_rms_ = std::max(frame_rms, model_level_rms_ * 0.90f);
+        model_level_rms_ = std::max(frame_rms, model_level_rms_ * 0.995f);
         const float level_gain = std::clamp(
             model_target_rms_ / std::max(model_level_rms_, 1e-5f), 1.0f, 16.0f);
         const float gain = std::min(level_gain, std::max(1.0f, 0.8f / std::max(peak, 1e-5f)));

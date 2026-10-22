@@ -652,15 +652,69 @@ async fn find_app_bundle(volume: &Path) -> Result<Option<PathBuf>> {
 const PRIVILEGED_INSTALL_TIMEOUT: Duration = Duration::from_secs(300);
 
 #[cfg(all(not(target_os = "macos"), not(target_os = "windows")))]
+const APT_GET: &str = "/usr/bin/apt-get";
+
+#[cfg(all(not(target_os = "macos"), not(target_os = "windows")))]
+const DPKG: &str = "/usr/bin/dpkg";
+
+#[cfg(all(not(target_os = "macos"), not(target_os = "windows")))]
+const APT_INSTALL_TIMEOUT: Duration = Duration::from_secs(20 * 60);
+
+#[cfg(all(not(target_os = "macos"), not(target_os = "windows")))]
+enum PrivilegedRun {
+    Succeeded,
+    Refused,
+    Failed(String),
+}
+
+#[cfg(all(not(target_os = "macos"), not(target_os = "windows")))]
 async fn install_linux_deb(update: &DownloadedUpdate) -> Result<InstallOutcome> {
+    let current_exe = std::env::current_exe().context("failed to locate running executable")?;
+    let restart = || InstallOutcome {
+        restart_path: Some(current_exe.clone()),
+        manual_deb: None,
+    };
+    let archive = update.archive.as_os_str();
+    if tokio::fs::try_exists(APT_GET).await.unwrap_or(false) {
+        let apt_args: [&std::ffi::OsStr; 6] = [
+            "install".as_ref(),
+            "-y".as_ref(),
+            "--no-remove".as_ref(),
+            "-o".as_ref(),
+            "DPkg::Lock::Timeout=120".as_ref(),
+            archive,
+        ];
+        match run_privileged(APT_GET, &apt_args, APT_INSTALL_TIMEOUT).await? {
+            PrivilegedRun::Succeeded => return Ok(restart()),
+            PrivilegedRun::Refused => return install_deb_fallback(update).await,
+            PrivilegedRun::Failed(_) => {}
+        }
+    }
+    match run_privileged(DPKG, &["-i".as_ref(), archive], PRIVILEGED_INSTALL_TIMEOUT).await? {
+        PrivilegedRun::Succeeded => Ok(restart()),
+        PrivilegedRun::Refused => install_deb_fallback(update).await,
+        PrivilegedRun::Failed(stderr) => Err(anyhow!(
+            "dpkg failed to install the update{}",
+            if stderr.is_empty() {
+                String::new()
+            } else {
+                format!(": {stderr}")
+            }
+        )),
+    }
+}
+
+#[cfg(all(not(target_os = "macos"), not(target_os = "windows")))]
+async fn run_privileged(
+    program: &str,
+    args: &[&std::ffi::OsStr],
+    timeout: Duration,
+) -> Result<PrivilegedRun> {
     use std::process::Stdio;
 
-    let current_exe = std::env::current_exe().context("failed to locate running executable")?;
-
     let child = match tokio::process::Command::new("pkexec")
-        .arg("/usr/bin/dpkg")
-        .arg("-i")
-        .arg(&update.archive)
+        .arg(program)
+        .args(args)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -670,52 +724,38 @@ async fn install_linux_deb(update: &DownloadedUpdate) -> Result<InstallOutcome> 
         Ok(child) => child,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
             tracing::warn!("pkexec not available for privileged .deb install: {error}");
-            return install_deb_fallback(update).await;
+            return Ok(PrivilegedRun::Refused);
         }
         Err(error) => return Err(anyhow!("failed to run pkexec: {error}")),
     };
 
-    let output =
-        match tokio::time::timeout(PRIVILEGED_INSTALL_TIMEOUT, child.wait_with_output()).await {
-            Ok(Ok(output)) => output,
-            Ok(Err(error)) => return Err(anyhow!("failed to run pkexec: {error}")),
-            Err(_) => {
-                tracing::warn!(
-                    "privileged .deb install timed out after {}s",
-                    PRIVILEGED_INSTALL_TIMEOUT.as_secs()
-                );
-                return install_deb_fallback(update).await;
-            }
-        };
+    let output = match tokio::time::timeout(timeout, child.wait_with_output()).await {
+        Ok(Ok(output)) => output,
+        Ok(Err(error)) => return Err(anyhow!("failed to run pkexec: {error}")),
+        Err(_) => {
+            tracing::warn!(
+                "privileged {program} timed out after {}s",
+                timeout.as_secs()
+            );
+            return Ok(PrivilegedRun::Refused);
+        }
+    };
 
     if output.status.success() {
-        return Ok(InstallOutcome {
-            restart_path: Some(current_exe),
-            manual_deb: None,
-        });
+        return Ok(PrivilegedRun::Succeeded);
     }
 
     let code = output.status.code();
-    let stderr_raw = String::from_utf8_lossy(&output.stderr);
-    let stderr = stderr_raw.trim();
+    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
     if stderr.is_empty() {
-        tracing::warn!("privileged .deb install failed (pkexec exit {code:?})");
+        tracing::warn!("privileged {program} failed (pkexec exit {code:?})");
     } else {
-        tracing::warn!("privileged .deb install failed (pkexec exit {code:?}): {stderr}");
+        tracing::warn!("privileged {program} failed (pkexec exit {code:?}): {stderr}");
     }
-
-    if !matches!(code, Some(126) | Some(127)) {
-        return Err(anyhow!(
-            "dpkg failed to install the update{}",
-            if stderr.is_empty() {
-                String::new()
-            } else {
-                format!(": {stderr}")
-            }
-        ));
+    if matches!(code, Some(126) | Some(127)) {
+        return Ok(PrivilegedRun::Refused);
     }
-
-    install_deb_fallback(update).await
+    Ok(PrivilegedRun::Failed(stderr))
 }
 
 #[cfg(all(not(target_os = "macos"), not(target_os = "windows")))]

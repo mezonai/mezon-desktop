@@ -89,7 +89,12 @@ struct ExtraRolesTooltip {
 
 impl Render for ExtraRolesTooltip {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let mut roles = div().flex().flex_col().items_start().gap_1();
+        let mut roles = div()
+            .font_family(crate::theme::ui_font_family(cx))
+            .flex()
+            .flex_col()
+            .items_start()
+            .gap_1();
         for role in &self.roles {
             roles = roles.child(role_badge(role, true, cx.theme(), cx));
         }

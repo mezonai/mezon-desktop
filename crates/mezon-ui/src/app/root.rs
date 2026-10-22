@@ -57,7 +57,7 @@ pub struct RootView {
 
 fn surface_voice_toast(
     root: &mut RootView,
-    _voice: gpui::Entity<mezon_store::VoiceStore>,
+    voice: gpui::Entity<mezon_store::VoiceStore>,
     event: &mezon_store::VoiceStoreEvent,
     cx: &mut Context<RootView>,
 ) {
@@ -81,6 +81,28 @@ fn surface_voice_toast(
             });
             return;
         }
+        mezon_store::VoiceStoreEvent::MediaRefused(refusal) => {
+            let key = match refusal {
+                mezon_store::MediaRefusal::CameraLimit => "channelVoice.toast.cameraLimitReached",
+                mezon_store::MediaRefusal::ScreenShareLimit => {
+                    "channelVoice.toast.screenShareLimitReached"
+                }
+                mezon_store::MediaRefusal::CameraUpdateFailed => {
+                    "channelVoice.toast.cameraUpdateFailed"
+                }
+                mezon_store::MediaRefusal::ScreenShareUpdateFailed => {
+                    "channelVoice.toast.screenShareUpdateFailed"
+                }
+            };
+            crate::app::shell::Shell::global(cx).update(cx, |shell, cx| {
+                shell.toast(
+                    crate::components::primitives::ToastKind::Error,
+                    mezon_i18n::t(&locale, key).to_string(),
+                    cx,
+                )
+            });
+            return;
+        }
         mezon_store::VoiceStoreEvent::RecordingVideoUnavailable => {
             crate::app::shell::Shell::global(cx).update(cx, |shell, cx| {
                 shell.toast(
@@ -89,6 +111,23 @@ fn surface_voice_toast(
                     cx,
                 )
             });
+            return;
+        }
+        mezon_store::VoiceStoreEvent::Breakout(notice) => {
+            if matches!(notice, mezon_store::BreakoutNotice::Invited) {
+                crate::chat::voice_breakout::BreakoutInviteModal::show(voice, cx);
+                return;
+            }
+            let Some(message) = crate::chat::voice_breakout::notice_text(&locale, notice) else {
+                return;
+            };
+            let kind = if matches!(notice, mezon_store::BreakoutNotice::Failed(_)) {
+                crate::components::primitives::ToastKind::Error
+            } else {
+                crate::components::primitives::ToastKind::Success
+            };
+            crate::app::shell::Shell::global(cx)
+                .update(cx, |shell, cx| shell.toast(kind, message, cx));
             return;
         }
         mezon_store::VoiceStoreEvent::RecordingFinished(toast) => toast.clone(),
@@ -453,9 +492,13 @@ impl RootView {
             Route::SettingsDevices => crate::settings::SettingsPage::Device,
             Route::SettingsAppearance => crate::settings::SettingsPage::Appearance,
             Route::SettingsActivity => crate::settings::SettingsPage::Activity,
+            Route::SettingsChat => crate::settings::SettingsPage::Chat,
             Route::SettingsNotifications => crate::settings::SettingsPage::Notifications,
             Route::SettingsLanguage => crate::settings::SettingsPage::Language,
             Route::SettingsVoice => crate::settings::SettingsPage::Voice,
+            Route::SettingsServer if mezon_store::RealtimeServer::is_offered(cx) => {
+                crate::settings::SettingsPage::Server
+            }
             Route::SettingsAdvanced => crate::settings::SettingsPage::Advanced,
             Route::SettingsAccount => crate::settings::SettingsPage::Account,
             _ => return,
@@ -540,7 +583,7 @@ impl Render for RootView {
         }
 
         let locale = self.cached_locale.as_str();
-        let base_font_family = ::theme::theme_settings(cx).ui_font(cx).family.clone();
+        let base_font_family = crate::theme::ui_font_family(cx);
         let theme = cx.theme();
 
         let mut preview_bar = None;
@@ -581,9 +624,11 @@ impl Render for RootView {
                     | Route::SettingsDevices
                     | Route::SettingsAppearance
                     | Route::SettingsActivity
+                    | Route::SettingsChat
                     | Route::SettingsNotifications
                     | Route::SettingsLanguage
                     | Route::SettingsVoice
+                    | Route::SettingsServer
                     | Route::SettingsAdvanced => uncached_fill(self.settings_screen.clone()),
                     Route::ClanSettings { .. } => cached_fill(self.clan_setting_screen.clone()),
                     Route::ChannelSettings { .. } => {
@@ -656,7 +701,7 @@ impl Render for RootView {
     }
 }
 
-fn voice_hold_to_talk(active: bool, window: &Window, cx: &mut App) {
+pub(crate) fn voice_hold_to_talk(active: bool, window: &Window, cx: &mut App) {
     let typing = active
         && window.context_stack().iter().any(|context| {
             context.contains(crate::components::primitives::text_actions::TEXT_INPUT_CONTEXT)

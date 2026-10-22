@@ -33,7 +33,7 @@ use pw::{
 };
 
 use crate::{
-    capturer::Options,
+    capturer::{Area, Options},
     frame::{BGRxFrame, Frame, RGBFrame, RGBxFrame, XBGRFrame},
     Target,
 };
@@ -502,6 +502,7 @@ fn pipewire_capturer(
 
 pub struct WaylandCapturer {
     capturer_join_handle: Option<JoinHandle<()>>,
+    monitor_area: Option<Area>,
     capturer_state: Arc<AtomicU8>,
     // The pipewire stream is deleted when the connection is dropped.
     // That's why we keep it alive
@@ -513,13 +514,14 @@ impl WaylandCapturer {
     pub fn new(options: &Options, tx: Sender<Result<Frame>>) -> Result<Self> {
         let connection = dbus::blocking::Connection::new_session()
             .context("Failed to create dbus connection")?;
-        let stream_id = ScreenCastPortal::new(&connection)
+        let stream = ScreenCastPortal::new(&connection)
             .source_types(options.portal_source_types)
             .show_cursor(options.show_cursor)
             .context("Unsupported screen capture cursor display mode")?
             .create_stream()
-            .context("Failed to get screen capture stream")?
-            .pw_node_id();
+            .context("Failed to get screen capture stream")?;
+        let monitor_area = stream.monitor_area();
+        let stream_id = stream.pw_node_id();
 
         // TODO: Fix this hack
         let options = options.clone();
@@ -552,6 +554,7 @@ impl WaylandCapturer {
 
         Ok(Self {
             capturer_join_handle: Some(capturer_join_handle),
+            monitor_area,
             capturer_state,
             _connection: connection,
         })
@@ -559,6 +562,10 @@ impl WaylandCapturer {
 }
 
 impl LinuxCapturerImpl for WaylandCapturer {
+    fn monitor_area(&self) -> Option<Area> {
+        self.monitor_area.clone()
+    }
+
     fn start_capture(&mut self) {
         self.capturer_state
             .store(1, std::sync::atomic::Ordering::Relaxed);

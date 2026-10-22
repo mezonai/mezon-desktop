@@ -676,7 +676,7 @@ fn default_browser_desktop_id() -> Option<String> {
 /// export dirs that a login shell adds to `XDG_DATA_DIRS` but a `.desktop`
 /// launch of this app may not see.
 #[cfg(all(unix, not(target_os = "macos")))]
-fn desktop_entry_dirs() -> Vec<PathBuf> {
+pub(crate) fn desktop_entry_dirs() -> Vec<PathBuf> {
     let home = std::env::var_os("HOME").map(PathBuf::from);
     let mut dirs = Vec::new();
     match std::env::var_os("XDG_DATA_HOME").filter(|dir| !dir.is_empty()) {

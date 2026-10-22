@@ -1,5 +1,7 @@
 use std::collections::HashMap;
 
+use serde::Deserialize;
+
 pub const MID_AUDIO: &str = "0";
 pub const MID_CAMERA: &str = "1";
 pub const MID_SCREEN: &str = "2";
@@ -7,7 +9,8 @@ pub const MID_SCREEN: &str = "2";
 const FIRST_REMOTE_MID: u32 = 3;
 const MIDS_PER_REMOTE: u32 = 3;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Deserialize)]
+#[serde(rename_all = "lowercase")]
 pub enum RemoteKind {
     Audio,
     Camera,
@@ -18,6 +21,66 @@ pub enum RemoteKind {
 pub struct RemoteMid {
     pub slot: u32,
     pub kind: RemoteKind,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PoolLayout {
+    pub audio: u32,
+    pub camera: u32,
+    pub screen: u32,
+}
+
+impl PoolLayout {
+    fn blocks(self) -> [(RemoteKind, u32); 3] {
+        [
+            (RemoteKind::Audio, self.audio),
+            (RemoteKind::Camera, self.camera),
+            (RemoteKind::Screen, self.screen),
+        ]
+    }
+
+    pub fn classify(self, mid: &str) -> Option<RemoteMid> {
+        let n: u32 = mid.trim().parse().ok()?;
+        let mut rest = n.checked_sub(FIRST_REMOTE_MID)?;
+        for (kind, count) in self.blocks() {
+            if rest < count {
+                return Some(RemoteMid { slot: rest, kind });
+            }
+            rest -= count;
+        }
+        None
+    }
+
+    pub fn mid(self, kind: RemoteKind, slot: u32) -> Option<u32> {
+        let mut start = FIRST_REMOTE_MID;
+        for (block, count) in self.blocks() {
+            if block == kind {
+                return if slot < count {
+                    start.checked_add(slot)
+                } else {
+                    None
+                };
+            }
+            start = start.checked_add(count)?;
+        }
+        None
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum MidLayout {
+    #[default]
+    Triples,
+    Pools(PoolLayout),
+}
+
+impl MidLayout {
+    pub fn classify(self, mid: &str) -> Option<RemoteMid> {
+        match self {
+            Self::Triples => classify(mid),
+            Self::Pools(pools) => pools.classify(mid),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -189,6 +252,35 @@ mod tests {
                 slot: 2,
                 kind: RemoteKind::Screen
             })
+        );
+    }
+
+    #[test]
+    fn pool_mids_run_in_one_contiguous_block_per_kind() {
+        let pools = PoolLayout {
+            audio: 6,
+            camera: 8,
+            screen: 4,
+        };
+        let at = |mid: &str| pools.classify(mid).map(|r| (r.kind, r.slot));
+        assert_eq!(at("2"), None);
+        assert_eq!(at("3"), Some((RemoteKind::Audio, 0)));
+        assert_eq!(at("8"), Some((RemoteKind::Audio, 5)));
+        assert_eq!(at("9"), Some((RemoteKind::Camera, 0)));
+        assert_eq!(at("16"), Some((RemoteKind::Camera, 7)));
+        assert_eq!(at("17"), Some((RemoteKind::Screen, 0)));
+        assert_eq!(at("20"), Some((RemoteKind::Screen, 3)));
+        assert_eq!(at("21"), None);
+        assert_eq!(pools.mid(RemoteKind::Camera, 0), Some(9));
+        assert_eq!(pools.mid(RemoteKind::Screen, 3), Some(20));
+        assert_eq!(pools.mid(RemoteKind::Screen, 4), None);
+        assert_eq!(
+            MidLayout::Pools(pools).classify("9").map(|r| r.kind),
+            Some(RemoteKind::Camera)
+        );
+        assert_eq!(
+            MidLayout::Triples.classify("9").map(|r| r.kind),
+            Some(RemoteKind::Audio)
         );
     }
 

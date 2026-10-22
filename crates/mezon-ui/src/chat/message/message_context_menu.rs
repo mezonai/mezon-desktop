@@ -109,16 +109,28 @@ fn close_quick_menu_submenu(
 }
 
 fn is_first_topic_message(msg: &Message, cx: &App) -> bool {
-    let topics = TopicsStore::global(cx).read(cx);
-    if topics
-        .active_topic_id()
-        .is_some_and(|topic_id| msg.channel_id == ChannelId(topic_id))
-    {
+    let Some(topic_id) = TopicsStore::global(cx).read(cx).active_topic_id() else {
         return false;
-    }
-    topics
-        .origin_message()
-        .is_some_and(|origin| origin.id == msg.id)
+    };
+    let topic_id = ChannelId(topic_id);
+    let messages = MessagesStore::global(cx).read(cx);
+    is_first_topic_message_in(
+        msg,
+        topic_id,
+        messages.messages_in_channel(topic_id),
+        messages.topic_has_more_top(),
+    )
+}
+
+fn is_first_topic_message_in(
+    msg: &Message,
+    topic_id: ChannelId,
+    messages: &[Message],
+    has_more_top: bool,
+) -> bool {
+    !has_more_top
+        && msg.channel_id == topic_id
+        && messages.first().is_some_and(|first| first.id == msg.id)
 }
 
 fn channel_delete_blocked(msg: &Message, cx: &App) -> bool {
@@ -241,6 +253,7 @@ pub(crate) fn build(
     reaction_submenu_open: bool,
     quick_menu_submenu_open: bool,
     selected_text: Option<String>,
+    clicked_image: Option<&str>,
     host: WeakEntity<ChannelMessages>,
     cx: &App,
 ) -> ContextMenu {
@@ -269,6 +282,7 @@ pub(crate) fn build(
         reaction_submenu_open,
         quick_menu_submenu_open,
         selected_text,
+        clicked_image,
         host,
         cx,
     )
@@ -577,6 +591,7 @@ fn build_channel_menu(
     reaction_submenu_open: bool,
     quick_menu_submenu_open: bool,
     selected_text: Option<String>,
+    clicked_image: Option<&str>,
     host: WeakEntity<ChannelMessages>,
     cx: &App,
 ) -> ContextMenu {
@@ -802,11 +817,14 @@ fn build_channel_menu(
         cx,
     );
 
-    let link = first_link(msg);
-    let image = msg
-        .attachments
-        .iter()
-        .find(|a| a.is_image())
+    let clicked = clicked_menu_image(msg, clicked_image);
+    let link = if clicked.is_some() {
+        None
+    } else {
+        first_link(msg)
+    };
+    let image = clicked
+        .or_else(|| first_menu_image(msg))
         .map(|a| (a.url.clone(), a.filename.clone()));
     if link.is_some() || image.is_some() || !is_own_message {
         menu = menu.separator();
@@ -818,6 +836,15 @@ fn build_channel_menu(
         });
         menu = menu.item(t("contextMenu.openLink"), move |_, cx| {
             open_message_link(link.clone(), cx);
+        });
+    } else if let Some((image_url, _)) = &image {
+        let url_for_copy = image_url.clone();
+        let url_for_open = image_url.clone();
+        menu = menu.item(t("contextMenu.copyLink"), move |_, cx| {
+            mezon_store::copy_media_url_to_clipboard(url_for_copy.clone(), cx);
+        });
+        menu = menu.item(t("contextMenu.openLink"), move |_, cx| {
+            mezon_store::open_media_url_external(url_for_open.clone(), cx);
         });
     }
     if !is_own_message {
@@ -892,9 +919,134 @@ fn build_channel_menu(
     menu.on_submenu_close(close_quick_menu_submenu(host))
 }
 
+fn clicked_menu_image<'a>(
+    msg: &'a Message,
+    clicked_image: Option<&str>,
+) -> Option<&'a mezon_store::MessageAttachment> {
+    let url = clicked_image?;
+    msg.attachments
+        .iter()
+        .find(|a| a.url == url && a.is_image() && !a.source_denied)
+}
+
+fn first_menu_image(msg: &Message) -> Option<&mezon_store::MessageAttachment> {
+    msg.attachments
+        .iter()
+        .find(|a| a.is_image() && !a.source_denied)
+}
+
+#[cfg(test)]
+mod menu_image_tests {
+    use super::{clicked_menu_image, first_menu_image};
+    use mezon_store::{Message, MessageAttachment, MessageId};
+
+    fn image(url: &str, source_denied: bool) -> MessageAttachment {
+        MessageAttachment {
+            url: url.to_string(),
+            filetype: "image/png".to_string(),
+            source_denied,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn the_right_clicked_image_wins_over_the_first_one() {
+        let msg = Message::new(MessageId(1), "", "1", "Alice", 0).with_attachments(vec![
+            image("https://cdn/a.png", false),
+            image("https://cdn/b.png", false),
+            image("https://cdn/c.png", true),
+        ]);
+        let pick = |clicked| {
+            clicked_menu_image(&msg, clicked)
+                .or_else(|| first_menu_image(&msg))
+                .map(|a| a.url.as_str())
+        };
+        assert_eq!(pick(Some("https://cdn/b.png")), Some("https://cdn/b.png"));
+        assert_eq!(pick(None), Some("https://cdn/a.png"));
+        assert_eq!(pick(Some("https://cdn/c.png")), Some("https://cdn/a.png"));
+        assert_eq!(pick(Some("https://other/x.png")), Some("https://cdn/a.png"));
+        assert!(clicked_menu_image(&msg, Some("https://cdn/c.png")).is_none());
+    }
+}
+
 #[cfg(test)]
 mod delete_permission_tests {
-    use super::delete_message_allowed;
+    use super::{delete_message_allowed, is_first_topic_message_in};
+    use mezon_store::{ChannelId, Message, MessageId};
+
+    fn message(id: i64, channel_id: i64) -> Message {
+        let mut message = Message::new(MessageId(id), "content", "1", "Alice", 0);
+        message.channel_id = ChannelId(channel_id);
+        message
+    }
+
+    #[test]
+    fn only_the_first_reply_at_the_start_of_topic_history_is_protected() {
+        let topic_id = ChannelId(20);
+        let root = message(1, 10);
+        let initial_topic_message = message(2, 20);
+        let later_reply = message(3, 20);
+        let messages = [initial_topic_message.clone(), later_reply.clone()];
+
+        assert!(!is_first_topic_message_in(
+            &root, topic_id, &messages, false
+        ));
+        assert!(is_first_topic_message_in(
+            &initial_topic_message,
+            topic_id,
+            &messages,
+            false
+        ));
+        assert!(!is_first_topic_message_in(
+            &later_reply,
+            topic_id,
+            &messages,
+            false
+        ));
+    }
+
+    #[test]
+    fn no_topic_message_is_protected_before_replies_are_loaded() {
+        assert!(!is_first_topic_message_in(
+            &message(2, 20),
+            ChannelId(20),
+            &[],
+            false
+        ));
+    }
+
+    #[test]
+    fn loading_older_history_does_not_protect_a_page_boundary_reply() {
+        let topic_id = ChannelId(20);
+        let first_reply = message(2, 20);
+        let page_boundary_reply = message(50, 20);
+        let latest_page = [page_boundary_reply.clone(), message(51, 20)];
+
+        assert!(!is_first_topic_message_in(
+            &page_boundary_reply,
+            topic_id,
+            &latest_page,
+            true
+        ));
+
+        let history = [
+            first_reply.clone(),
+            page_boundary_reply.clone(),
+            message(51, 20),
+        ];
+        assert!(!is_first_topic_message_in(
+            &page_boundary_reply,
+            topic_id,
+            &history,
+            false
+        ));
+        assert!(is_first_topic_message_in(
+            &first_reply,
+            topic_id,
+            &history,
+            false
+        ));
+    }
 
     #[test]
     fn own_message_is_always_deletable() {

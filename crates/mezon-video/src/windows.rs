@@ -1,7 +1,8 @@
 use std::cell::{Cell, RefCell};
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::Once;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use windows::Win32::Foundation::{E_FAIL, HMODULE, RECT};
 use windows::Win32::Graphics::Direct3D::{
@@ -23,10 +24,11 @@ use windows::Win32::Media::MediaFoundation::{
     IMFMediaType, IMFSample, IMFSourceReader, MF_MEDIA_ENGINE_CALLBACK,
     MF_MEDIA_ENGINE_DXGI_MANAGER, MF_MEDIA_ENGINE_EVENT_ERROR, MF_MEDIA_ENGINE_VIDEO_OUTPUT_FORMAT,
     MF_MT_DEFAULT_STRIDE, MF_MT_FRAME_SIZE, MF_MT_MAJOR_TYPE, MF_MT_SUBTYPE, MF_MT_VIDEO_ROTATION,
-    MF_SOURCE_READER_ALL_STREAMS, MF_SOURCE_READER_ENABLE_VIDEO_PROCESSING,
-    MF_SOURCE_READER_FIRST_VIDEO_STREAM, MF_SOURCE_READERF_ENDOFSTREAM, MF_SOURCE_READERF_ERROR,
-    MF_VERSION, MFCreateAttributes, MFCreateDXGIDeviceManager, MFCreateMediaType,
-    MFCreateSourceReaderFromURL, MFMediaType_Video, MFSTARTUP_FULL, MFStartup, MFVideoFormat_RGB32,
+    MF_PD_DURATION, MF_SOURCE_READER_ALL_STREAMS, MF_SOURCE_READER_ENABLE_VIDEO_PROCESSING,
+    MF_SOURCE_READER_FIRST_VIDEO_STREAM, MF_SOURCE_READER_MEDIASOURCE,
+    MF_SOURCE_READERF_ENDOFSTREAM, MF_SOURCE_READERF_ERROR, MF_VERSION, MFCreateAttributes,
+    MFCreateDXGIDeviceManager, MFCreateMediaType, MFCreateSourceReaderFromURL, MFMediaType_Video,
+    MFSTARTUP_FULL, MFStartup, MFVideoFormat_RGB32,
 };
 use windows::Win32::System::Com::StructuredStorage::PROPVARIANT;
 use windows::Win32::System::Com::{
@@ -75,7 +77,16 @@ struct StagingTextures {
     staging: ID3D11Texture2D,
 }
 
+enum PlayerBackend {
+    MediaFoundation(MediaFoundationPlayer),
+    Webm(Box<crate::webm_player::WebmPlayerImpl>),
+}
+
 pub struct PlayerImpl {
+    inner: PlayerBackend,
+}
+
+struct MediaFoundationPlayer {
     engine: IMFMediaEngine,
     engine_ex: Option<IMFMediaEngineEx>,
     device: ID3D11Device,
@@ -87,6 +98,14 @@ pub struct PlayerImpl {
     last_pts: Cell<i64>,
     max_size: Option<(u32, u32)>,
     failed: Arc<AtomicBool>,
+    duration_hint: Option<f64>,
+    temp_file: Option<PathBuf>,
+}
+
+pub struct MediaFoundationSource {
+    url: String,
+    duration: Option<f64>,
+    temp_file: Option<PathBuf>,
 }
 
 impl PlayerImpl {
@@ -94,13 +113,148 @@ impl PlayerImpl {
         if url.is_empty() {
             return Err(PlayerError::InvalidUrl);
         }
-        Self::build(url, max_size).map_err(|error| {
+        if crate::webm_player::is_webm_source(url) {
+            return Err(PlayerError::Open);
+        }
+        let inner = MediaFoundationPlayer::build(url, max_size).map_err(|error| {
             tracing::warn!(target: "mezon_video", ?error, "failed to open media foundation engine");
             PlayerError::Open
+        })?;
+        Ok(Self { inner })
+    }
+
+    pub fn from_media_foundation(
+        source: MediaFoundationSource,
+        max_size: Option<(u32, u32)>,
+    ) -> Result<Self, PlayerError> {
+        match MediaFoundationPlayer::build_engine(&source.url, max_size) {
+            Ok(mut player) => {
+                player.duration_hint = source.duration;
+                player.temp_file = source.temp_file;
+                Ok(Self {
+                    inner: PlayerBackend::MediaFoundation(player),
+                })
+            }
+            Err(error) => {
+                tracing::warn!(target: "mezon_video", ?error, "failed to open media foundation engine");
+                if let Some(path) = source.temp_file {
+                    remove_temp_file(path);
+                }
+                Err(PlayerError::Open)
+            }
+        }
+    }
+
+    pub fn from_webm(player: crate::webm_player::WebmPlayerImpl) -> Self {
+        Self {
+            inner: PlayerBackend::Webm(Box::new(player)),
+        }
+    }
+
+    pub fn from_webm_bytes(
+        bytes: Vec<u8>,
+        max_size: Option<(u32, u32)>,
+    ) -> Result<Self, PlayerError> {
+        Ok(Self {
+            inner: PlayerBackend::Webm(Box::new(crate::webm_player::WebmPlayerImpl::open_bytes(
+                bytes, max_size,
+            )?)),
         })
     }
 
-    fn build(url: &str, max_size: Option<(u32, u32)>) -> windows::core::Result<Self> {
+    pub fn copy_frame(&self) -> Option<VideoFrame> {
+        match &self.inner {
+            PlayerBackend::MediaFoundation(player) => player.copy_frame(),
+            PlayerBackend::Webm(player) => player.copy_frame(),
+        }
+    }
+
+    pub fn play(&self) {
+        match &self.inner {
+            PlayerBackend::MediaFoundation(player) => player.play(),
+            PlayerBackend::Webm(player) => player.play(),
+        }
+    }
+
+    pub fn pause(&self) {
+        match &self.inner {
+            PlayerBackend::MediaFoundation(player) => player.pause(),
+            PlayerBackend::Webm(player) => player.pause(),
+        }
+    }
+
+    pub fn is_playing(&self) -> bool {
+        match &self.inner {
+            PlayerBackend::MediaFoundation(player) => player.is_playing(),
+            PlayerBackend::Webm(player) => player.is_playing(),
+        }
+    }
+
+    pub fn current_time(&self) -> f64 {
+        match &self.inner {
+            PlayerBackend::MediaFoundation(player) => player.current_time(),
+            PlayerBackend::Webm(player) => player.current_time(),
+        }
+    }
+
+    pub fn duration(&self) -> f64 {
+        match &self.inner {
+            PlayerBackend::MediaFoundation(player) => player.duration(),
+            PlayerBackend::Webm(player) => player.duration(),
+        }
+    }
+
+    pub fn seek(&self, to_seconds: f64) {
+        match &self.inner {
+            PlayerBackend::MediaFoundation(player) => player.seek(to_seconds),
+            PlayerBackend::Webm(player) => player.seek(to_seconds),
+        }
+    }
+
+    pub fn set_volume(&self, volume: f32) {
+        match &self.inner {
+            PlayerBackend::MediaFoundation(player) => player.set_volume(volume),
+            PlayerBackend::Webm(player) => player.set_volume(volume),
+        }
+    }
+
+    pub fn volume(&self) -> f32 {
+        match &self.inner {
+            PlayerBackend::MediaFoundation(player) => player.volume(),
+            PlayerBackend::Webm(player) => player.volume(),
+        }
+    }
+
+    pub fn set_muted(&self, muted: bool) {
+        match &self.inner {
+            PlayerBackend::MediaFoundation(player) => player.set_muted(muted),
+            PlayerBackend::Webm(player) => player.set_muted(muted),
+        }
+    }
+
+    pub fn is_muted(&self) -> bool {
+        match &self.inner {
+            PlayerBackend::MediaFoundation(player) => player.is_muted(),
+            PlayerBackend::Webm(player) => player.is_muted(),
+        }
+    }
+
+    pub fn failed(&self) -> bool {
+        match &self.inner {
+            PlayerBackend::MediaFoundation(player) => player.failed(),
+            PlayerBackend::Webm(player) => player.failed(),
+        }
+    }
+}
+
+impl MediaFoundationPlayer {
+    fn build(url: &str, max_size: Option<(u32, u32)>) -> windows::core::Result<PlayerBackend> {
+        Ok(PlayerBackend::MediaFoundation(Self::build_engine(
+            url, max_size,
+        )?))
+    }
+
+    fn build_engine(url: &str, max_size: Option<(u32, u32)>) -> windows::core::Result<Self> {
         ensure_media_foundation()?;
         unsafe {
             let mut device: Option<ID3D11Device> = None;
@@ -167,11 +321,13 @@ impl PlayerImpl {
                 last_pts: Cell::new(0),
                 max_size,
                 failed,
+                duration_hint: None,
+                temp_file: None,
             })
         }
     }
 
-    pub fn copy_frame(&self) -> Option<VideoFrame> {
+    fn copy_frame(&self) -> Option<VideoFrame> {
         unsafe {
             let pts = match self.engine.OnVideoStreamTick() {
                 Ok(pts) => pts,
@@ -361,41 +517,49 @@ impl PlayerImpl {
         texture.ok_or_else(|| windows::core::Error::from(E_FAIL))
     }
 
-    pub fn play(&self) {
+    fn play(&self) {
         unsafe {
             let _ = self.engine.Play();
         }
     }
 
-    pub fn pause(&self) {
+    fn pause(&self) {
         unsafe {
             let _ = self.engine.Pause();
         }
     }
 
-    pub fn is_playing(&self) -> bool {
+    fn is_playing(&self) -> bool {
         unsafe { !self.engine.IsPaused().as_bool() }
     }
 
-    pub fn current_time(&self) -> f64 {
+    fn current_time(&self) -> f64 {
         let value = unsafe { self.engine.GetCurrentTime() };
-        if value.is_finite() && value >= 0.0 {
+        let value = if value.is_finite() && value >= 0.0 {
             value
         } else {
             0.0
+        };
+        let duration = self.duration();
+        if duration > 0.0 {
+            value.min(duration)
+        } else if value > MAX_MEDIA_SECONDS {
+            0.0
+        } else {
+            value
         }
     }
 
-    pub fn duration(&self) -> f64 {
+    fn duration(&self) -> f64 {
         let value = unsafe { self.engine.GetDuration() };
-        if value.is_finite() && value >= 0.0 {
+        if value.is_finite() && value > 0.0 {
             value
         } else {
-            0.0
+            self.duration_hint.unwrap_or(0.0)
         }
     }
 
-    pub fn seek(&self, to_seconds: f64) {
+    fn seek(&self, to_seconds: f64) {
         let target = if to_seconds.is_finite() && to_seconds >= 0.0 {
             to_seconds
         } else {
@@ -406,47 +570,154 @@ impl PlayerImpl {
         }
     }
 
-    pub fn set_volume(&self, volume: f32) {
+    fn set_volume(&self, volume: f32) {
         let target = (volume as f64).clamp(0.0, 1.0);
         unsafe {
             let _ = self.engine.SetVolume(target);
         }
     }
 
-    pub fn volume(&self) -> f32 {
+    fn volume(&self) -> f32 {
         unsafe { self.engine.GetVolume() as f32 }
     }
 
-    pub fn set_muted(&self, muted: bool) {
+    fn set_muted(&self, muted: bool) {
         unsafe {
             let _ = self.engine.SetMuted(muted);
         }
     }
 
-    pub fn is_muted(&self) -> bool {
+    fn is_muted(&self) -> bool {
         unsafe { self.engine.GetMuted().as_bool() }
     }
 
-    pub fn failed(&self) -> bool {
+    fn failed(&self) -> bool {
         self.failed.load(Ordering::SeqCst)
     }
 }
 
-impl Drop for PlayerImpl {
+impl Drop for MediaFoundationPlayer {
     fn drop(&mut self) {
         unsafe {
             let _ = self.engine.Shutdown();
         }
+        if let Some(path) = self.temp_file.take() {
+            remove_temp_file(path);
+        }
     }
 }
 
+fn remove_temp_file(path: PathBuf) {
+    std::thread::spawn(move || {
+        let _ = std::fs::remove_file(path);
+    });
+}
+
 const POSTER_TIME_HNS: i64 = 10_000_000;
+const HNS_PER_SECOND: f64 = 10_000_000.0;
+const MAX_MEDIA_SECONDS: f64 = 1.0e8;
 const POSTER_MAX_READS: u32 = 32;
+
+pub fn prepare_media_foundation(url: &str) -> Option<MediaFoundationSource> {
+    ensure_media_foundation().ok()?;
+    unsafe {
+        let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
+    }
+    let duration = match unsafe { first_frame_and_duration(url) } {
+        Ok((true, duration)) => duration,
+        Ok((false, _)) => return None,
+        Err(error) => {
+            tracing::info!(target: "mezon_video", %error, "media foundation cannot open this source");
+            return None;
+        }
+    };
+    if duration.is_some() {
+        return Some(MediaFoundationSource {
+            url: url.to_string(),
+            duration,
+            temp_file: None,
+        });
+    }
+    Some(
+        local_copy_with_duration(url).unwrap_or_else(|| MediaFoundationSource {
+            url: url.to_string(),
+            duration: None,
+            temp_file: None,
+        }),
+    )
+}
+
+unsafe fn first_frame_and_duration(url: &str) -> windows::core::Result<(bool, Option<f64>)> {
+    unsafe {
+        let mut attributes = None;
+        MFCreateAttributes(&mut attributes, 1)?;
+        let attributes = attributes.ok_or_else(|| windows::core::Error::from(E_FAIL))?;
+        attributes.SetUINT32(&MF_SOURCE_READER_ENABLE_VIDEO_PROCESSING, 1)?;
+        let reader = MFCreateSourceReaderFromURL(&HSTRING::from(url), &attributes)?;
+        let duration = reader
+            .GetPresentationAttribute(MF_SOURCE_READER_MEDIASOURCE.0 as u32, &MF_PD_DURATION)
+            .ok()
+            .as_ref()
+            .and_then(propvariant_u64)
+            .filter(|hns| *hns > 0)
+            .map(|hns| hns as f64 / HNS_PER_SECOND);
+        let stream = MF_SOURCE_READER_FIRST_VIDEO_STREAM.0 as u32;
+        reader.SetStreamSelection(MF_SOURCE_READER_ALL_STREAMS.0 as u32, false)?;
+        reader.SetStreamSelection(stream, true)?;
+        let requested = MFCreateMediaType()?;
+        requested.SetGUID(&MF_MT_MAJOR_TYPE, &MFMediaType_Video)?;
+        requested.SetGUID(&MF_MT_SUBTYPE, &MFVideoFormat_RGB32)?;
+        reader.SetCurrentMediaType(stream, None, &requested)?;
+        Ok((read_first_frame(&reader, stream).is_some(), duration))
+    }
+}
+
+fn local_copy_with_duration(url: &str) -> Option<MediaFoundationSource> {
+    static NEXT_TEMP: AtomicU64 = AtomicU64::new(0);
+    let bytes = crate::webm_player::load_webm_bytes(url).ok()?;
+    let duration = crate::webm_player::matroska_duration_seconds(&bytes)?;
+    let path = std::env::temp_dir().join(format!(
+        "mezon-webm-{}-{}.webm",
+        std::process::id(),
+        NEXT_TEMP.fetch_add(1, Ordering::Relaxed)
+    ));
+    std::fs::write(&path, &bytes).ok()?;
+    Some(MediaFoundationSource {
+        url: file_url(&path)?,
+        duration: Some(duration),
+        temp_file: Some(path),
+    })
+}
+
+fn file_url(path: &std::path::Path) -> Option<String> {
+    let path = path.to_str()?.replace('\\', "/");
+    let mut url = String::from("file:///");
+    for byte in path.bytes() {
+        if byte.is_ascii_alphanumeric() || matches!(byte, b'/' | b':' | b'-' | b'_' | b'.' | b'~') {
+            url.push(char::from(byte));
+        } else {
+            url.push_str(&format!("%{byte:02X}"));
+        }
+    }
+    Some(url)
+}
 
 pub fn probe_video(path: &str, max_poster_edge: u32) -> Option<VideoProbe> {
     if path.is_empty() {
         return None;
     }
+    let probe = probe_with_media_foundation(path, max_poster_edge);
+    if crate::webm_player::is_webm_source(path)
+        && probe
+            .as_ref()
+            .is_none_or(|probe| probe.poster_jpeg.is_none())
+    {
+        return crate::webm_player::probe_webm(path, max_poster_edge);
+    }
+    probe
+}
+
+fn probe_with_media_foundation(path: &str, max_poster_edge: u32) -> Option<VideoProbe> {
     ensure_media_foundation().ok()?;
     unsafe {
         let _ = CoInitializeEx(None, COINIT_MULTITHREADED);

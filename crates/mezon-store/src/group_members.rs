@@ -12,7 +12,7 @@ use crate::realtime::{RealtimeDispatch, RealtimeKind};
 
 const MAX_CACHED_GROUPS: usize = 64;
 
-const GROUP_MEMBER_FETCH_LIMIT: i32 = 500;
+pub(crate) const GROUP_MEMBER_FETCH_LIMIT: i32 = 500;
 
 pub const MAX_GROUP_MEMBERS: usize = 20;
 
@@ -279,7 +279,10 @@ impl GroupMembersStore {
                             this.fetch(channel_id, cx);
                             return;
                         }
-                        let members = group_members_from_proto(&resp);
+                        let mut members = group_members_from_proto(&resp);
+                        for member in &mut members {
+                            crate::user_profile::reconcile_user_profile(&mut member.user, cx);
+                        }
                         this.cache
                             .insert(channel_id, GroupBucket::from_members(members), None);
                         cx.emit(GroupMembersEvent::Changed { channel_id });
@@ -305,6 +308,29 @@ impl GroupMembersStore {
         self.fetch(channel_id, cx);
     }
 
+    pub(crate) fn profile_channel(&self, user_id: UserId) -> Option<ChannelId> {
+        self.cache.iter().find_map(|(channel_id, bucket)| {
+            bucket.by_id.contains_key(&user_id).then_some(*channel_id)
+        })
+    }
+
+    pub(crate) fn apply_user_profile(&mut self, user: &User, cx: &mut Context<Self>) {
+        let mut changed = false;
+        for (channel_id, bucket) in self.cache.iter_mut() {
+            if let Some(&index) = bucket.by_id.get(&user.id)
+                && bucket.members[index].user.update_profile(user)
+            {
+                cx.emit(GroupMembersEvent::Changed {
+                    channel_id: *channel_id,
+                });
+                changed = true;
+            }
+        }
+        if changed {
+            cx.notify();
+        }
+    }
+
     fn handle_event(&mut self, event: &RealtimeEvent, cx: &mut Context<Self>) {
         let changed_channel = match event {
             RealtimeEvent::UserChannelAdded(e) => {
@@ -322,6 +348,11 @@ impl GroupMembersStore {
             _ => None,
         };
         if let Some(channel_id) = changed_channel {
+            if let Some(bucket) = self.cache.get_mut(&channel_id) {
+                for member in &mut bucket.members {
+                    crate::user_profile::reconcile_user_profile(&mut member.user, cx);
+                }
+            }
             cx.emit(GroupMembersEvent::Changed { channel_id });
             cx.notify();
         }
@@ -409,6 +440,49 @@ fn apply_remove_members(
 
 #[cfg(test)]
 mod tests {
+
+    #[gpui::test]
+    fn confirmed_profile_clears_fields_and_preserves_group_presence(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            let api = Arc::new(AppApi::new(
+                Arc::new(mezon_client::TransportClient::new(String::new())),
+                String::new(),
+            ));
+            RealtimeDispatch::init(api.clone(), cx);
+            let store = GroupMembersStore::init(api, cx);
+            store.update(cx, |store, cx| {
+                store.cache.insert(
+                    ChannelId(1),
+                    GroupBucket::from_members(vec![GroupMember {
+                        user: User {
+                            id: UserId(7),
+                            username: "user".into(),
+                            display_name: "Old".into(),
+                            avatar_url: "old.png".into(),
+                            join_time_seconds: 9,
+                            ..Default::default()
+                        },
+                        online: true,
+                    }]),
+                    None,
+                );
+                store.apply_user_profile(
+                    &User {
+                        id: UserId(7),
+                        username: "user".into(),
+                        ..Default::default()
+                    },
+                    cx,
+                );
+                let member = store.member(ChannelId(1), UserId(7)).unwrap();
+                assert_eq!(member.name(), "user");
+                assert!(member.avatar().is_empty());
+                assert!(member.online);
+                assert_eq!(member.user.join_time_seconds, 9);
+            });
+        });
+    }
+
     use super::*;
 
     fn proto_response(ids: &[i64]) -> api::AllUsersAddChannelResponse {

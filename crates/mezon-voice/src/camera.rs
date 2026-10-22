@@ -268,6 +268,7 @@ fn capture_loop(
     let frame_interval = Duration::from_secs_f64(1.0 / TARGET_FPS as f64);
     let mut last_capture: Option<Instant> = None;
     let mut waiting_for_frame = Instant::now();
+    let mut frame_errors: u32 = 0;
 
     'outer: loop {
         let switch_to = 'capture: loop {
@@ -286,10 +287,18 @@ fn capture_loop(
             let buffer = match camera.frame() {
                 Ok(buffer) => buffer,
                 Err(e) => {
-                    tracing::warn!("camera frame error: {e}");
+                    frame_errors = frame_errors.saturating_add(1);
+                    if frame_errors.is_power_of_two() {
+                        tracing::warn!(errors = frame_errors, "camera frame error: {e}");
+                    }
+                    std::thread::sleep(frame_interval);
                     continue;
                 }
             };
+            if frame_errors > 0 {
+                tracing::info!(errors = frame_errors, "camera frames resumed");
+                frame_errors = 0;
+            }
             if last_capture.is_none() {
                 tracing::info!(
                     elapsed_ms = waiting_for_frame.elapsed().as_millis() as u64,
@@ -333,6 +342,7 @@ fn capture_loop(
         };
         last_capture = None;
         waiting_for_frame = Instant::now();
+        frame_errors = 0;
     }
 
     frame_store.remove(key);
@@ -542,12 +552,6 @@ fn open_camera(device_id: Option<&str>) -> Result<Camera, String> {
                     if using_cache && let Ok(mut cache) = camera_format_cache().lock() {
                         cache.remove(&cache_key);
                     }
-                    tracing::debug!(
-                        camera = %index.as_string(),
-                        format = ?requested,
-                        error = %e,
-                        "camera open attempt failed"
-                    );
                     last_err = e;
                 }
             }

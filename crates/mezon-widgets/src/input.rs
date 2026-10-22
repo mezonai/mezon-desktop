@@ -24,12 +24,12 @@ use crate::text_actions::{
     TEXT_INPUT_CONTEXT, Undo, Up,
 };
 use crate::text_edit::{
-    EditKind, HistoryEntry, MAX_UNDO_HISTORY, SelectGranularity, ceil_char_boundary,
-    clip_insert_to_byte_limit, clipped_edit_is_rejected, extend_range_for_granularity,
-    floor_char_boundary, granularity_for_click, home_target, ime_replace_range, line_end,
-    line_start, marked_caret_range, marked_range_after_delete, next_word_boundary,
-    previous_word_boundary, range_for_granularity, should_coalesce, splice_out_byte_range,
-    surrounding_delete_range, swallow_discarded_ime_commit,
+    HistoryEntry, SelectGranularity, ceil_char_boundary, clip_insert_to_byte_limit,
+    clipped_edit_is_rejected, extend_range_for_granularity, floor_char_boundary,
+    granularity_for_click, home_target, ime_replace_range, line_end, line_start,
+    marked_caret_range, marked_range_after_delete, next_word_boundary, previous_word_boundary,
+    push_undo_entry, range_for_granularity, splice_out_byte_range, surrounding_delete_range,
+    swallow_discarded_ime_commit,
 };
 
 const MASK: char = '\u{2022}';
@@ -81,7 +81,6 @@ pub struct InputState {
     token_bg_color: Option<Hsla>,
     undo_stack: Vec<HistoryEntry>,
     redo_stack: Vec<HistoryEntry>,
-    last_edit_kind: Option<EditKind>,
     pub(crate) caret_blink: CaretBlink,
 }
 
@@ -135,7 +134,6 @@ impl InputState {
             token_bg_color: None,
             undo_stack: Vec::new(),
             redo_stack: Vec::new(),
-            last_edit_kind: None,
             caret_blink: CaretBlink::new(),
         };
 
@@ -662,17 +660,12 @@ impl InputState {
         }
     }
 
-    fn record_history(&mut self, kind: EditKind) {
-        let coalesce = should_coalesce(self.last_edit_kind, kind);
-        self.redo_stack.clear();
-        if !coalesce {
-            self.undo_stack.push(self.history_snapshot());
-            if self.undo_stack.len() > MAX_UNDO_HISTORY {
-                let overflow = self.undo_stack.len() - MAX_UNDO_HISTORY;
-                self.undo_stack.drain(..overflow);
-            }
+    fn record_history(&mut self, before: HistoryEntry) {
+        if before.content == self.content {
+            return;
         }
-        self.last_edit_kind = Some(kind);
+        self.redo_stack.clear();
+        push_undo_entry(&mut self.undo_stack, before);
     }
 
     fn restore_history(&mut self, entry: HistoryEntry, cx: &mut Context<Self>) {
@@ -680,7 +673,6 @@ impl InputState {
         self.selected_range = entry.selected_range;
         self.selection_reversed = entry.selection_reversed;
         self.marked_range = None;
-        self.last_edit_kind = None;
         self.refresh_filter_token_chips(cx);
         self.pause_caret_blink(cx);
         cx.notify();
@@ -690,7 +682,6 @@ impl InputState {
     fn clear_history(&mut self) {
         self.undo_stack.clear();
         self.redo_stack.clear();
-        self.last_edit_kind = None;
     }
 
     fn backspace(&mut self, _: &Backspace, window: &mut Window, cx: &mut Context<Self>) {
@@ -758,7 +749,6 @@ impl InputState {
         self.select_anchor = range.clone();
         self.selection_reversed = false;
         self.selected_range = range;
-        self.last_edit_kind = None;
         self.pause_caret_blink(cx);
         cx.notify();
     }
@@ -798,7 +788,6 @@ impl InputState {
         }
         self.selected_range = range;
         self.selection_reversed = reversed;
-        self.last_edit_kind = None;
         self.pause_caret_blink(cx);
         cx.notify();
     }
@@ -850,7 +839,6 @@ impl InputState {
 
     fn move_to(&mut self, offset: usize, cx: &mut Context<Self>) {
         self.selected_range = offset..offset;
-        self.last_edit_kind = None;
         self.pause_caret_blink(cx);
         cx.notify()
     }
@@ -964,7 +952,6 @@ impl InputState {
     }
 
     fn select_to(&mut self, offset: usize, cx: &mut Context<Self>) {
-        self.last_edit_kind = None;
         self.extend_selection(offset, cx);
     }
 
@@ -1124,16 +1111,9 @@ impl EntityInputHandler for InputState {
             return;
         }
 
-        let kind = if new_text.is_empty() {
-            EditKind::Delete
-        } else if self.marked_range.is_some() || (range.is_empty() && !new_text.contains('\n')) {
-            EditKind::Insert
-        } else {
-            EditKind::Other
-        };
-        self.record_history(kind);
-
+        let before = self.history_snapshot();
         self.content = candidate.into();
+        self.record_history(before);
         self.selected_range = range.start + new_text.len()..range.start + new_text.len();
         if new_text.is_empty() {
             self.marked_range = marked_range_after_delete(prior_marked.as_ref(), &range);
@@ -1181,11 +1161,9 @@ impl EntityInputHandler for InputState {
             return;
         }
 
-        if self.marked_range.is_none() {
-            self.record_history(EditKind::Insert);
-        }
-
+        let before = self.history_snapshot();
         self.content = candidate.into();
+        self.record_history(before);
         if !new_text.is_empty() {
             self.marked_range = Some(range.start..range.start + new_text.len());
         } else {
@@ -2072,7 +2050,7 @@ impl RenderOnce for Input {
 
 #[cfg(test)]
 mod tests {
-    use super::{InputState, compute_draw_offset, to_single_line_display};
+    use super::{Backspace, InputState, Redo, Undo, compute_draw_offset, to_single_line_display};
     use gpui::{Entity, EntityInputHandler, SharedString, TestAppContext, VisualTestContext, px};
 
     fn input_with_limit(
@@ -2115,6 +2093,72 @@ mod tests {
 
     fn composing(input: &Entity<InputState>, cx: &mut VisualTestContext) -> bool {
         input.update(cx, |state, _| state.is_composing())
+    }
+
+    fn undo(input: &Entity<InputState>, cx: &mut VisualTestContext) -> String {
+        input.update_in(cx, |state, window, cx| state.undo(&Undo, window, cx));
+        value(input, cx)
+    }
+
+    fn redo(input: &Entity<InputState>, cx: &mut VisualTestContext) -> String {
+        input.update_in(cx, |state, window, cx| state.redo(&Redo, window, cx));
+        value(input, cx)
+    }
+
+    fn backspace(input: &Entity<InputState>, cx: &mut VisualTestContext) {
+        input.update_in(cx, |state, window, cx| {
+            state.backspace(&Backspace, window, cx)
+        });
+    }
+
+    #[gpui::test]
+    fn every_typed_character_is_its_own_undo_step(cx: &mut TestAppContext) {
+        let (input, cx) = input_with_limit(cx, None);
+        for ch in ["h", "i", " ", "y", "o"] {
+            insert(&input, cx, ch);
+        }
+        assert_eq!(undo(&input, cx), "hi y");
+        assert_eq!(undo(&input, cx), "hi ");
+        assert_eq!(undo(&input, cx), "hi");
+        assert_eq!(undo(&input, cx), "h");
+        assert_eq!(undo(&input, cx), "");
+        assert_eq!(undo(&input, cx), "");
+        assert_eq!(redo(&input, cx), "h");
+        assert_eq!(redo(&input, cx), "hi");
+    }
+
+    #[gpui::test]
+    fn every_backspace_is_its_own_undo_step(cx: &mut TestAppContext) {
+        let (input, cx) = input_with_limit(cx, None);
+        set(&input, cx, "abc");
+        backspace(&input, cx);
+        backspace(&input, cx);
+        assert_eq!(value(&input, cx), "a");
+        assert_eq!(undo(&input, cx), "ab");
+        assert_eq!(undo(&input, cx), "abc");
+        assert_eq!(undo(&input, cx), "abc");
+    }
+
+    #[gpui::test]
+    fn every_preedit_change_is_a_step_but_an_unchanged_commit_is_not(cx: &mut TestAppContext) {
+        let (input, cx) = input_with_limit(cx, None);
+        compose(&input, cx, "e");
+        compose(&input, cx, "ê");
+        insert(&input, cx, "ê");
+        assert!(!composing(&input, cx));
+        assert_eq!(undo(&input, cx), "e");
+        assert_eq!(undo(&input, cx), "");
+    }
+
+    #[gpui::test]
+    fn an_edit_after_undo_drops_the_redo_steps(cx: &mut TestAppContext) {
+        let (input, cx) = input_with_limit(cx, None);
+        insert(&input, cx, "a");
+        insert(&input, cx, "b");
+        assert_eq!(undo(&input, cx), "a");
+        insert(&input, cx, "c");
+        assert_eq!(redo(&input, cx), "ac");
+        assert_eq!(undo(&input, cx), "a");
     }
 
     #[gpui::test]

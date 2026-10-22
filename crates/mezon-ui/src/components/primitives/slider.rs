@@ -241,6 +241,7 @@ pub struct Slider {
     state: Entity<SliderState>,
     axis: Axis,
     disabled: bool,
+    percentage_positioning: bool,
 }
 
 impl Slider {
@@ -249,6 +250,7 @@ impl Slider {
             axis: Axis::Horizontal,
             state: state.clone(),
             disabled: false,
+            percentage_positioning: false,
         }
     }
 
@@ -267,9 +269,15 @@ impl Slider {
         self
     }
 
+    pub fn percentage_positioning(mut self) -> Self {
+        self.percentage_positioning = true;
+        self
+    }
+
     fn render_thumb(
         &self,
         start_pos: Pixels,
+        percentage: f32,
         is_start: bool,
         bar_color: Background,
         thumb_color: Hsla,
@@ -288,7 +296,12 @@ impl Slider {
             .id(id)
             .absolute()
             .when(is_horizontal(axis), |this| {
-                this.top(px(-5.)).left(start_pos).ml(-px(8.))
+                this.top(px(-5.))
+                    .when(self.percentage_positioning, |this| {
+                        this.left(gpui::relative(percentage))
+                    })
+                    .when(!self.percentage_positioning, |this| this.left(start_pos))
+                    .ml(-px(8.))
             })
             .when(!is_horizontal(axis), |this| {
                 this.bottom(start_pos).left(px(-5.)).mb(-px(8.))
@@ -334,12 +347,18 @@ impl RenderOnce for Slider {
         let entity_id = self.state.entity_id();
         let state = self.state.read(cx);
         let is_range = state.value().is_range();
+        let percentage_start = state.percentage.start;
+        let percentage_end = state.percentage.end;
         let bar_size = state.bounds.size.along(axis);
-        let bar_start = state.percentage.start * bar_size;
-        let bar_end = state.percentage.end * bar_size;
+        let bar_start = percentage_start * bar_size;
+        let bar_end = percentage_end * bar_size;
 
         let bar_color: Background = Hsla::from(cx.theme().brand).into();
-        let thumb_color: Hsla = cx.theme().text_primary.into();
+        let thumb_color: Hsla = if self.percentage_positioning {
+            cx.theme().tokens.text_theme_primary.into()
+        } else {
+            cx.theme().text_primary.into()
+        };
 
         div()
             .id(("slider", self.state.entity_id()))
@@ -416,7 +435,14 @@ impl RenderOnce for Slider {
                                 div()
                                     .absolute()
                                     .when(is_horizontal(axis), |this| {
-                                        this.h_full().left(bar_start).right(bar_size - bar_end)
+                                        this.h_full()
+                                            .when(self.percentage_positioning, |this| {
+                                                this.left(gpui::relative(percentage_start))
+                                                    .right(gpui::relative(1.0 - percentage_end))
+                                            })
+                                            .when(!self.percentage_positioning, |this| {
+                                                this.left(bar_start).right(bar_size - bar_end)
+                                            })
                                     })
                                     .when(!is_horizontal(axis), |this| {
                                         this.w_full().bottom(bar_start).top(bar_size - bar_end)
@@ -427,6 +453,7 @@ impl RenderOnce for Slider {
                             .when(is_range, |this| {
                                 this.child(self.render_thumb(
                                     bar_start,
+                                    percentage_start,
                                     true,
                                     bar_color,
                                     thumb_color,
@@ -436,6 +463,7 @@ impl RenderOnce for Slider {
                             })
                             .child(self.render_thumb(
                                 bar_end,
+                                percentage_end,
                                 false,
                                 bar_color,
                                 thumb_color,

@@ -276,6 +276,7 @@ impl Render for RowDragPreview {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme();
         div()
+            .font_family(crate::theme::ui_font_family(cx))
             .px_2()
             .py_1()
             .rounded(px(4.))

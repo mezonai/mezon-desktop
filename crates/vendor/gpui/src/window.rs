@@ -4753,6 +4753,11 @@ impl Window {
         self.last_input_modality = match &event {
             PlatformInput::KeyDown(_) => InputModality::Keyboard,
             PlatformInput::MouseMove(_) | PlatformInput::MouseDown(_) => InputModality::Mouse,
+            // mezon vendor edit: Linux (X11/Wayland) drag-and-drop emits only
+            // FileDrop events, not real mouse moves. Without this, a composer
+            // focused via keyboard keeps Keyboard modality and every
+            // hitbox.is_hovered() stays false through the drop MouseUp.
+            PlatformInput::FileDrop(_) => InputModality::Mouse,
             _ => self.last_input_modality,
         };
         if self.last_input_modality != old_modality {
@@ -4916,8 +4921,6 @@ impl Window {
                 // active drag can follow the mouse cursor.
                 self.refresh();
             } else if event.is::<MouseUpEvent>() {
-                // If this was a mouse up event, cancel the active drag and redraw
-                // the window.
                 cx.active_drag = None;
                 self.refresh();
             }

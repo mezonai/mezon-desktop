@@ -37,10 +37,22 @@ pub struct GotifyExtras {
     pub link: String,
     #[serde(default)]
     pub e2eemess: String,
-    #[serde(default, rename = "topicId", deserialize_with = "de_id")]
+    #[serde(default, rename = "channel", deserialize_with = "de_id")]
+    pub channel_id: String,
+    #[serde(default, rename = "topic", deserialize_with = "de_id")]
     pub topic_id: String,
-    #[serde(default, rename = "messageId", deserialize_with = "de_id")]
+    #[serde(default, rename = "message", deserialize_with = "de_message_ref_id")]
     pub message_id: String,
+}
+
+impl GotifyNotification {
+    pub fn effective_channel_id(&self) -> &str {
+        if self.channel_id.is_empty() || self.channel_id == "0" {
+            &self.extras.channel_id
+        } else {
+            &self.channel_id
+        }
+    }
 }
 
 /// Decode a snowflake id that may arrive as a JSON number, string, or null.
@@ -55,6 +67,24 @@ where
         serde_json::Value::Null => Ok(String::new()),
         other => Ok(other.to_string()),
     }
+}
+
+fn de_message_ref_id<'de, D>(deserializer: D) -> Result<String, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    use serde::Deserialize as _;
+    let serde_json::Value::String(raw) = serde_json::Value::deserialize(deserializer)? else {
+        return Ok(String::new());
+    };
+    let id = serde_json::from_str::<serde_json::Value>(&raw)
+        .ok()
+        .and_then(|reference| match reference.get("id")? {
+            serde_json::Value::String(id) => Some(id.clone()),
+            serde_json::Value::Number(id) => Some(id.to_string()),
+            _ => None,
+        });
+    Ok(id.unwrap_or_default())
 }
 
 /// Why a [`run_once`] session ended. The caller owns retry policy: it decides the backoff, when
@@ -243,5 +273,65 @@ mod backoff_tests {
     fn jitter_leaves_a_delay_too_small_to_split_alone() {
         let tiny = Duration::from_nanos(3);
         assert_eq!(with_jitter(tiny), tiny);
+    }
+}
+
+#[cfg(test)]
+mod extras_tests {
+    use super::*;
+
+    fn decode(extras: &str) -> GotifyExtras {
+        let frame = format!(
+            r#"{{"id":0,"channel_id":2048775833006379008,"message":"hi","title":"t","image":"","sender_id":42,"extras":{extras}}}"#
+        );
+        serde_json::from_str::<GotifyNotification>(&frame)
+            .expect("frame decodes")
+            .extras
+    }
+
+    #[test]
+    fn a_topic_reply_carries_its_topic_and_message_ids() {
+        let extras = decode(
+            r#"{"link":"https://mezon.ai/chat/clans/1/channels/2","sound":"default","e2ee":"false","topic":"2088098374732484608","title":"t","body":"hi","image":"","channel":"2048775833006379008","sender":"42","message":"{\"id\":\"1840651254099873792\"}"}"#,
+        );
+        assert_eq!(extras.link, "https://mezon.ai/chat/clans/1/channels/2");
+        assert_eq!(extras.topic_id, "2088098374732484608");
+        assert_eq!(extras.message_id, "1840651254099873792");
+    }
+
+    #[test]
+    fn a_mention_without_a_top_level_channel_routes_by_its_extras() {
+        let frame = r#"{"message":"hi","title":"t","extras":{"channel":"2048775833006379008","topic":"5"}}"#;
+        let notification: GotifyNotification = serde_json::from_str(frame).expect("frame decodes");
+        assert_eq!(notification.channel_id, "");
+        assert_eq!(notification.effective_channel_id(), "2048775833006379008");
+    }
+
+    #[test]
+    fn a_top_level_channel_wins_over_the_extras() {
+        let frame = r#"{"channel_id":7,"extras":{"channel":"8"}}"#;
+        let notification: GotifyNotification = serde_json::from_str(frame).expect("frame decodes");
+        assert_eq!(notification.effective_channel_id(), "7");
+    }
+
+    #[test]
+    fn a_channel_message_has_topic_zero() {
+        let extras =
+            decode(r#"{"link":"https://mezon.ai/chat","topic":"0","message":"{\"id\":\"7\"}"}"#);
+        assert_eq!(extras.topic_id, "0");
+        assert_eq!(extras.message_id, "7");
+    }
+
+    #[test]
+    fn an_oversized_body_drops_the_message_reference() {
+        let extras = decode(r#"{"link":"https://mezon.ai/chat","topic":"9"}"#);
+        assert_eq!(extras.topic_id, "9");
+        assert_eq!(extras.message_id, "");
+    }
+
+    #[test]
+    fn a_malformed_message_reference_reads_as_empty() {
+        assert_eq!(decode(r#"{"message":"not json"}"#).message_id, "");
+        assert_eq!(decode(r#"{"message":7}"#).message_id, "");
     }
 }

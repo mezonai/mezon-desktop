@@ -48,33 +48,12 @@ impl TextPainter {
         baseline_centre: f32,
         colour: u32,
     ) {
-        let buffer = self.shape(text, size, weight, f32::INFINITY);
-        let line_height = size * 1.2;
-        let top = baseline_centre - line_height / 2.0;
         let width = pixmap.width() as i32;
         let height = pixmap.height() as i32;
         let red = ((colour >> 16) & 0xff) as u8;
         let green = ((colour >> 8) & 0xff) as u8;
         let blue = (colour & 0xff) as u8;
-
-        let mut runs: Vec<(i32, i32, u8)> = Vec::new();
-        for run in buffer.layout_runs() {
-            for glyph in run.glyphs.iter() {
-                let physical = glyph.physical((left, top), 1.0);
-                self.cache.with_pixels(
-                    &mut self.fonts,
-                    physical.cache_key,
-                    cosmic_text::Color::rgb(red, green, blue),
-                    |x, y, pixel| {
-                        let alpha = pixel.a();
-                        if alpha == 0 {
-                            return;
-                        }
-                        runs.push((physical.x + x, physical.y + y + run.line_y as i32, alpha));
-                    },
-                );
-            }
-        }
+        let runs = self.coverage(text, size, weight, left, baseline_centre);
 
         let pixels = pixmap.pixels_mut();
         for (x, y, alpha) in runs {
@@ -87,6 +66,37 @@ impl TextPainter {
             };
             *slot = blend(*slot, red, green, blue, alpha);
         }
+    }
+
+    pub(crate) fn coverage(
+        &mut self,
+        text: &str,
+        size: f32,
+        weight: Weight,
+        left: f32,
+        baseline_centre: f32,
+    ) -> Vec<(i32, i32, u8)> {
+        let buffer = self.shape(text, size, weight, f32::INFINITY);
+        let top = baseline_centre - size * 1.2 / 2.0;
+        let mut runs: Vec<(i32, i32, u8)> = Vec::new();
+        for run in buffer.layout_runs() {
+            for glyph in run.glyphs.iter() {
+                let physical = glyph.physical((left, top), 1.0);
+                self.cache.with_pixels(
+                    &mut self.fonts,
+                    physical.cache_key,
+                    cosmic_text::Color::rgb(255, 255, 255),
+                    |x, y, pixel| {
+                        let alpha = pixel.a();
+                        if alpha == 0 {
+                            return;
+                        }
+                        runs.push((physical.x + x, physical.y + y + run.line_y as i32, alpha));
+                    },
+                );
+            }
+        }
+        runs
     }
 
     fn shape(&mut self, text: &str, size: f32, weight: Weight, width: f32) -> Buffer {

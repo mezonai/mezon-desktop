@@ -1108,11 +1108,15 @@ impl ThreadsStore {
             .map(OutgoingMention::into_transport)
             .collect::<Vec<_>>();
         let mentioned = mentioned_thread_candidates(&transport_mentions, clan_id_parsed, cx);
-        let transport_hashtags = content_tokens
-            .hashtags
-            .into_iter()
-            .map(OutgoingHashtag::into_transport)
-            .collect::<Vec<_>>();
+        let transport_hashtags = crate::messages::outgoing_hashtags(
+            &message,
+            content_tokens
+                .hashtags
+                .into_iter()
+                .map(OutgoingHashtag::into_transport)
+                .collect(),
+            cx,
+        );
         let transport_emojis = content_tokens
             .emojis
             .into_iter()
@@ -1264,7 +1268,7 @@ impl ThreadsStore {
                 )
                 .await
             } else {
-                match upload_attachments_now(&api, attachments).await {
+                match upload_attachments_now(&api, attachments, thread_id).await {
                     Ok(uploaded) => {
                         api.send_presigned_message(
                             clan_id_i64,

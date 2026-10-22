@@ -8,7 +8,11 @@ use anyhow::{anyhow, Result};
 #[cfg(feature = "x11")]
 use x11::X11Capturer;
 
-use crate::{capturer::Options, frame::Frame, Target};
+use crate::{
+    capturer::{Area, Options},
+    frame::Frame,
+    Target,
+};
 
 mod error;
 
@@ -25,6 +29,9 @@ pub trait LinuxCapturerImpl {
     fn start_capture(&mut self);
     fn stop_capture(&mut self);
     fn target(&self) -> Option<&Target> {
+        None
+    }
+    fn monitor_area(&self) -> Option<Area> {
         None
     }
 }

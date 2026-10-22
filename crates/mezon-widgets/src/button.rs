@@ -58,7 +58,7 @@ impl ButtonVariant {
         match self {
             ButtonVariant::Primary => ButtonLikeStyles {
                 background: theme.brand.into(),
-                label_color: theme.text_primary.into(),
+                label_color: gpui::white(),
             },
             ButtonVariant::Secondary => ButtonLikeStyles {
                 background: theme.bg_tertiary.into(),
@@ -88,7 +88,7 @@ impl ButtonVariant {
         match self {
             ButtonVariant::Primary => ButtonLikeStyles {
                 background: theme.brand_hover.into(),
-                label_color: theme.text_primary.into(),
+                label_color: gpui::white(),
             },
             ButtonVariant::Secondary => ButtonLikeStyles {
                 background: theme.bg_hover.into(),
@@ -118,7 +118,7 @@ impl ButtonVariant {
         match self {
             ButtonVariant::Primary => ButtonLikeStyles {
                 background: darken(theme.brand_hover.into(), 0.04),
-                label_color: theme.text_primary.into(),
+                label_color: gpui::white(),
             },
             ButtonVariant::Secondary | ButtonVariant::Ghost | ButtonVariant::Link => {
                 ButtonLikeStyles {

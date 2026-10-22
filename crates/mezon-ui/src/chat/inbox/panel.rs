@@ -5,21 +5,24 @@ use gpui::{
     InteractiveElement, ListAlignment, ListState, MouseButton, MouseDownEvent, Render,
     SharedString, Subscription, Window, div, list, prelude::*, px, rgb, svg,
 };
+use mezon_store::user_profile::CachedUserProfiles;
 use mezon_store::{
-    ChannelId, ChannelList, ClanId, ClanList, ClanMembersStore, InboxCategory, InboxEvent,
-    InboxNotification, InboxStore, MessageId, MessagesStore, RolesStore, TopicBadgeEvent,
-    TopicBadgeStore, TopicDiscussion, TopicsEvent, TopicsStore, UsersByUserEvent, UsersByUserStore,
+    ChannelId, ChannelList, ClanId, ClanList, ClanMembersStore, DirectEvent, DirectMessageStore,
+    FriendEvent, FriendStore, InboxCategory, InboxEvent, InboxNotification, InboxStore, MessageId,
+    MessagesStore, RolesStore, TopicBadgeEvent, TopicBadgeStore, TopicDiscussion, TopicsEvent,
+    TopicsStore, UsersByUserEvent, UsersByUserStore,
 };
 use ui::{ScrollAxes, Scrollbars, WithScrollbar};
 
-use crate::components::primitives::{h_flex, v_flex};
+use crate::components::primitives::{h_flex, unread_dot, v_flex};
 use crate::image_cache::{
     LruImageCache, MESSAGE_ENTRY_MAX_BYTES, MESSAGE_IMAGE_CACHE_BYTES, MESSAGE_IMAGE_CACHE_CAPACITY,
 };
 
 use crate::chat::inbox::row::{
     NotificationRowView, TopicRowView, build_notification_row_view, build_topic_row_view,
-    notification_copy_text, notification_jump_route, render_notification_body, render_topic_body,
+    notification_copy_text, notification_jump_route, notification_sender_id,
+    render_notification_body, render_topic_body,
 };
 use crate::chat::inbox::{InboxTab, row_height_for_tab};
 use crate::components::primitives::{Icon, IconName};
@@ -49,6 +52,9 @@ pub struct InboxPopoverPanel {
     _channel_obs: Subscription,
     _topic_badge_sub: Subscription,
     _users_sub: Subscription,
+    _direct_sub: Subscription,
+    _friends_sub: Subscription,
+    _cdn_access_sub: Option<Subscription>,
 }
 
 impl InboxPopoverPanel {
@@ -121,12 +127,30 @@ impl InboxPopoverPanel {
         }
         let _topics_sub = cx.subscribe(&topics_store, |this, _, event, cx| {
             if matches!(event, TopicsEvent::Updated) {
+                if this.tab == InboxTab::Topics {
+                    TopicsStore::global(cx).update(cx, |store, cx| {
+                        store.load_inbox_message_avatars(&this.clan_id, cx);
+                    });
+                }
                 this.sync_from_store(cx, false);
                 cx.notify();
             }
         });
         let _members_sub = cx.subscribe(&members_store, |this, _, event, cx| {
-            if this.clan_id == event.clan_id().to_string() {
+            let uses_member = if this.tab == InboxTab::Topics {
+                this.clan_id == event.clan_id().to_string()
+            } else {
+                this.cached_items
+                    .iter()
+                    .any(|row| row.uses_clan(event.clan_id()))
+            };
+            if uses_member {
+                if this.tab == InboxTab::Topics {
+                    TopicsStore::global(cx).update(cx, |store, cx| {
+                        store.load_inbox_message_avatars(&this.clan_id, cx);
+                    });
+                }
+                this.sync_from_store(cx, false);
                 cx.notify();
             }
         });
@@ -142,9 +166,23 @@ impl InboxPopoverPanel {
             }
             cx.notify();
         });
-        let _users_sub = cx.subscribe(&users_store, |_, _, event, cx| {
+        let _users_sub = cx.subscribe(&users_store, |this, _, event, cx| {
             if matches!(event, UsersByUserEvent::Changed) {
-                cx.notify();
+                if this.tab == InboxTab::ForYou {
+                    this.refresh_global_profiles(cx);
+                } else {
+                    cx.notify();
+                }
+            }
+        });
+        let _direct_sub = cx.subscribe(&DirectMessageStore::global(cx), |this, _, event, cx| {
+            if matches!(event, DirectEvent::Changed { channel_id: None }) {
+                this.refresh_global_profiles(cx);
+            }
+        });
+        let _friends_sub = cx.subscribe(&FriendStore::global(cx), |this, _, event, cx| {
+            if matches!(event, FriendEvent::Changed) {
+                this.refresh_global_profiles(cx);
             }
         });
 
@@ -165,6 +203,9 @@ impl InboxPopoverPanel {
             _channel_obs,
             _topic_badge_sub,
             _users_sub,
+            _direct_sub,
+            _friends_sub,
+            _cdn_access_sub: crate::chat::message::parts::observe_cdn_access(cx),
         };
         this.sync_from_store(cx, false);
         this
@@ -221,6 +262,9 @@ impl InboxPopoverPanel {
     }
 
     fn prefetch_context_for_tab(&self, cx: &mut Context<Self>) {
+        if self.tab == InboxTab::ForYou {
+            FriendStore::global(cx).update(cx, |store, cx| store.ensure_loaded(cx));
+        }
         if let Ok(clan) = self.clan_id.parse::<ClanId>() {
             ClanMembersStore::global(cx).update(cx, |store, cx| {
                 store.ensure_loaded(clan, cx);
@@ -235,6 +279,7 @@ impl InboxPopoverPanel {
         if self.tab == InboxTab::Topics {
             TopicsStore::global(cx).update(cx, |store, cx| {
                 store.fetch_if_needed(&self.clan_id, cx);
+                store.retry_inbox_message_avatars(&self.clan_id, cx);
             });
         } else if let Some(category) = self.tab.category() {
             InboxStore::global(cx).update(cx, |store, cx| {
@@ -246,6 +291,13 @@ impl InboxPopoverPanel {
     fn sync_from_store(&mut self, cx: &App, pin_top: bool) {
         self.cached_items = Self::build_items(self.tab, &self.clan_id, &self.locale, cx);
         self.sync_list_state(pin_top);
+    }
+
+    fn refresh_global_profiles(&mut self, cx: &mut Context<Self>) {
+        if self.cached_items.iter().any(|row| matches!(row, ListRow::Notification { view, .. } if view.profile_dependencies.global)) {
+            self.sync_from_store(cx, false);
+            cx.notify();
+        }
     }
 
     fn build_items(
@@ -279,11 +331,28 @@ impl InboxPopoverPanel {
             .read(cx)
             .items(clan_id, category)
             .to_vec();
+        let profile_clan_id = clan_id.parse().ok();
+        let profiles = if tab == InboxTab::ForYou {
+            CachedUserProfiles::new(
+                items
+                    .iter()
+                    .filter_map(|notification| notification_sender_id(notification).parse().ok()),
+                cx,
+            )
+        } else {
+            CachedUserProfiles::default()
+        };
         Rc::new(
             items
                 .into_iter()
                 .map(|notification| {
-                    let view = build_notification_row_view(&notification, locale, cx);
+                    let view = build_notification_row_view(
+                        &notification,
+                        locale,
+                        profile_clan_id,
+                        &profiles,
+                        cx,
+                    );
                     ListRow::Notification {
                         notification: Box::new(notification),
                         view: Box::new(view),
@@ -350,6 +419,14 @@ enum ListRow {
 }
 
 impl ListRow {
+    fn uses_clan(&self, clan_id: ClanId) -> bool {
+        match self {
+            Self::Notification { view, .. } => {
+                view.profile_dependencies.clans.contains(&Some(clan_id))
+            }
+            Self::Topic { topic, .. } => topic.clan_id.parse::<ClanId>().ok() == Some(clan_id),
+        }
+    }
     fn id(&self) -> &str {
         match self {
             Self::Notification { notification, .. } => notification.id.as_str(),
@@ -376,10 +453,10 @@ impl Render for InboxPopoverPanel {
         let locale = self.locale.clone();
         let inbox_handle = self.inbox_handle.clone();
         let active_tab = self.tab;
-        let topic_badge = self.clan_id.parse::<ClanId>().ok().and_then(|_| {
+        let topic_unread = self.clan_id.parse::<ClanId>().is_ok_and(|clan_id| {
             TopicBadgeStore::global(cx)
                 .read(cx)
-                .badge_label_for_clan(&self.clan_id)
+                .any_topic_unread(clan_id)
         });
         let is_loading = if active_tab == InboxTab::Topics {
             TopicsStore::global(cx).read(cx).is_loading()
@@ -466,7 +543,7 @@ impl Render for InboxPopoverPanel {
                         theme_ref,
                         &locale,
                         active_tab,
-                        topic_badge,
+                        topic_unread,
                         this.clone(),
                     )),
             )
@@ -503,7 +580,7 @@ fn render_tabs(
     theme: &Theme,
     locale: &SharedString,
     active: InboxTab,
-    topic_badge: Option<String>,
+    topic_unread: bool,
     this: gpui::WeakEntity<InboxPopoverPanel>,
 ) -> impl IntoElement {
     h_flex()
@@ -535,24 +612,8 @@ fn render_tabs(
                     theme.text_muted
                 })
                 .child(label)
-                .when(tab == InboxTab::Topics && topic_badge.is_some(), |d| {
-                    d.child(
-                        div()
-                            .absolute()
-                            .top(px(-4.))
-                            .right(px(-4.))
-                            .px_1()
-                            .min_w(px(16.))
-                            .h(px(16.))
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .rounded_full()
-                            .bg(theme.mention_badge)
-                            .text_xs()
-                            .text_color(theme.bg_primary)
-                            .child(topic_badge.clone().unwrap_or_default()),
-                    )
+                .when(tab == InboxTab::Topics && topic_unread, |d| {
+                    d.child(unread_dot().absolute().top(px(-2.)).right(px(-2.)))
                 })
                 .on_mouse_down(MouseButton::Left, move |_, _, cx| {
                     this.update(cx, |panel, cx| panel.select_tab(tab, cx)).ok();
@@ -810,19 +871,23 @@ fn schedule_notification_jump(
         tracing::debug!(topic_id, reply_id = message_id.get(), "inbox topic jump");
         navigate(cx, route);
         inbox_handle.hide(cx);
-        TopicBadgeStore::global(cx).update(cx, |store, cx| {
-            store.clear_topic(&topic_id.to_string(), cx);
-        });
-        ChannelList::global(cx).update(cx, |store, cx| {
-            store.apply_topic_read(ChannelId(topic_id), cx);
-        });
-        TopicsStore::global(cx).update(cx, |store, cx| {
-            store.begin_inbox_topic_jump(channel_id, topic_id, message_id, cx);
-        });
+        open_topic_reply(cx, channel_id, topic_id, message_id);
         return;
     }
     tracing::debug!(message_id = message_id.get(), "inbox channel jump");
     schedule_inbox_jump(cx, inbox_handle, route, channel_id, message_id);
+}
+
+pub fn open_topic_reply(cx: &mut App, channel_id: ChannelId, topic_id: i64, reply_id: MessageId) {
+    TopicBadgeStore::global(cx).update(cx, |store, cx| {
+        store.clear_topic(&topic_id.to_string(), cx);
+    });
+    ChannelList::global(cx).update(cx, |store, cx| {
+        store.apply_topic_read(ChannelId(topic_id), cx);
+    });
+    TopicsStore::global(cx).update(cx, |store, cx| {
+        store.begin_inbox_topic_jump(channel_id, topic_id, reply_id, cx);
+    });
 }
 
 fn schedule_topic_jump(
@@ -1064,6 +1129,9 @@ fn render_topic_item(
     let jump_topic = topic.clone();
     let inbox_handle_jump = inbox_handle.clone();
     let jump_label = mezon_i18n::t(locale, "channelTopbar.tooltips.jump");
+    let unread = TopicBadgeStore::global(cx)
+        .read(cx)
+        .topic_has_unread(&topic.id);
 
     div()
         .flex()
@@ -1106,7 +1174,10 @@ fn render_topic_item(
                                 );
                             },
                         )),
-                ),
+                )
+                .when(unread, |d| {
+                    d.child(unread_dot().absolute().top(px(10.)).right(px(10.)))
+                }),
         )
         .into_any_element()
 }

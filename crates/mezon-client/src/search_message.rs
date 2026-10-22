@@ -89,6 +89,10 @@ pub fn username_filter(username: &str) -> api::FilterParam {
     filter("username", username)
 }
 
+pub fn sender_filter_from_id(user_id: &str) -> api::FilterParam {
+    filter("sender_id", user_id)
+}
+
 pub fn mention_user_filter(user_id: i64) -> api::FilterParam {
     mention_user_filter_from_id(&user_id.to_string())
 }
@@ -263,10 +267,17 @@ pub fn insert_filter_markup(current: &str, trigger: char, display: &str, id: &st
     if let Some(next) = replace_incomplete_filter_token(current, trigger, &token) {
         return next;
     }
+    if let Some(next) = replace_plain_autocomplete_needle(current, display, &token) {
+        return next;
+    }
     if current.is_empty() {
         token
     } else if current.ends_with(' ') {
-        format!("{current}{token}")
+        if query_has_filter_tokens(current) {
+            current.to_string()
+        } else {
+            format!("{current}{token}")
+        }
     } else {
         format!("{current} {token}")
     }
@@ -326,11 +337,36 @@ fn is_chip_filter_token(token: &str) -> bool {
     is_complete_markup_token(token) || is_complete_colon_filter(token)
 }
 
+fn replace_plain_autocomplete_needle(current: &str, display: &str, token: &str) -> Option<String> {
+    if active_search_trigger(current).is_some() || query_has_filter_tokens(current) {
+        return None;
+    }
+    let trimmed_end = current.trim_end();
+    if trimmed_end.is_empty() {
+        return None;
+    }
+    if trimmed_end.eq_ignore_ascii_case(display) || !trimmed_end.contains(' ') {
+        return Some(token.to_string());
+    }
+    let word_start = trimmed_end.rfind(' ').map(|index| index + 1).unwrap_or(0);
+    let last_word = &trimmed_end[word_start..];
+    let prefix = &trimmed_end[..word_start];
+    if last_word.eq_ignore_ascii_case(display) {
+        return Some(format!("{prefix}{token}"));
+    }
+    None
+}
+
 fn replace_incomplete_filter_token(current: &str, trigger: char, token: &str) -> Option<String> {
     let trimmed_end = current.trim_end();
     let word_start = trimmed_end.rfind(' ').map(|index| index + 1).unwrap_or(0);
     let last_word = &trimmed_end[word_start..];
     let prefix = &trimmed_end[..word_start];
+    if query_ends_with_whitespace(current)
+        && (is_complete_colon_filter(last_word) || is_complete_markup_token(last_word))
+    {
+        return None;
+    }
     match trigger {
         '>' => {
             if last_word.starts_with('>') && !is_complete_markup_token(last_word) {
@@ -344,7 +380,7 @@ fn replace_incomplete_filter_token(current: &str, trigger: char, token: &str) ->
             if last_word.starts_with('&') && !is_complete_markup_token(last_word) {
                 return Some(format!("{prefix}{token}"));
             }
-            if last_word.starts_with("has:") {
+            if last_word.starts_with("has:") && !is_complete_colon_filter(last_word) {
                 return Some(format!("{prefix}{token}"));
             }
         }
@@ -352,7 +388,9 @@ fn replace_incomplete_filter_token(current: &str, trigger: char, token: &str) ->
             if last_word.starts_with('~') && !is_complete_markup_token(last_word) {
                 return Some(format!("{prefix}{token}"));
             }
-            if last_word.starts_with("mentions:") || last_word.starts_with("mention:") {
+            if (last_word.starts_with("mentions:") || last_word.starts_with("mention:"))
+                && !is_complete_colon_filter(last_word)
+            {
                 return Some(format!("{prefix}{token}"));
             }
         }
@@ -418,11 +456,16 @@ fn try_parse_markup(chars: &[char], start: usize) -> Option<(usize, char, String
 
 fn markup_to_filter(trigger: char, display: &str, id: &str) -> api::FilterParam {
     match trigger {
+        '>' if is_user_id(id) => sender_filter_from_id(id),
         '>' => username_filter(display),
         '~' => mention_user_filter_from_id(id),
         '&' => has_filter(id),
         _ => content_filter(display),
     }
+}
+
+fn is_user_id(value: &str) -> bool {
+    !value.is_empty() && value.chars().all(|c| c.is_ascii_digit())
 }
 
 fn colon_word_filter(word: &str) -> Option<api::FilterParam> {
@@ -436,35 +479,174 @@ fn colon_word_filter(word: &str) -> Option<api::FilterParam> {
         .strip_prefix("mentions:")
         .or_else(|| word.strip_prefix("mention:"))
     {
-        return (!value.is_empty() && value.chars().all(|c| c.is_ascii_digit()))
-            .then(|| mention_user_filter_from_id(value));
+        return is_user_id(value).then(|| mention_user_filter_from_id(value));
     }
     None
 }
 
-pub fn expand_mention_name_tokens(
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PickedSearchUser {
+    pub trigger: char,
+    pub display: String,
+    pub user_id: String,
+}
+
+struct UserToken {
+    trigger: char,
+    name: String,
+    raw: String,
+    user_id: Option<String>,
+}
+
+impl UserToken {
+    fn into_text(self, every_sender_resolved: bool) -> String {
+        match self.user_id {
+            Some(user_id) if self.trigger != '>' || every_sender_resolved => {
+                let display: String = self
+                    .name
+                    .chars()
+                    .filter(|c| !matches!(c, '[' | ']' | '(' | ')'))
+                    .collect();
+                format!("{}[{display}]({user_id})", self.trigger)
+            }
+            _ => self.raw,
+        }
+    }
+}
+
+enum QueryPiece {
+    Word(String),
+    User(UserToken),
+}
+
+pub fn expand_user_name_tokens(
     query: &str,
+    picked: &[PickedSearchUser],
     resolve_user_id: impl Fn(&str) -> Option<String>,
 ) -> String {
-    let mut parts = Vec::new();
-    for word in query.split_whitespace() {
-        if let Some(name) = word
-            .strip_prefix("mentions:")
-            .or_else(|| word.strip_prefix("mention:"))
-            && !name.is_empty()
-            && !name.chars().all(|c| c.is_ascii_digit())
-            && let Some(user_id) = resolve_user_id(name)
-        {
-            parts.push(format!("~[{name}]({user_id})"));
-            continue;
-        }
-        parts.push(word.to_string());
+    let mut pieces = Vec::new();
+    let mut rest_start = 0;
+    for (range, pick) in picked_user_spans(query, picked) {
+        push_typed_pieces(
+            &query[rest_start..range.start],
+            &resolve_user_id,
+            &mut pieces,
+        );
+        pieces.push(QueryPiece::User(UserToken {
+            trigger: pick.trigger,
+            name: pick.display.clone(),
+            raw: query[range.clone()].to_string(),
+            user_id: Some(pick.user_id.clone()),
+        }));
+        rest_start = range.end;
     }
+    push_typed_pieces(&query[rest_start..], &resolve_user_id, &mut pieces);
+    let every_sender_resolved = !pieces.iter().any(|piece| {
+        matches!(piece, QueryPiece::User(token) if token.trigger == '>' && token.user_id.is_none())
+    });
+    let parts: Vec<String> = pieces
+        .into_iter()
+        .map(|piece| match piece {
+            QueryPiece::Word(word) => word,
+            QueryPiece::User(token) => token.into_text(every_sender_resolved),
+        })
+        .collect();
     let mut expanded = parts.join(" ");
-    if query.ends_with(|c: char| c.is_whitespace()) {
+    if query_ends_with_whitespace(query) {
         expanded.push(' ');
     }
     expanded
+}
+
+pub fn retain_picked_search_users(picked: &mut Vec<PickedSearchUser>, query: &str) {
+    picked.retain(|pick| {
+        picked_user_prefix(pick.trigger)
+            .is_some_and(|prefix| query.contains(&format!("{prefix}{}", pick.display)))
+    });
+}
+
+fn picked_user_spans<'a>(
+    query: &str,
+    picked: &'a [PickedSearchUser],
+) -> Vec<(std::ops::Range<usize>, &'a PickedSearchUser)> {
+    let mut longest_first: Vec<&PickedSearchUser> = picked
+        .iter()
+        .filter(|pick| !pick.display.is_empty() && is_user_id(&pick.user_id))
+        .collect();
+    longest_first.sort_by_key(|pick| std::cmp::Reverse(pick.display.len()));
+    let mut spans: Vec<(std::ops::Range<usize>, &PickedSearchUser)> = Vec::new();
+    for pick in longest_first {
+        let Some(prefix) = picked_user_prefix(pick.trigger) else {
+            continue;
+        };
+        let token = format!("{prefix}{}", pick.display);
+        for (start, matched) in query.match_indices(&token) {
+            let end = start + matched.len();
+            let at_word_start = query[..start]
+                .chars()
+                .next_back()
+                .is_none_or(char::is_whitespace);
+            let at_word_end = query[end..].chars().next().is_none_or(char::is_whitespace);
+            let overlaps = spans
+                .iter()
+                .any(|(range, _)| start < range.end && range.start < end);
+            if at_word_start && at_word_end && !overlaps {
+                spans.push((start..end, pick));
+            }
+        }
+    }
+    spans.sort_by_key(|(range, _)| range.start);
+    spans
+}
+
+fn picked_user_prefix(trigger: char) -> Option<&'static str> {
+    match trigger {
+        '>' => Some("from:"),
+        '~' => Some("mentions:"),
+        _ => None,
+    }
+}
+
+fn push_typed_pieces(
+    text: &str,
+    resolve_user_id: &impl Fn(&str) -> Option<String>,
+    pieces: &mut Vec<QueryPiece>,
+) {
+    for word in text.split_whitespace() {
+        let piece = match user_name_token(word) {
+            Some((trigger, name)) => QueryPiece::User(UserToken {
+                trigger,
+                name: name.to_string(),
+                raw: word.to_string(),
+                user_id: resolve_typed_user_id(trigger, name, resolve_user_id),
+            }),
+            None => QueryPiece::Word(word.to_string()),
+        };
+        pieces.push(piece);
+    }
+}
+
+fn resolve_typed_user_id(
+    trigger: char,
+    name: &str,
+    resolve_user_id: &impl Fn(&str) -> Option<String>,
+) -> Option<String> {
+    resolve_user_id(name)
+        .filter(|id| is_user_id(id))
+        .or_else(|| (trigger == '>' && is_user_id(name)).then(|| name.to_string()))
+}
+
+fn user_name_token(word: &str) -> Option<(char, &str)> {
+    if let Some(name) = word.strip_prefix("from:") {
+        return (!name.is_empty()).then_some(('>', name));
+    }
+    if let Some(name) = word.strip_prefix('>') {
+        return (!name.is_empty() && !is_complete_markup_token(word)).then_some(('>', name));
+    }
+    let name = word
+        .strip_prefix("mentions:")
+        .or_else(|| word.strip_prefix("mention:"))?;
+    (!name.is_empty() && !is_user_id(name)).then_some(('~', name))
 }
 
 fn incomplete_prefix_word_filter(word: &str) -> Option<api::FilterParam> {
@@ -616,8 +798,8 @@ mod tests {
     fn parse_search_query_extracts_content_and_markup_filters() {
         let filters = parse_search_query("hello >[alice](42) world");
         assert_eq!(filters.len(), 2);
-        assert_eq!(filters[0].field_name, "username");
-        assert_eq!(filters[0].field_value, "alice");
+        assert_eq!(filters[0].field_name, "sender_id");
+        assert_eq!(filters[0].field_value, "42");
         assert_eq!(filters[1].field_name, "content");
         assert_eq!(filters[1].field_value, "hello world");
     }
@@ -709,12 +891,134 @@ mod tests {
         );
     }
 
+    fn pick(trigger: char, display: &str, user_id: &str) -> PickedSearchUser {
+        PickedSearchUser {
+            trigger,
+            display: display.to_string(),
+            user_id: user_id.to_string(),
+        }
+    }
+
+    fn filter_pairs(query: &str) -> Vec<(String, String)> {
+        parse_search_query(query)
+            .into_iter()
+            .map(|f| (f.field_name, f.field_value))
+            .collect()
+    }
+
+    fn pair(name: &str, value: &str) -> (String, String) {
+        (name.to_string(), value.to_string())
+    }
+
     #[test]
-    fn expand_mention_name_tokens_rewrites_to_markup() {
-        let expanded = expand_mention_name_tokens("mentions:bob hello", |name| {
+    fn expand_user_name_tokens_rewrites_to_markup() {
+        let expanded = expand_user_name_tokens("mentions:bob hello", &[], |name| {
             (name == "bob").then(|| "99".to_string())
         });
         assert_eq!(expanded, "~[bob](99) hello");
+    }
+
+    #[test]
+    fn renamed_sender_is_searched_by_id_not_by_stored_username() {
+        let expanded = expand_user_name_tokens("from:carol.renamed hello", &[], |name| {
+            (name == "carol.renamed").then(|| "77".to_string())
+        });
+        assert_eq!(expanded, ">[carol.renamed](77) hello");
+        assert_eq!(
+            filter_pairs(&expanded),
+            vec![pair("sender_id", "77"), pair("content", "hello")]
+        );
+    }
+
+    #[test]
+    fn unresolved_sender_falls_back_to_username_filter() {
+        let expanded = expand_user_name_tokens("from:ghost", &[], |_| None);
+        assert_eq!(expanded, "from:ghost");
+        assert_eq!(filter_pairs(&expanded), vec![pair("username", "ghost")]);
+    }
+
+    #[test]
+    fn senders_stay_usernames_when_one_of_them_does_not_resolve() {
+        let expanded = expand_user_name_tokens("from:alice from:oldname", &[], |name| {
+            (name == "alice").then(|| "1".to_string())
+        });
+        assert_eq!(expanded, "from:alice from:oldname");
+        assert_eq!(
+            filter_pairs(&expanded),
+            vec![pair("username", "alice"), pair("username", "oldname")]
+        );
+    }
+
+    #[test]
+    fn picked_multi_word_name_keeps_its_user_id() {
+        let picked = [pick('>', "Van Gia", "42")];
+        let expanded = expand_user_name_tokens("from:Van Gia hello", &picked, |name| {
+            (name == "Van").then(|| "7".to_string())
+        });
+        assert_eq!(expanded, ">[Van Gia](42) hello");
+        assert_eq!(
+            filter_pairs(&expanded),
+            vec![pair("sender_id", "42"), pair("content", "hello")]
+        );
+    }
+
+    #[test]
+    fn picked_name_with_brackets_still_parses() {
+        let picked = [pick('>', "[QA] Linh", "5")];
+        let expanded = expand_user_name_tokens("from:[QA] Linh ", &picked, |_| None);
+        assert_eq!(filter_pairs(&expanded), vec![pair("sender_id", "5")]);
+    }
+
+    #[test]
+    fn picked_sender_and_mention_with_the_same_name_keep_their_own_ids() {
+        let picked = [pick('>', "Linh", "1"), pick('~', "Linh", "2")];
+        let expanded =
+            expand_user_name_tokens("from:Linh mentions:Linh ", &picked, |_| Some("9".into()));
+        assert_eq!(
+            filter_pairs(&expanded),
+            vec![pair("sender_id", "1"), pair("mention", "\"user_id\":\"2\"")]
+        );
+    }
+
+    #[test]
+    fn typed_name_matching_part_of_a_picked_name_is_not_rewritten() {
+        let picked = [pick('>', "Van Gia", "42")];
+        let expanded = expand_user_name_tokens("from:Van hello", &picked, |_| None);
+        assert_eq!(expanded, "from:Van hello");
+    }
+
+    #[test]
+    fn picked_users_are_dropped_once_their_chip_leaves_the_query() {
+        let mut picked = vec![pick('>', "Bob", "1"), pick('~', "Linh", "2")];
+        retain_picked_search_users(&mut picked, "mentions:Linh hello");
+        assert_eq!(picked, vec![pick('~', "Linh", "2")]);
+        retain_picked_search_users(&mut picked, "");
+        assert!(picked.is_empty());
+    }
+
+    #[test]
+    fn greater_than_shorthand_before_other_words_resolves_to_id() {
+        let expanded = expand_user_name_tokens(">alice hello", &[], |name| {
+            (name == "alice").then(|| "3".to_string())
+        });
+        assert_eq!(
+            filter_pairs(&expanded),
+            vec![pair("sender_id", "3"), pair("content", "hello")]
+        );
+    }
+
+    #[test]
+    fn numeric_sender_without_member_match_is_used_as_id() {
+        let expanded = expand_user_name_tokens("from:12345", &[], |_| None);
+        assert_eq!(filter_pairs(&expanded), vec![pair("sender_id", "12345")]);
+    }
+
+    #[test]
+    fn sender_markup_without_numeric_id_keeps_username_filter() {
+        let filters = parse_search_query(">[alice](alice)");
+        assert_eq!(filters.len(), 1);
+        assert_eq!(filters[0].field_name, "username");
+        assert_eq!(filters[0].field_value, "alice");
     }
 
     #[test]
@@ -724,8 +1028,68 @@ mod tests {
     }
 
     #[test]
+    fn insert_filter_markup_replaces_plain_text_needle() {
+        let next = insert_filter_markup("vangiachu", '>', "gia.chuvan", "42");
+        assert_eq!(next, "from:gia.chuvan ");
+    }
+
+    #[test]
+    fn insert_filter_markup_replaces_partial_plain_text_needle() {
+        let next = insert_filter_markup("van", '>', "gia.chuvan", "42");
+        assert_eq!(next, "from:gia.chuvan ");
+    }
+
+    #[test]
+    fn insert_filter_markup_replaces_multi_word_display() {
+        let next = insert_filter_markup("Van Gia", '>', "Van Gia", "42");
+        assert_eq!(next, "from:Van Gia ");
+    }
+
+    #[test]
+    fn insert_filter_markup_replaces_last_word_in_multi_word_plain_query() {
+        let next = insert_filter_markup("notes vangiachu", '>', "vangiachu", "42");
+        assert_eq!(next, "notes from:vangiachu ");
+    }
+
+    #[test]
+    fn insert_filter_markup_mention_uses_display_colon() {
+        let next = insert_filter_markup("~van", '~', "gia.chuvan", "42");
+        assert_eq!(next, "mentions:gia.chuvan ");
+    }
+
+    #[test]
+    fn plain_autocomplete_appends_when_filters_already_present() {
+        let next = insert_filter_markup("from:alice bob", '>', "bob", "9");
+        assert_eq!(next, "from:alice bob from:bob ");
+    }
+
+    #[test]
+    fn incomplete_from_colon_without_user_id_keeps_colon_token() {
+        let next = insert_filter_markup("notes >ali", '>', "alice", "");
+        assert_eq!(next, "notes from:alice ");
+    }
+
+    #[test]
+    fn incomplete_from_colon_uses_display_name() {
+        let next = insert_filter_markup("from:ali", '>', "gia.chuvan", "42");
+        assert_eq!(next, "from:gia.chuvan ");
+    }
+
+    #[test]
+    fn incomplete_has_trigger_finalizes_to_colon_token() {
+        let next = insert_filter_markup("&im", '&', "image", "image");
+        assert_eq!(next, "has:image ");
+    }
+
+    #[test]
     fn insert_filter_markup_does_not_corrupt_trailing_space() {
         let next = insert_filter_markup("from:alice ", '>', "alice", "42");
+        assert_eq!(next, "from:alice ");
+    }
+
+    #[test]
+    fn insert_filter_markup_noop_for_completed_from_chip() {
+        let next = insert_filter_markup("from:alice ", '>', "bob", "9");
         assert_eq!(next, "from:alice ");
     }
 

@@ -26,6 +26,23 @@ pub struct User {
     pub join_time_seconds: u32,
 }
 
+impl User {
+    pub(crate) fn update_profile(&mut self, profile: &Self) -> bool {
+        if self.id != profile.id {
+            return false;
+        }
+        let changed = self.username != profile.username
+            || self.display_name != profile.display_name
+            || self.avatar_url != profile.avatar_url
+            || self.about_me != profile.about_me;
+        self.username.clone_from(&profile.username);
+        self.display_name.clone_from(&profile.display_name);
+        self.avatar_url.clone_from(&profile.avatar_url);
+        self.about_me.clone_from(&profile.about_me);
+        changed
+    }
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ClanMember {
     pub user: User,
@@ -360,6 +377,7 @@ impl ClanMembersStore {
                         };
                         for cu in users {
                             if let Some(mut member) = clan_member_from_proto(cu) {
+                                crate::user_profile::reconcile_user_profile(&mut member.user, cx);
                                 member.online = online_ids.contains(&member.user.id.0);
                                 bucket.upsert(member);
                             }
@@ -407,6 +425,27 @@ impl ClanMembersStore {
         })
     }
 
+    pub(crate) fn profile_clan(&self, user_id: UserId) -> Option<ClanId> {
+        self.cache
+            .iter()
+            .find_map(|(clan_id, bucket)| bucket.by_id.contains_key(&user_id).then_some(*clan_id))
+    }
+
+    pub(crate) fn apply_user_profile(&mut self, user: &User, cx: &mut Context<Self>) {
+        let mut changed = false;
+        for (clan_id, bucket) in self.cache.iter_mut() {
+            if let Some(member) = bucket.by_id.get_mut(&user.id)
+                && member.user.update_profile(user)
+            {
+                cx.emit(ClanMembersEvent::ProfileUpdated { clan_id: *clan_id });
+                changed = true;
+            }
+        }
+        if changed {
+            cx.notify();
+        }
+    }
+
     fn handle_event(&mut self, event: &RealtimeEvent, cx: &mut Context<Self>) {
         if let RealtimeEvent::ClanProfileUpdated(e) = event {
             let clan_id = ClanId(e.clan_id);
@@ -426,6 +465,10 @@ impl ClanMembersStore {
             RealtimeEvent::AddClanUser(e) => {
                 let clan_id = ClanId(e.clan_id);
                 clan_member_from_redis(e.user.as_ref())
+                    .map(|mut member| {
+                        crate::user_profile::reconcile_user_profile(&mut member.user, cx);
+                        member
+                    })
                     .filter(|member| apply_add_member(&mut self.cache, clan_id, member.clone()))
                     .map(|_| clan_id)
             }
@@ -663,6 +706,74 @@ pub fn split_members_by_status(
 
 #[cfg(test)]
 mod tests {
+    #[gpui::test]
+    fn confirmed_profile_updates_all_cached_clans_and_preserves_membership(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let changes = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let (store, _sub) = cx.update(|cx| {
+            let api = Arc::new(AppApi::new(
+                Arc::new(mezon_client::TransportClient::new(String::new())),
+                String::new(),
+            ));
+            RealtimeDispatch::init(api.clone(), cx);
+            let store = ClanMembersStore::init(api, cx);
+            store.update(cx, |store, _| {
+                for clan in [1, 2] {
+                    let mut member = clan_member_from_proto(proto_clan_user(
+                        7,
+                        "user",
+                        "Old",
+                        if clan == 1 { "" } else { "Nick" },
+                    ))
+                    .unwrap();
+                    member.clan_avatar = "clan.png".into();
+                    member.user.join_time_seconds = 9;
+                    member.role_ids = vec![RoleId(3)];
+                    member.online = true;
+                    let mut bucket = ClanBucket::default();
+                    bucket.upsert(member);
+                    store.cache.insert(ClanId(clan), bucket, None);
+                }
+            });
+            let sink = changes.clone();
+            let sub = cx.subscribe(&store, move |_, _, _| {
+                sink.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            });
+            (store, sub)
+        });
+        let mut profile = User {
+            id: UserId(7),
+            username: "user".into(),
+            display_name: "New".into(),
+            about_me: "Bio".into(),
+            avatar_url: "new.png".into(),
+            ..Default::default()
+        };
+        for _ in 0..2 {
+            cx.update(|cx| store.update(cx, |store, cx| store.apply_user_profile(&profile, cx)));
+            cx.run_until_parked();
+        }
+        assert_eq!(changes.load(std::sync::atomic::Ordering::SeqCst), 2);
+        profile.display_name.clear();
+        profile.avatar_url.clear();
+        cx.update(|cx| store.update(cx, |store, cx| store.apply_user_profile(&profile, cx)));
+        cx.run_until_parked();
+        cx.update(|cx| {
+            let store = store.read(cx);
+            assert_eq!(store.member(ClanId(1), profile.id).unwrap().name(), "user");
+            let member = store.member(ClanId(2), profile.id).unwrap();
+            assert_eq!(member.name(), "Nick");
+            assert_eq!(member.avatar(), "clan.png");
+            assert!(member.user.avatar_url.is_empty());
+            assert_eq!(member.user.about_me, "Bio");
+            assert_eq!(member.user.join_time_seconds, 9);
+            assert_eq!(member.role_ids, vec![RoleId(3)]);
+            assert!(member.online);
+        });
+        assert_eq!(changes.load(std::sync::atomic::Ordering::SeqCst), 4);
+    }
+
     use super::*;
 
     fn proto_clan_user(

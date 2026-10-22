@@ -46,6 +46,10 @@ impl EndpointHealth {
         self.slow_reports_disabled = false;
     }
 
+    pub fn target_endpoint(&self) -> Option<RealtimeEndpoint> {
+        self.endpoint.clone()
+    }
+
     pub fn connected_endpoint(&self) -> Option<RealtimeEndpoint> {
         self.connected_since?;
         self.endpoint.clone()

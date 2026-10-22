@@ -7,9 +7,9 @@ use gpui::{
 };
 use mezon_store::activity::{ACTIVITY_TYPE_LIVE, ACTIVITY_TYPE_PLAY, ACTIVITY_TYPE_WORK};
 use mezon_store::{
-    ActivityEvent, ActivityStore, BadgeService, ChannelId, DirectMessageStore, DmAvatarPresence,
-    Friend, FriendEvent, FriendState, FriendStore, PresenceEvent, PresenceStore, Settings,
-    UserActivity, UserId, current_user_presence,
+    ActivityEvent, ActivityStore, BadgeService, ChannelId, DirectChannel, DirectEvent,
+    DirectMessageStore, DmAvatarPresence, Friend, FriendEvent, FriendState, FriendStore,
+    PresenceEvent, PresenceStore, Settings, UserActivity, UserId, current_user_presence,
 };
 
 use crate::app::shell::{FriendRemovalKind, Shell};
@@ -216,6 +216,15 @@ impl FriendsPage {
                 }
             },
         ));
+        subs.push(
+            cx.subscribe(&DirectMessageStore::global(cx), |this, _, event, cx| {
+                if matches!(event, DirectEvent::Changed { channel_id: None })
+                    && on_friends_route(cx)
+                {
+                    this.rebuild_activity_rows(cx);
+                }
+            }),
+        );
         subs.push(cx.observe(&Router::global(cx), |this, _, cx| {
             if on_friends_route(cx) {
                 FriendStore::global(cx).update(cx, |store, cx| store.ensure_loaded(cx));
@@ -324,9 +333,15 @@ impl FriendsPage {
 
     fn rebuild_activity_rows(&mut self, cx: &mut Context<Self>) {
         let store = FriendStore::global(cx);
+        let dms = DirectMessageStore::global(cx);
         let locale = self.settings.read(cx).language.clone();
-        self.activity_rows =
-            build_activity_rows(&locale, store.read(cx), ActivityStore::global(cx), cx);
+        self.activity_rows = build_activity_rows(
+            &locale,
+            store.read(cx),
+            dms.read(cx).channels(),
+            ActivityStore::global(cx),
+            cx,
+        );
         cx.notify();
     }
 
@@ -588,40 +603,77 @@ fn pending_rank(state: FriendState) -> u8 {
 
 /// Build the activity-sidebar rows: for each group (Work/Live/Play) a heading plus one row per
 /// known user currently in that activity. Mirrors React `ActivityList` — activities are filtered to
-/// the friend set, grouped by `activity_type`, and every group heading renders (with its count)
-/// even when empty.
+/// the friend and DM-peer set, grouped by `activity_type`, and every group heading renders (with its
+/// count) even when empty.
 fn build_activity_rows(
     locale: &str,
     friends: &FriendStore,
+    dms: &[DirectChannel],
     activities: Entity<ActivityStore>,
     cx: &App,
 ) -> Vec<ActivityRow> {
     let activities = activities.read(cx);
-    let by_id: HashMap<UserId, &Friend> = friends.friends().iter().map(|f| (f.id, f)).collect();
+    let by_id = activity_users(friends.friends(), dms);
     let mut rows = Vec::new();
     for (activity_type, key) in ACTIVITY_SECTIONS {
-        let group: Vec<(&UserActivity, &Friend)> = activities
+        let group: Vec<(&UserActivity, &ActivityUser)> = activities
             .activities()
             .iter()
             .filter(|a| a.activity_type == activity_type && a.user_id != UserId(0))
-            .filter_map(|a| by_id.get(&a.user_id).map(|f| (a, *f)))
+            .filter_map(|a| by_id.get(&a.user_id).map(|user| (a, user)))
             .collect();
         rows.push(ActivityRow::Header(SharedString::from(format!(
             "{} - {}",
             mezon_i18n::t(locale, key).to_uppercase(),
             group.len()
         ))));
-        for (a, f) in group {
+        for (a, user) in group {
             let description = activity_row_subtitle(a, locale);
             rows.push(ActivityRow::Item {
-                label: SharedString::from(f.label().to_string()),
+                label: SharedString::from(user.label.to_string()),
                 description: SharedString::from(description),
-                avatar_src: SharedString::from(imgproxy::avatar_url(cx, &f.avatar_url)),
-                avatar_raw: SharedString::from(f.avatar_url.clone()),
+                avatar_src: SharedString::from(imgproxy::avatar_url(cx, user.avatar_url)),
+                avatar_raw: SharedString::from(user.avatar_url.to_string()),
             });
         }
     }
     rows
+}
+
+#[derive(Debug, PartialEq)]
+struct ActivityUser<'a> {
+    label: &'a str,
+    avatar_url: &'a str,
+}
+
+fn activity_users<'a>(
+    friends: &'a [Friend],
+    dms: &'a [DirectChannel],
+) -> HashMap<UserId, ActivityUser<'a>> {
+    let mut users: HashMap<UserId, ActivityUser<'a>> = friends
+        .iter()
+        .map(|f| {
+            let user = ActivityUser {
+                label: f.label(),
+                avatar_url: &f.avatar_url,
+            };
+            (f.id, user)
+        })
+        .collect();
+    for dm in dms {
+        let Some(peer) = dm.peer_user_id else {
+            continue;
+        };
+        users.entry(peer).or_insert(ActivityUser {
+            label: if dm.label.is_empty() {
+                &dm.peer_username
+            } else {
+                &dm.label
+            },
+            avatar_url: &dm.avatar,
+        });
+    }
+    users
 }
 
 fn activity_row_subtitle(activity: &UserActivity, locale: &str) -> String {
@@ -1660,6 +1712,7 @@ fn circle_button(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use mezon_store::DirectKind;
 
     fn activity(kind: i32, name: &str, description: &str) -> UserActivity {
         UserActivity {
@@ -1698,5 +1751,75 @@ mod tests {
     fn subtitle_falls_back_to_the_bare_name_for_an_unknown_kind() {
         let a = activity(99, "Code", "");
         assert_eq!(activity_row_subtitle(&a, "en"), "Code");
+    }
+
+    fn friend(id: i64, display_name: &str) -> Friend {
+        Friend {
+            id: UserId(id),
+            username: format!("user{id}"),
+            display_name: display_name.to_string(),
+            avatar_url: format!("friend{id}.png"),
+            state: FriendState::Friend,
+            source_id: UserId(0),
+        }
+    }
+
+    fn conversation(id: i64, kind: DirectKind, peer: Option<i64>, label: &str) -> DirectChannel {
+        DirectChannel {
+            id: ChannelId(id),
+            label: label.to_string(),
+            kind,
+            avatar: format!("dm{id}.png"),
+            peer_user_id: peer.map(UserId),
+            peer_username: format!("peer{id}"),
+            creator_id: None,
+            online: false,
+            member_count: 0,
+            unread_count: 0,
+            last_sent_timestamp: 0,
+            last_seen_timestamp: 0,
+            create_time_seconds: 0,
+        }
+    }
+
+    #[test]
+    fn activity_users_include_dm_peers_who_are_not_friends() {
+        let friends = [friend(1, "Friend")];
+        let dms = [conversation(10, DirectKind::Dm, Some(2), "Stranger")];
+        let users = activity_users(&friends, &dms);
+        assert_eq!(
+            users.get(&UserId(1)),
+            Some(&ActivityUser {
+                label: "Friend",
+                avatar_url: "friend1.png",
+            })
+        );
+        assert_eq!(
+            users.get(&UserId(2)),
+            Some(&ActivityUser {
+                label: "Stranger",
+                avatar_url: "dm10.png",
+            })
+        );
+    }
+
+    #[test]
+    fn activity_users_keep_the_friend_profile_for_a_friend_with_a_dm() {
+        let friends = [friend(1, "Friend")];
+        let dms = [conversation(10, DirectKind::Dm, Some(1), "Other")];
+        let users = activity_users(&friends, &dms);
+        assert_eq!(users.len(), 1);
+        assert_eq!(users.get(&UserId(1)).map(|u| u.label), Some("Friend"));
+    }
+
+    #[test]
+    fn activity_users_skip_groups_and_fall_back_to_the_peer_username() {
+        let dms = [
+            conversation(10, DirectKind::Group, None, "Team"),
+            conversation(11, DirectKind::Dm, Some(3), ""),
+        ];
+        let users = activity_users(&[], &dms);
+        assert_eq!(users.len(), 1);
+        assert_eq!(users.get(&UserId(3)).map(|u| u.label), Some("peer11"));
     }
 }

@@ -30,6 +30,7 @@ pub fn mime_from_extension(path: &Path) -> String {
         "heic" => "image/heic",
         "mp4" => "video/mp4",
         "mov" => "video/quicktime",
+        "m4v" => "video/mp4",
         "webm" => "video/webm",
         "mp3" => "audio/mpeg",
         "wav" => "audio/wav",
@@ -160,6 +161,7 @@ mod tests {
         assert_eq!(mime_from_extension(Path::new("a.PNG")), "image/png");
         assert_eq!(mime_from_extension(Path::new("a.jpeg")), "image/jpeg");
         assert_eq!(mime_from_extension(Path::new("clip.mp4")), "video/mp4");
+        assert_eq!(mime_from_extension(Path::new("IMG_0001.M4V")), "video/mp4");
         assert_eq!(mime_from_extension(Path::new("doc.pdf")), "application/pdf");
         assert_eq!(
             mime_from_extension(Path::new("noext")),

@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 
 use gpui::{
@@ -7,8 +7,8 @@ use gpui::{
 };
 use mezon_store::{
     BadgeService, ChannelId, ChannelList, ChannelType, ChannelUserProfile, ChannelUsersEvent,
-    ChannelUsersStore, ClanId, ClanMembersEvent, ClanMembersStore, RoleId, RolesStore, Settings,
-    UserId,
+    ChannelUsersStore, ClanId, ClanMember, ClanMembersEvent, ClanMembersStore, RoleId, RolesStore,
+    Settings, UserId,
 };
 
 use super::add_mem_role_modal::{AddMemRoleEvent, AddMemRoleModal};
@@ -65,17 +65,21 @@ pub(super) struct MemberRow {
     pub avatar: SharedString,
 }
 
+pub(super) fn member_row_from_clan_member(member: &ClanMember) -> MemberRow {
+    MemberRow {
+        user_id: member.id(),
+        name: member.name().into(),
+        username: member.user.username.clone().into(),
+        avatar: member.avatar().into(),
+    }
+}
+
 pub(super) fn member_row(clan_id: ClanId, user_id: UserId, cx: &App) -> MemberRow {
     match ClanMembersStore::global(cx)
         .read(cx)
         .member(clan_id, user_id)
     {
-        Some(member) => MemberRow {
-            user_id,
-            name: member.name().into(),
-            username: member.user.username.clone().into(),
-            avatar: member.avatar().into(),
-        },
+        Some(member) => member_row_from_clan_member(member),
         None => MemberRow {
             user_id,
             name: user_id.to_string().into(),
@@ -167,6 +171,10 @@ pub(super) fn page_slice<T>(items: &[T], page: usize, per_page: usize) -> &[T] {
     &items[start..end]
 }
 
+fn overrides_apply_to(private: bool, channel_type: ChannelType) -> bool {
+    private && channel_type != ChannelType::Voice
+}
+
 pub(super) fn role_row_from(role_id: RoleId, role: &mezon_store::ClanRoleDetail) -> RoleRow {
     RoleRow {
         role_id,
@@ -184,6 +192,7 @@ pub struct PermissionsTab {
     private_initial: bool,
     seeded: bool,
     selected_user_ids: Vec<UserId>,
+    staged_members: HashMap<UserId, ClanMember>,
     selected_role_ids: Vec<RoleId>,
     role_rows: Rc<Vec<RoleRow>>,
     member_ids: Rc<Vec<UserId>>,
@@ -274,6 +283,7 @@ impl PermissionsTab {
             private_initial: false,
             seeded: false,
             selected_user_ids: Vec::new(),
+            staged_members: HashMap::new(),
             selected_role_ids: Vec::new(),
             role_rows: Rc::new(Vec::new()),
             member_ids: Rc::new(Vec::new()),
@@ -306,25 +316,32 @@ impl PermissionsTab {
     /// the override table: every override the server knows is a text
     /// permission (send message, manage threads, …) and would only invite
     /// toggles that do nothing in a voice room.
-    fn shows_overrides(&self, cx: &App) -> bool {
+    fn shows_overrides(&self, cx: &App) -> Option<bool> {
         // Unknown yet means wait: the channel-list observer calls
         // `sync_overrides` again once the channel arrives.
         ChannelList::global(cx)
             .read(cx)
             .channel(self.clan_id, self.channel_id)
-            .is_some_and(|channel| channel.channel_type != ChannelType::Voice)
+            .map(|channel| overrides_apply_to(channel.private, channel.channel_type))
     }
 
     fn sync_overrides(&mut self, cx: &mut Context<Self>) {
-        if self.overrides.is_some() || !self.shows_overrides(cx) {
-            return;
+        match self.shows_overrides(cx) {
+            Some(true) if self.overrides.is_none() => {
+                let clan_id = self.clan_id;
+                let channel_id = self.channel_id;
+                let settings = self.settings.clone();
+                let overrides =
+                    cx.new(|cx| PermissionOverrides::new(clan_id, channel_id, settings, cx));
+                self.overrides_sub = Some(cx.observe(&overrides, |_, _, cx| cx.notify()));
+                self.overrides = Some(overrides);
+            }
+            Some(false) => {
+                self.overrides_sub = None;
+                self.overrides = None;
+            }
+            _ => {}
         }
-        let clan_id = self.clan_id;
-        let channel_id = self.channel_id;
-        let settings = self.settings.clone();
-        let overrides = cx.new(|cx| PermissionOverrides::new(clan_id, channel_id, settings, cx));
-        self.overrides_sub = Some(cx.observe(&overrides, |_, _, cx| cx.notify()));
-        self.overrides = Some(overrides);
     }
 
     /// The settings shell paints this tab's save bar as a floating panel outside the
@@ -403,9 +420,27 @@ impl PermissionsTab {
         }
         let channel_users = ChannelUsersStore::global(cx);
         let channel_users = channel_users.read(cx);
-        match channel_users.profile(self.channel_id, user_id) {
-            Some(profile) => member_matches("", &profile.display_name, &profile.username, needle),
-            None => false,
+        if let Some(profile) = channel_users.profile(self.channel_id, user_id) {
+            return member_matches("", &profile.display_name, &profile.username, needle);
+        }
+        self.staged_members.get(&user_id).is_some_and(|member| {
+            member_matches(
+                &member.clan_nick,
+                &member.user.display_name,
+                &member.user.username,
+                needle,
+            )
+        })
+    }
+
+    fn listed_member_row(&self, user_id: UserId, cx: &App) -> MemberRow {
+        let in_roster = ClanMembersStore::global(cx)
+            .read(cx)
+            .member(self.clan_id, user_id)
+            .is_some();
+        match self.staged_members.get(&user_id) {
+            Some(member) if !in_roster => member_row_from_clan_member(member),
+            _ => channel_member_row(self.clan_id, self.channel_id, user_id, cx),
         }
     }
 
@@ -540,6 +575,7 @@ impl PermissionsTab {
     fn reset(&mut self, cx: &mut Context<Self>) {
         self.selected_role_ids.clear();
         self.selected_user_ids.clear();
+        self.staged_members.clear();
         self.private_enabled = self.private_initial;
         if let Some(overrides) = self.overrides.clone() {
             overrides.update(cx, |overrides, cx| overrides.reset(cx));
@@ -593,6 +629,7 @@ impl PermissionsTab {
             let _ = this.update(cx, |this, cx| {
                 this.private_initial = private_enabled;
                 this.selected_user_ids.clear();
+                this.staged_members.clear();
                 this.selected_role_ids.clear();
                 ChannelUsersStore::global(cx).update(cx, |store, cx| {
                     store.apply_privacy_change(channel_id, private_enabled, cx);
@@ -697,11 +734,18 @@ impl PermissionsTab {
         );
         self.modal_sub = Some(
             cx.subscribe(&modal, |this, _, event: &AddMemRoleEvent, cx| {
-                let AddMemRoleEvent::Staged { user_ids, role_ids } = event;
+                let AddMemRoleEvent::Staged {
+                    user_ids,
+                    role_ids,
+                    remote_members,
+                } = event;
                 for user_id in user_ids {
                     if !this.selected_user_ids.contains(user_id) {
                         this.selected_user_ids.push(*user_id);
                     }
+                }
+                for member in remote_members {
+                    this.staged_members.insert(member.id(), member.clone());
                 }
                 for role_id in role_ids {
                     if !this.selected_role_ids.contains(role_id) {
@@ -1175,7 +1219,7 @@ impl PermissionsTab {
                 page_slice(&self.visible_member_ids, self.member_page, MEMBER_PAGE_SIZE)
                     .iter()
                     .map(|user_id| {
-                        let row = channel_member_row(self.clan_id, self.channel_id, *user_id, cx);
+                        let row = self.listed_member_row(*user_id, cx);
                         render_member_row(
                             &row,
                             creator_id == *user_id,
@@ -1456,6 +1500,14 @@ mod tests {
 
     fn ids(count: usize) -> Vec<UserId> {
         (0..count).map(|ix| UserId(ix as i64 + 1)).collect()
+    }
+
+    #[test]
+    fn overrides_apply_only_to_a_private_channel_that_is_not_voice() {
+        assert!(overrides_apply_to(true, ChannelType::Text));
+        assert!(!overrides_apply_to(false, ChannelType::Text));
+        assert!(!overrides_apply_to(true, ChannelType::Voice));
+        assert!(!overrides_apply_to(false, ChannelType::Voice));
     }
 
     #[test]

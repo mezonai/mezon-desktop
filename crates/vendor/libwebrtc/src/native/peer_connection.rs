@@ -405,9 +405,11 @@ impl PeerConnection {
                 return;
             }
 
-            // Unwrap because it should not happens
-            let vec = serde_json::from_str(&stats).unwrap();
-            let _ = tx.send(Ok(vec));
+            let parsed = serde_json::from_str(&stats).map_err(|e| RtcError {
+                error_type: RtcErrorType::Internal,
+                message: format!("failed to parse stats: {e}"),
+            });
+            let _ = tx.send(parsed);
         });
 
         rx.await.map_err(|_| RtcError {
@@ -584,6 +586,9 @@ impl sys_pcf::PeerConnectionObserver for PeerObserver {
             let receiver = transceiver.receiver();
             let streams = receiver.streams();
             let track = receiver.track();
+            if track.is_null() {
+                return;
+            }
 
             f(TrackEvent {
                 receiver: RtpReceiver { handle: imp_rr::RtpReceiver { sys_handle: receiver } },

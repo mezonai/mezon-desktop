@@ -13,8 +13,8 @@ use gpui::{
 };
 use mezon_store::{
     AccountStore, AttachmentSeedInput, ChannelId, ClanMembersStore, DirectMessageStore, Embed,
-    Message, MessageAttachment, MessageId, MessageSpan, MessagesEvent, MessagesStore,
-    PinnedMessage, PinnedMessagesStore, PollData, RichLayout, Settings, UserId, UsersByUserStore,
+    Message, MessageAttachment, MessageId, MessageSpan, MessagesStore, PinnedMessage,
+    PinnedMessagesStore, PollData, RichLayout, Settings, UserId, UsersByUserStore,
     strip_code_fence,
 };
 use ui::{PopoverMenuHandle, ScrollAxes, Scrollbars, WithScrollbar};
@@ -56,22 +56,6 @@ const EMPTY_BODY_HEIGHT: f32 = 144.;
 const FILE_NAME_COLOR: u32 = 0x3b_82_f6;
 const ATTACHMENT_PREVIEW_SIZE: f32 = 120.;
 
-fn pin_attachments_match(left: &[MessageAttachment], right: &[MessageAttachment]) -> bool {
-    left.len() == right.len()
-        && left.iter().zip(right).all(|(left, right)| {
-            left.url == right.url
-                && left.filename == right.filename
-                && left.filetype == right.filetype
-                && left.proxied_src == right.proxied_src
-                && left.thumbnail == right.thumbnail
-                && left.thumbnail_proxied == right.thumbnail_proxied
-                && left.width == right.width
-                && left.height == right.height
-                && left.size == right.size
-                && left.duration == right.duration
-        })
-}
-
 #[derive(Clone)]
 struct PinCardVm {
     pin_id: SharedString,
@@ -95,35 +79,25 @@ impl PinCardVm {
         channel_id: Option<ChannelId>,
         cx: &App,
     ) -> Self {
+        let pin = msg.clone();
         let sender_label = resolve_pin_sender_label_with_message(
-            &msg.sender_id,
-            &msg.sender_name,
-            Some(msg.message_id.as_str()),
+            &pin.sender_id,
+            &pin.sender_name,
+            Some(pin.message_id.as_str()),
             clan_id,
             channel_id,
             cx,
         );
-        let (avatar_src, avatar_fallback) = resolve_pin_avatar_urls(msg, clan_id, channel_id, cx);
-        let (poll, poll_my_vote) = resolve_pin_poll(msg, channel_id, cx);
-        let text_spans = prepare_pin_text_spans(msg);
-        let selectable_text = pin_canonical_text(msg, &text_spans);
-        let mut pin = msg.clone();
-        if let Some(channel_id) = channel_id
-            && !pin.attachments_from_source
-            && let Ok(message_id) = msg.message_id.parse::<MessageId>()
-            && let Some(message) = MessagesStore::global(cx)
-                .read(cx)
-                .message_in_channel(channel_id, message_id)
-            && !message.attachments.is_empty()
-        {
-            pin.attachments = msg.preview_attachments(Some(message)).to_vec();
-        }
+        let (avatar_src, avatar_fallback) = resolve_pin_avatar_urls(&pin, clan_id, channel_id, cx);
+        let (poll, poll_my_vote) = resolve_pin_poll(&pin, cx);
+        let text_spans = prepare_pin_text_spans(&pin);
+        let selectable_text = pin_canonical_text(&pin, &text_spans);
         Self {
-            pin_id: msg.id.clone().into(),
-            message_id: msg.message_id.clone().into(),
-            create_time: msg.create_time,
+            pin_id: pin.id.clone().into(),
+            message_id: pin.message_id.clone().into(),
+            create_time: pin.create_time,
             sender_label,
-            is_anonymous: mezon_store::is_anonymous_sender_id(&msg.sender_id, cx),
+            is_anonymous: mezon_store::is_anonymous_sender_id(&pin.sender_id, cx),
             avatar_src,
             avatar_fallback,
             pin: Arc::new(pin),
@@ -135,11 +109,7 @@ impl PinCardVm {
     }
 }
 
-fn resolve_pin_poll(
-    pin: &PinnedMessage,
-    channel_id: Option<ChannelId>,
-    cx: &App,
-) -> (Option<Arc<PollData>>, Arc<[i32]>) {
+fn resolve_pin_poll(pin: &PinnedMessage, cx: &App) -> (Option<Arc<PollData>>, Arc<[i32]>) {
     if pin.poll.is_none() {
         return (None, Arc::default());
     }
@@ -147,14 +117,11 @@ fn resolve_pin_poll(
         return (pin.poll.clone().map(Arc::from), Arc::default());
     };
     let store = MessagesStore::global(cx).read(cx);
-    let live = channel_id
-        .and_then(|channel_id| store.message_in_channel(channel_id, message_id))
-        .and_then(|msg| msg.poll.clone());
     let my_vote: Arc<[i32]> = store
         .poll_my_vote(message_id)
         .map(Arc::from)
         .unwrap_or_default();
-    (live.or_else(|| pin.poll.clone()).map(Arc::from), my_vote)
+    (pin.poll.clone().map(Arc::from), my_vote)
 }
 
 pub(crate) fn render_pinned_message_preview(
@@ -185,6 +152,7 @@ pub(crate) fn render_pinned_message_preview(
 
 fn pinned_message_from_chat_message(msg: &Message) -> PinnedMessage {
     PinnedMessage {
+        avatar_from_source: true,
         id: msg.id.to_string(),
         message_id: msg.id.to_string(),
         sender_id: msg.sender_id.clone(),
@@ -250,28 +218,9 @@ impl PinnedPopoverPanel {
 
         let subs = vec![
             cx.observe(&PinnedMessagesStore::global(cx), |this, _, cx| {
-                this.pin_cards = this.compute_pin_cards(cx);
-                this.probe_pin_audio(cx);
-                cx.notify();
+                let cards = this.compute_pin_cards(cx);
+                this.replace_pin_cards(cards, cx);
             }),
-            cx.subscribe(
-                &MessagesStore::global(cx),
-                |this, _, event, cx| match event {
-                    MessagesEvent::Updated { message_id } => {
-                        this.refresh_attachment_rows(*message_id, cx);
-                    }
-                    MessagesEvent::Reset { .. }
-                    | MessagesEvent::Resized { .. }
-                    | MessagesEvent::Shifted { .. } => this.refresh_attachment_rows(None, cx),
-                    MessagesEvent::TopicUpdated { topic_id }
-                        if PinnedMessagesStore::global(cx).read(cx).channel_id()
-                            == Some(ChannelId(*topic_id)) =>
-                    {
-                        this.refresh_attachment_rows(None, cx);
-                    }
-                    _ => {}
-                },
-            ),
             cx.observe(&ClanMembersStore::global(cx), |this, _, cx| {
                 this.refresh_name_rows(cx);
             }),
@@ -306,7 +255,7 @@ impl PinnedPopoverPanel {
             )
         });
         let ogp_image_cache = crate::image_cache::ogp_aux_cache("pinned-ogp", cx);
-        let list_state = ListState::new(0, ListAlignment::Top, px(LIST_OVERDRAW)).measure_all();
+        let list_state = ListState::new(0, ListAlignment::Top, px(LIST_OVERDRAW));
 
         let mut panel = Self {
             settings,
@@ -319,48 +268,41 @@ impl PinnedPopoverPanel {
             pin_cards: Vec::new(),
             selection: MessageSelectionState::new_shared(),
             shell_modal_open,
-            _subs: subs,
+            _subs: subs
+                .into_iter()
+                .chain(crate::chat::message::parts::observe_cdn_access(cx))
+                .collect(),
         };
         panel.pin_cards = panel.compute_pin_cards(cx);
         panel.probe_pin_audio(cx);
         panel
     }
 
-    fn refresh_attachment_rows(&mut self, message_id: Option<MessageId>, cx: &mut Context<Self>) {
-        let pins = PinnedMessagesStore::global(cx).read(cx);
-        let Some(channel_id) = pins.channel_id() else {
-            return;
-        };
-        let messages = MessagesStore::global(cx).read(cx);
-        let mut changed = false;
-        for (index, vm) in self.pin_cards.iter_mut().enumerate() {
-            if vm.pin.attachments_from_source {
-                continue;
+    fn replace_pin_cards(&mut self, cards: Vec<PinCardVm>, cx: &mut Context<Self>) {
+        let selection_stale = self.pin_cards.len() != cards.len()
+            || self.pin_cards.iter().zip(&cards).any(|(old, new)| {
+                old.message_id != new.message_id || old.selectable_text != new.selectable_text
+            });
+        if selection_stale {
+            if let Ok(mut selection) = self.selection.try_borrow_mut() {
+                selection.clear();
             }
-            let Ok(id) = vm.message_id.parse::<MessageId>() else {
-                continue;
-            };
-            if message_id.is_some_and(|message_id| message_id != id) {
-                continue;
-            }
-            let Some(message) = messages.message_in_channel(channel_id, id) else {
-                continue;
-            };
-            if message.attachments.is_empty()
-                || pin_attachments_match(&vm.pin.attachments, &message.attachments)
-            {
-                continue;
-            }
-            Arc::make_mut(&mut vm.pin).attachments = message.attachments.clone();
+        }
+        let changed_items = self
+            .pin_cards
+            .iter()
+            .zip(&cards)
+            .enumerate()
+            .filter_map(|(index, (old, new))| pin_card_needs_remeasure(old, new).then_some(index))
+            .collect::<Vec<_>>();
+        self.pin_cards = cards;
+        for index in changed_items {
             if index < self.list_state.item_count() {
                 self.list_state.remeasure_items(index..index + 1);
             }
-            changed = true;
         }
-        if changed {
-            self.probe_pin_audio(cx);
-            cx.notify();
-        }
+        self.probe_pin_audio(cx);
+        cx.notify();
     }
 
     fn refresh_name_rows(&mut self, cx: &mut Context<Self>) {
@@ -374,15 +316,15 @@ impl PinnedPopoverPanel {
                     .any(|(vm, pin)| vm.message_id.as_ref() != pin.message_id.as_str())
         };
         if rebuild {
-            self.pin_cards = self.compute_pin_cards(cx);
-            self.probe_pin_audio(cx);
-            cx.notify();
+            let cards = self.compute_pin_cards(cx);
+            self.replace_pin_cards(cards, cx);
             return;
         }
         let store = PinnedMessagesStore::global(cx).read(cx);
         let clan_id = effective_clan_id(store.clan_id(), cx);
         let channel_id = store.channel_id();
-        for (vm, pin) in self.pin_cards.iter_mut().zip(store.pinned()) {
+        for vm in &mut self.pin_cards {
+            let pin = &vm.pin;
             vm.sender_label = resolve_pin_sender_label_with_message(
                 &pin.sender_id,
                 &pin.sender_name,
@@ -657,6 +599,45 @@ impl PinnedPopoverPanel {
             }
         }
     }
+}
+
+fn pin_card_needs_remeasure(old: &PinCardVm, new: &PinCardVm) -> bool {
+    old.message_id != new.message_id
+        || old.selectable_text != new.selectable_text
+        || old.pin.rich_layout.as_ref().map(|layout| &layout.text)
+            != new.pin.rich_layout.as_ref().map(|layout| &layout.text)
+        || old
+            .pin
+            .ogp
+            .as_ref()
+            .map(|ogp| (&ogp.title, &ogp.description))
+            != new
+                .pin
+                .ogp
+                .as_ref()
+                .map(|ogp| (&ogp.title, &ogp.description))
+        || old.pin.embeds.len() != new.pin.embeds.len()
+        || old.pin.attachments.len() != new.pin.attachments.len()
+        || old
+            .pin
+            .attachments
+            .iter()
+            .zip(&new.pin.attachments)
+            .any(|(old, new)| {
+                old.url != new.url
+                    || old.filename != new.filename
+                    || old.width != new.width
+                    || old.height != new.height
+                    || old.source_denied != new.source_denied
+            })
+        || old
+            .poll
+            .as_ref()
+            .map(|poll| (&poll.question, poll.answers.len()))
+            != new
+                .poll
+                .as_ref()
+                .map(|poll| (&poll.question, poll.answers.len()))
 }
 
 fn text_layout_offset_at(
@@ -1063,6 +1044,7 @@ fn resolve_pin_avatar_urls(
     let mut avatar_raw =
         resolve_pin_avatar_url(&pin.sender_id, &pin.avatar_url, clan_id, channel_id, cx);
     if avatar_raw.is_empty()
+        && !pin.has_authoritative_empty_avatar(cx)
         && let Ok(message_id) = pin.message_id.parse::<MessageId>()
     {
         let store = MessagesStore::global(cx).read(cx);
@@ -1115,15 +1097,13 @@ fn pin_card(
     let mut avatar = Avatar::new()
         .name(&sender_label)
         .with_size(Size::Small)
-        .anonymous(vm.is_anonymous)
+        .anonymous(vm.is_anonymous && avatar_src.is_none())
         .image_cache(avatar_cache.clone());
-    if !vm.is_anonymous {
-        if let Some(src) = &avatar_src {
-            avatar = avatar.src(src.clone());
-        }
-        if let Some(fallback) = &avatar_fallback {
-            avatar = avatar.fallback_src(fallback.clone());
-        }
+    if let Some(src) = &avatar_src {
+        avatar = avatar.src(src.clone());
+    }
+    if let Some(fallback) = &avatar_fallback {
+        avatar = avatar.fallback_src(fallback.clone());
     }
 
     let name_row = h_flex()
@@ -1263,11 +1243,24 @@ fn render_pin_body(
         ),
         None => render_pin_text_body(pin, text_spans, selectable_text, theme, selection.clone()),
     };
+    let viewing_channel = MessagesStore::try_global(cx)
+        .and_then(|store| store.read(cx).active_channel_id())
+        .map_or(0, |channel_id| channel_id.0);
     let image_preview = pin
         .attachments
         .iter()
         .find(|att| pin_image_attachment_has_src(att))
         .map(|att| {
+            if att.source_denied || mezon_store::hides_media(&att.url, viewing_channel) {
+                return div()
+                    .mt_1()
+                    .child(crate::chat::message::parts::render_private_media_tile(
+                        theme,
+                        ATTACHMENT_PREVIEW_SIZE,
+                        ATTACHMENT_PREVIEW_SIZE,
+                    ))
+                    .into_any_element();
+            }
             render_pin_image_attachment(
                 att,
                 pin,
@@ -2411,4 +2404,42 @@ pub fn pin_popover_on_open() -> Rc<dyn Fn(&mut Window, &mut App)> {
             }
         });
     })
+}
+
+#[cfg(test)]
+mod avatar_tests {
+    use super::*;
+
+    #[gpui::test]
+    fn authoritative_anonymous_avatar_does_not_fall_back_to_message_cache(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        cx.update(|cx| {
+            mezon_store::AppConfig::init_global(
+                Arc::new(mezon_store::AppConfig {
+                    anonymous_user_id: "9876".into(),
+                    ..Default::default()
+                }),
+                cx,
+            );
+            for source in ["", "https://cdn.example/persona.webp"] {
+                let message =
+                    Message::new(MessageId(42), "hello", "9876", "persona", 1).with_avatar(source);
+                let pin = pinned_message_from_chat_message(&message);
+                let (image, fallback) = resolve_pin_avatar_urls(
+                    &pin,
+                    Some(mezon_store::ClanId(1)),
+                    Some(ChannelId(2)),
+                    cx,
+                );
+                if source.is_empty() {
+                    assert!(image.is_none());
+                    assert!(fallback.is_none());
+                } else {
+                    assert_eq!(image.as_deref(), Some(source));
+                    assert_eq!(fallback.as_deref(), Some(source));
+                }
+            }
+        });
+    }
 }

@@ -3,7 +3,7 @@ use gpui::{
     Subscription, Task, Window, div, img, prelude::*, px, rgb,
 };
 use mezon_store::{
-    ClanImageMimeType, ClanList, CreateClanError, MAX_CLAN_LOGO_BYTES, Settings, is_valid_clan_name,
+    ClanImageMimeType, ClanList, ClanSaveError, MAX_CLAN_LOGO_BYTES, Settings, is_valid_clan_name,
 };
 
 use crate::app::shell::Shell;
@@ -240,14 +240,14 @@ impl CreateClanModal {
                     Shell::global(cx).update(cx, |shell, cx| shell.close_modal(cx));
                 });
             }
-            Err(CreateClanError::DuplicateName) => {
+            Err(ClanSaveError::DuplicateName) => {
                 let _ = this.update(cx, |this, cx| {
                     this.validation = Validation::DuplicateName;
                     this.creating = false;
                     cx.notify();
                 });
             }
-            Err(CreateClanError::Other(msg)) => {
+            Err(ClanSaveError::Other(msg)) => {
                 tracing::error!("create clan failed: {msg}");
                 let _ = this.update(cx, |this, cx| {
                     this.creating = false;
@@ -320,6 +320,18 @@ impl CreateClanModal {
                 let label: SharedString = mezon_i18n::t(locale, entry.key).to_string().into();
                 let template_id = entry.id;
                 let icon = entry.icon;
+                let template_icon = match template_id {
+                    TemplateId::Gaming | TemplateId::Friends | TemplateId::LocalCommunity => {
+                        img(icon.path())
+                            .size(px(20.))
+                            .flex_none()
+                            .into_any_element()
+                    }
+                    _ => Icon::new(icon)
+                        .size(px(20.))
+                        .text_color(theme.tokens.text_theme_primary)
+                        .into_any_element(),
+                };
                 div()
                     .id(SharedString::from(format!("template-{}", entry.key)))
                     .w_full()
@@ -337,11 +349,7 @@ impl CreateClanModal {
                     .on_click(cx.listener(move |this, _, _window, cx| {
                         this.go_to_details(Some(template_id), cx)
                     }))
-                    .child(
-                        Icon::new(icon)
-                            .size(px(20.))
-                            .text_color(theme.tokens.text_theme_primary),
-                    )
+                    .child(template_icon)
                     .child(
                         div()
                             .font_weight(gpui::FontWeight::SEMIBOLD)

@@ -1,3 +1,4 @@
+mod annotation;
 mod audio;
 mod camera;
 pub mod compose;
@@ -44,6 +45,9 @@ use parking_lot::{Condvar, Mutex};
 
 use sfu::{SfuConfig, SfuEngine, SfuEvent, SfuPeer};
 
+pub use annotation::{
+    AnnotationItem, AnnotationPoint, AnnotationScene, ScreenAnnotations, arrow_head,
+};
 pub use audio::{
     AudioFormat, AudioIo, DeviceResetKind, MicResampler, PlaybackMixer, SpeakingLevels,
 };
@@ -54,14 +58,15 @@ pub use camera::{
 pub use linux_session::record_wayland_session;
 pub use mezon_record::{RecordError, RecordStats};
 pub use permission::{
-    MEDIA_DENIAL_IS_AUTHORITATIVE, MediaDevice, MediaPermission, media_permission,
-    media_permission_changes, media_privacy_settings_url, request_media_permission,
+    MediaDevice, MediaPermission, media_permission, media_permission_changes,
+    media_privacy_settings_url, request_media_permission, running_packaged,
 };
 pub use record::{
     RECORD_FPS, RECORD_HEIGHT, RECORD_WIDTH, RecordSession, RecordStarter, RecordTaps,
 };
+pub use sfu::messages::MEDIA_POOL_VERSION;
 pub use sfu::sdp::stabilize_inactive_video_sections;
-pub use sfu::{RemovalCause, SfuRole};
+pub use sfu::{MediaRefusal, RemovalCause, SfuRole};
 pub use stream_playback::StreamAudioOutput;
 
 pub fn microphone_denied() -> bool {
@@ -86,7 +91,8 @@ pub use screen_targets::{
 #[cfg(target_os = "macos")]
 pub use video::VideoSurface;
 pub use video::{
-    VideoFrameData, VideoFrameStore, i420_to_bgra_into, local_camera_key, rotate_bgra_into,
+    SharedMonitor, VideoFrameData, VideoFrameStore, i420_to_bgra_into, local_camera_key,
+    rotate_bgra_into,
 };
 
 use crate::screen::ScreenStopper;
@@ -150,6 +156,8 @@ pub struct VoiceParticipant {
     pub session_id: String,
     pub identity: String,
     pub name: String,
+    pub metadata_name: String,
+    pub metadata_avatar: String,
     pub is_local: bool,
     pub is_agent: bool,
     pub is_audience: bool,
@@ -188,6 +196,10 @@ pub enum VoiceEvent {
         reason: String,
     },
     MutedByModerator,
+    MediaRefused(MediaRefusal),
+    RoomMessage(String),
+    RoomMessageSent,
+    RoomMessageFailed,
     NoiseSuppressionReady {
         generation: u64,
         result: std::result::Result<(), String>,
@@ -207,6 +219,7 @@ enum Command {
     StopScreenShare,
     PushToTalk(bool),
     ParticipantAction(String),
+    SendRoomMessage(String),
     Disconnect,
 }
 
@@ -396,6 +409,10 @@ impl VoiceSession {
         let _ = self.cmd_tx.send(Command::ParticipantAction(token));
     }
 
+    pub fn send_room_message(&self, message: String) {
+        let _ = self.cmd_tx.send(Command::SendRoomMessage(message));
+    }
+
     pub fn set_screen_full_res(&self, full_res: bool) {
         self.screen_full_res.store(full_res, Ordering::Relaxed);
     }
@@ -487,6 +504,7 @@ async fn session_main(
     let (audio_ready_tx, audio_ready_rx) = flume::bounded::<Result<audio::AudioIo>>(1);
     let mut audio_ready_rx = Some(audio_ready_rx);
     let noise_requested = noise.requested();
+    let noise_ready = noise.ready();
     runtime::runtime().spawn(async move {
         let started = tokio::task::spawn_blocking(move || {
             audio::AudioIo::start_with_noise(
@@ -494,6 +512,7 @@ async fn session_main(
                 output_device_id,
                 session_record_taps,
                 noise_requested,
+                noise_ready,
             )
         })
         .await
@@ -622,6 +641,13 @@ async fn session_main(
                         let _ = evt_tx.send(VoiceEvent::PushToTalkActive(active));
                         emit!();
                     }
+                    SfuEvent::NetworkWeak(weak) => {
+                        let _ = evt_tx.send(if weak {
+                            VoiceEvent::NetworkWeak
+                        } else {
+                            VoiceEvent::NetworkRecovered
+                        });
+                    }
                     SfuEvent::Reconnecting => {
                         for (key, task) in audio_tracks.drain() {
                             task.handle.abort();
@@ -653,6 +679,18 @@ async fn session_main(
                         }
                         emit!();
                         let _ = evt_tx.send(VoiceEvent::MutedByModerator);
+                    }
+                    SfuEvent::MediaRefused(refusal) => {
+                        let _ = evt_tx.send(VoiceEvent::MediaRefused(refusal));
+                    }
+                    SfuEvent::RoomMessage(message) => {
+                        let _ = evt_tx.send(VoiceEvent::RoomMessage(message));
+                    }
+                    SfuEvent::RoomMessageSent => {
+                        let _ = evt_tx.send(VoiceEvent::RoomMessageSent);
+                    }
+                    SfuEvent::RoomMessageFailed => {
+                        let _ = evt_tx.send(VoiceEvent::RoomMessageFailed);
                     }
                     SfuEvent::Error(message) => {
                         let _ = evt_tx.send(VoiceEvent::Error(message));
@@ -813,6 +851,7 @@ async fn session_main(
                         }
                     }
                     Ok(Command::ParticipantAction(token)) => engine.participant_action(token),
+                    Ok(Command::SendRoomMessage(message)) => engine.send_room_message(message),
                     Ok(Command::Disconnect) | Err(_) => {
                         engine.close();
                         abort_task(&mut microphone_task).await;
@@ -1055,12 +1094,15 @@ async fn uplink_pump(
     // that wait off the microphone/Mezon-NS pump so it can service both queues.
     let (uplink_tx, uplink_rx) = flume::bounded::<UplinkFrame>(10);
     let sender_noise_requested = noise_requested.clone();
+    let sender_noise_ready = noise_ready.clone();
     let sender_noise_generation = noise_generation.clone();
     let sender_mic_enabled = mic_enabled.clone();
     let _sender_task = AbortOnDrop(runtime::runtime().spawn(async move {
         let mut seen_noise_generation = sender_noise_generation.load(Ordering::Acquire);
         while let Ok(frame) = uplink_rx.recv_async().await {
             let generation = sender_noise_generation.load(Ordering::Acquire);
+            let filtering = sender_noise_requested.load(Ordering::Acquire)
+                && sender_noise_ready.load(Ordering::Acquire);
             if generation != seen_noise_generation {
                 source.clear_buffer();
                 seen_noise_generation = generation;
@@ -1069,10 +1111,9 @@ async fn uplink_pump(
                 && (!sender_mic_enabled.load(Ordering::Relaxed)
                     || match frame.filtered_generation {
                         Some(filtered_generation) => {
-                            !sender_noise_requested.load(Ordering::Acquire)
-                                || filtered_generation != generation
+                            !filtering || filtered_generation != generation
                         }
-                        None => sender_noise_requested.load(Ordering::Acquire),
+                        None => filtering,
                     })
             {
                 continue;
@@ -1086,7 +1127,7 @@ async fn uplink_pump(
     let mut meter = ScreenAudioMeter::default();
     let mut noise_overload = NoiseOverload::new();
     let mut uplink_overruns = 0u64;
-    let mut last_mic_frame = Instant::now();
+    let mut mic_clock = MicAudioClock::new(Instant::now());
     let mut tick = tokio::time::interval(UPLINK_TICK);
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
 
@@ -1096,6 +1137,7 @@ async fn uplink_pump(
             filtered = noise_output.recv_async() => {
                 let Ok(mut frame) = filtered else { break };
                 if !noise_requested.load(Ordering::Acquire)
+                    || !noise_ready.load(Ordering::Acquire)
                     || frame.generation != noise_generation.load(Ordering::Acquire) {
                     continue;
                 }
@@ -1133,11 +1175,12 @@ async fn uplink_pump(
             }
             captured = mic_rx.recv_async() => {
                 let Ok(samples) = captured else { break };
-                last_mic_frame = Instant::now();
                 let Some(in_fmt) = current_in_fmt else { continue };
 
                 let live = mic_enabled.load(Ordering::Relaxed);
-                let filtering = noise_requested.load(Ordering::Acquire);
+                // Keep sending normal microphone audio while the model loads or fails.
+                let filtering = noise_requested.load(Ordering::Acquire)
+                    && noise_ready.load(Ordering::Acquire);
                 if live && !filtering {
                     record_taps.push(
                         mezon_record::AudioSource::Mic,
@@ -1152,6 +1195,7 @@ async fn uplink_pump(
                 if mic_out.is_empty() {
                     continue;
                 }
+                mic_clock.observe(Instant::now(), mic_out.len());
                 if filtering {
                     let sent = if live && noise_ready.load(Ordering::Acquire) {
                         match noise_frames.try_send(std::mem::take(&mut mic_out)) {
@@ -1204,7 +1248,7 @@ async fn uplink_pump(
                 );
             }
             _ = tick.tick() => {
-                if last_mic_frame.elapsed() < MICROPHONE_SILENCE_GRACE {
+                if !mic_clock.fallback_due(Instant::now()) {
                     continue;
                 }
                 let shared = take_screen_audio(&screen_audio, UPLINK_TICK_SAMPLES * 3);
@@ -1220,6 +1264,30 @@ async fn uplink_pump(
                 );
             }
         }
+    }
+}
+
+struct MicAudioClock {
+    covered_until: Instant,
+}
+
+impl MicAudioClock {
+    fn new(now: Instant) -> Self {
+        Self { covered_until: now }
+    }
+
+    fn observe(&mut self, now: Instant, samples: usize) {
+        // Capture callbacks can deliver 40 ms as four consecutive 10 ms frames.
+        // Account for all that audio before starting the silence grace period;
+        // timing only the last callback inserts extra screen-only frames between
+        // normal capture bursts and overfills the WebRTC uplink queue.
+        let duration =
+            Duration::from_nanos(samples as u64 * 1_000_000_000 / u64::from(UPLINK_SAMPLE_RATE));
+        self.covered_until = self.covered_until.max(now) + duration;
+    }
+
+    fn fallback_due(&self, now: Instant) -> bool {
+        now.saturating_duration_since(self.covered_until) >= MICROPHONE_SILENCE_GRACE
     }
 }
 
@@ -1779,6 +1847,34 @@ fn bounded_dimensions(width: u32, height: u32, max_width: u32, max_height: u32) 
     (width, height)
 }
 
+fn peer_display_metadata(metadata: &str) -> (String, String) {
+    fn field(value: &str) -> String {
+        let value = value.trim();
+        if value == "undefined" {
+            String::new()
+        } else {
+            value.to_owned()
+        }
+    }
+    let metadata = metadata.trim();
+    if metadata.starts_with('{')
+        && let Ok(serde_json::Value::Object(record)) = serde_json::from_str(metadata)
+    {
+        let text = |key: &str| {
+            record
+                .get(key)
+                .and_then(serde_json::Value::as_str)
+                .map(field)
+                .unwrap_or_default()
+        };
+        return (text("username"), text("avatar"));
+    }
+    match metadata.rsplit_once(';') {
+        Some((name, avatar)) => (field(name), field(avatar)),
+        None => (field(metadata), String::new()),
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn emit_participants(
     evt_tx: &flume::Sender<VoiceEvent>,
@@ -1797,6 +1893,8 @@ fn emit_participants(
         session_id: local_user_id.to_string(),
         identity: local_user_id.to_string(),
         name: String::new(),
+        metadata_name: String::new(),
+        metadata_avatar: String::new(),
         is_local: true,
         is_agent: false,
         is_audience: local_role.is_audience(),
@@ -1808,10 +1906,13 @@ fn emit_participants(
     });
 
     for peer in peers {
+        let (metadata_name, metadata_avatar) = peer_display_metadata(&peer.metadata);
         participants.push(VoiceParticipant {
             session_id: format!("{}\u{1}peer:{}", peer.user_id, peer.peer_id),
             identity: peer.user_id.clone(),
             name: String::new(),
+            metadata_name,
+            metadata_avatar,
             is_local: false,
             is_agent: false,
             is_audience: peer.is_audience,
@@ -1831,6 +1932,62 @@ fn emit_participants(
 }
 
 #[cfg(test)]
+mod uplink_timing_tests {
+    use super::{MicAudioClock, UPLINK_TICK_SAMPLES};
+    use std::time::{Duration, Instant};
+
+    #[test]
+    fn continuous_mic_batches_do_not_insert_extra_screen_frames() {
+        let start = Instant::now();
+        for callback_ms in [10, 20, 40, 80] {
+            let mut clock = MicAudioClock::new(start);
+            let mut sent_samples = 0;
+            for elapsed_ms in (0..2_000).step_by(10) {
+                let now = start + Duration::from_millis(elapsed_ms);
+                if elapsed_ms % callback_ms == 0 {
+                    // The capture worker splits a device callback into 10 ms frames.
+                    for _ in 0..callback_ms / 10 {
+                        clock.observe(now, UPLINK_TICK_SAMPLES);
+                        sent_samples += UPLINK_TICK_SAMPLES;
+                    }
+                }
+                if clock.fallback_due(now) {
+                    sent_samples += UPLINK_TICK_SAMPLES * 3;
+                }
+            }
+            assert_eq!(sent_samples, 96_000, "callback interval: {callback_ms} ms");
+        }
+    }
+
+    #[test]
+    fn screen_audio_continues_when_the_mic_never_starts() {
+        let start = Instant::now();
+        let clock = MicAudioClock::new(start);
+        assert!(clock.fallback_due(start + Duration::from_millis(30)));
+    }
+
+    #[test]
+    fn screen_audio_resumes_after_the_last_mic_batch_is_covered() {
+        let start = Instant::now();
+        let mut clock = MicAudioClock::new(start);
+        for _ in 0..4 {
+            clock.observe(start, UPLINK_TICK_SAMPLES);
+        }
+        assert!(!clock.fallback_due(start + Duration::from_millis(30)));
+        assert!(!clock.fallback_due(start + Duration::from_millis(60)));
+        assert!(clock.fallback_due(start + Duration::from_millis(70)));
+
+        // A resumed callback starts from the current time, not an expired deadline.
+        let resumed = start + Duration::from_secs(1);
+        for _ in 0..4 {
+            clock.observe(resumed, UPLINK_TICK_SAMPLES);
+        }
+        assert!(!clock.fallback_due(resumed + Duration::from_millis(30)));
+        assert!(clock.fallback_due(resumed + Duration::from_millis(70)));
+    }
+}
+
+#[cfg(test)]
 mod remote_video_tests {
     use super::bounded_dimensions;
 
@@ -1843,5 +2000,43 @@ mod remote_video_tests {
     fn bounded_dimensions_cap_large_frames_evenly() {
         assert_eq!(bounded_dimensions(3840, 2160, 1920, 1080), (1920, 1080));
         assert_eq!(bounded_dimensions(2560, 1600, 1920, 1080), (1728, 1080));
+    }
+}
+
+#[cfg(test)]
+mod peer_metadata_tests {
+    use super::peer_display_metadata;
+
+    fn pair(name: &str, avatar: &str) -> (String, String) {
+        (name.to_owned(), avatar.to_owned())
+    }
+
+    #[test]
+    fn peer_metadata_splits_name_and_avatar_at_the_last_separator() {
+        assert_eq!(
+            peer_display_metadata("a;b;https://cdn/a.png"),
+            pair("a;b", "https://cdn/a.png")
+        );
+        assert_eq!(peer_display_metadata("alice"), pair("alice", ""));
+        assert_eq!(peer_display_metadata(" bob ; "), pair("bob", ""));
+    }
+
+    #[test]
+    fn json_peer_metadata_is_read_like_the_web_client() {
+        assert_eq!(
+            peer_display_metadata(r#"{"username":"Alice","avatar":"https://cdn/a.png"}"#),
+            pair("Alice", "https://cdn/a.png")
+        );
+        assert_eq!(peer_display_metadata(r#"{"extName":"x"}"#), pair("", ""));
+        assert_eq!(peer_display_metadata("{broken;x"), pair("{broken", "x"));
+    }
+
+    #[test]
+    fn an_undefined_metadata_field_is_dropped() {
+        assert_eq!(peer_display_metadata("Alice;undefined"), pair("Alice", ""));
+        assert_eq!(
+            peer_display_metadata(r#"{"username":"undefined","avatar":"https://cdn/a.png"}"#),
+            pair("", "https://cdn/a.png")
+        );
     }
 }

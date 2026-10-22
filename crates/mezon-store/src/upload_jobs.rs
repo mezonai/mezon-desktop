@@ -2,7 +2,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use mezon_client::transport::{
-    ApiMessage, ContentToken, OutgoingEmoji, OutgoingHashtag, OutgoingMention,
+    ApiMessage, ChannelLinkMeta, ContentToken, OutgoingEmoji, OutgoingHashtag, OutgoingMention,
 };
 use mezon_client::{AttachmentUploadOutcome, ResumableUpload};
 use serde::{Deserialize, Serialize};
@@ -31,6 +31,8 @@ pub struct UploadJob {
     pub content: String,
     pub mentions: Vec<OutgoingMention>,
     pub hashtags: Vec<OutgoingHashtag>,
+    #[serde(default)]
+    pub hashtag_channels: Vec<ChannelLinkMeta>,
     pub emojis: Vec<OutgoingEmoji>,
     pub create_time_seconds: u32,
     pub started_at: i64,
@@ -160,6 +162,7 @@ impl UploadJob {
                 e: token_end(t),
             })
             .collect();
+        self.hashtag_channels = channel_link_metas(tokens.hg.iter().chain(&tokens.mk));
         self.emojis = tokens
             .ej
             .iter()
@@ -170,6 +173,32 @@ impl UploadJob {
             })
             .collect();
     }
+}
+
+fn channel_link_metas<'a>(tokens: impl Iterator<Item = &'a ContentToken>) -> Vec<ChannelLinkMeta> {
+    let mut metas: Vec<ChannelLinkMeta> = Vec::new();
+    for token in tokens {
+        let (Some(channel_id), Some(clan_id), Some(channel_label), Some(channel_type)) = (
+            token.channel_id.as_ref(),
+            token.clan_id.as_ref(),
+            token.channel_label.as_ref(),
+            token.channel_type,
+        ) else {
+            continue;
+        };
+        if metas.iter().any(|meta| &meta.channel_id == channel_id) {
+            continue;
+        }
+        metas.push(ChannelLinkMeta {
+            channel_id: channel_id.clone(),
+            channel_label: channel_label.clone(),
+            clan_id: clan_id.clone(),
+            parent_id: token.parent_id.clone(),
+            channel_type: u32::try_from(channel_type).unwrap_or_default(),
+            private: token.channel_private.is_some_and(|private| private != 0),
+        });
+    }
+    metas
 }
 
 fn id_or_empty(id: i64) -> String {
@@ -364,6 +393,7 @@ mod tests {
             content: "clip".into(),
             mentions: Vec::new(),
             hashtags: Vec::new(),
+            hashtag_channels: Vec::new(),
             emojis: Vec::new(),
             create_time_seconds: 0,
             started_at,

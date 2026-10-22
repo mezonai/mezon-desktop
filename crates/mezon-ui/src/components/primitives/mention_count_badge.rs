@@ -24,6 +24,14 @@ pub fn mention_count_badge(count: u32) -> gpui::Div {
         .child(label)
 }
 
+pub fn unread_dot() -> gpui::Div {
+    div()
+        .flex_none()
+        .size(px(7.))
+        .rounded_full()
+        .bg(rgb(0xda373c))
+}
+
 /// Channel row badge: absolute right, hidden on row hover (React `group-hover:hidden`).
 pub fn mention_count_badge_on_channel_row(count: u32, group_name: SharedString) -> gpui::Div {
     mention_count_badge(count)

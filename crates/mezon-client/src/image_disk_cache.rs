@@ -12,6 +12,7 @@ use futures::future::BoxFuture;
 use http_client::{AsyncBody, HttpClient, Method, Request, Response, Url, http};
 use reqwest_client::ReqwestClient;
 
+use crate::cdn_signature::CdnSigner;
 use crate::transport_runtime::handle;
 
 const MEMORY_BUDGET_BYTES: usize = 4 * 1024 * 1024;
@@ -41,7 +42,8 @@ fn invalid_inline_image_response() -> Response<AsyncBody> {
 }
 
 pub struct DiskImageCacheClient {
-    inner: ReqwestClient,
+    inner: Arc<ReqwestClient>,
+    signer: Option<Arc<CdnSigner>>,
     dir: Option<PathBuf>,
     media_origins: Arc<[String]>,
     upload_origin: String,
@@ -68,7 +70,8 @@ impl DiskImageCacheClient {
     ) -> Self {
         let dir = dirs::cache_dir().map(|base| base.join("mezon").join("images"));
         Self {
-            inner,
+            inner: Arc::new(inner),
+            signer: None,
             dir,
             media_origins: media_origins.into(),
             upload_origin,
@@ -155,6 +158,31 @@ fn stable_key(url: &str) -> u64 {
         hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
     }
     hash
+}
+
+async fn send_signed(
+    inner: Arc<ReqwestClient>,
+    signer: Arc<CdnSigner>,
+    req: Request<AsyncBody>,
+) -> anyhow::Result<Response<AsyncBody>> {
+    let original = req.uri().to_string();
+    let (parts, _) = req.into_parts();
+    signer
+        .send(&original, |url| {
+            let inner = inner.clone();
+            let headers = parts.headers.clone();
+            let extensions = parts.extensions.clone();
+            async move {
+                let mut request = Request::builder()
+                    .method(Method::GET)
+                    .uri(url.as_str())
+                    .body(AsyncBody::empty())?;
+                *request.headers_mut() = headers;
+                *request.extensions_mut() = extensions;
+                inner.send(request).await
+            }
+        })
+        .await
 }
 
 fn is_cache_hit(fetched_ok: bool, fetcher_ran: bool) -> bool {
@@ -281,11 +309,20 @@ impl HttpClient for DiskImageCacheClient {
             }
         }
         let uri = req.uri().to_string();
-        if *req.method() != Method::GET || !is_cacheable_image_url(&uri, &self.media_origins) {
-            return self.inner.send(req);
+        let is_get = *req.method() == Method::GET;
+        let signer = self
+            .signer
+            .clone()
+            .or_else(crate::cdn_signature::installed)
+            .filter(|signer| is_get && signer.wants(&uri));
+        let network: BoxFuture<'static, anyhow::Result<Response<AsyncBody>>> = match signer {
+            Some(signer) => Box::pin(send_signed(self.inner.clone(), signer, req)),
+            None => self.inner.send(req),
+        };
+        if !is_get || !is_cacheable_image_url(&uri, &self.media_origins) {
+            return network;
         }
         let key = stable_key(&uri);
-        let network = self.inner.send(req);
         let dir = self.dir.clone();
         let cache_cell = self.cache.clone();
         let hits = self.hits.clone();
@@ -657,5 +694,131 @@ mod tests {
         }
         let oversized = format!("data:image/png,{}", "a".repeat(MAX_ENTRY_BYTES + 1));
         assert!(inline_image_response(&oversized).is_err());
+    }
+
+    const CHANNEL_PREFIX: &str = "1cf93b197d401000";
+
+    async fn fake_cdn(forbid_first: bool) -> (String, Arc<Mutex<Vec<String>>>) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let origin = format!("http://127.0.0.1:{}", listener.local_addr().unwrap().port());
+        let seen: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+        let log = seen.clone();
+        tokio::spawn(async move {
+            loop {
+                let Ok((mut stream, _)) = listener.accept().await else {
+                    return;
+                };
+                let log = log.clone();
+                tokio::spawn(async move {
+                    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+                    let mut buf = vec![0u8; 4096];
+                    let Ok(n) = stream.read(&mut buf).await else {
+                        return;
+                    };
+                    let head = String::from_utf8_lossy(&buf[..n]).to_string();
+                    let target = head.split_whitespace().nth(1).unwrap_or("").to_string();
+                    let count = {
+                        let mut seen = log.lock().unwrap();
+                        seen.push(target);
+                        seen.len()
+                    };
+                    let status = if forbid_first && count == 1 {
+                        "403 Forbidden"
+                    } else {
+                        "200 OK"
+                    };
+                    let response = format!(
+                        "HTTP/1.1 {status}\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok"
+                    );
+                    let _ = stream.write_all(response.as_bytes()).await;
+                });
+            }
+        });
+        (origin, seen)
+    }
+
+    fn client_signing_for(
+        origin: &str,
+        signatures: Vec<&'static str>,
+    ) -> (DiskImageCacheClient, Arc<AtomicU64>) {
+        let calls = Arc::new(AtomicU64::new(0));
+        let counter = calls.clone();
+        let signatures = Arc::new(signatures);
+        let signer = CdnSigner::with_timing(
+            vec![origin.to_string()],
+            Vec::new(),
+            Arc::new(move |_| {
+                let index = counter.fetch_add(1, Ordering::SeqCst) as usize;
+                let signature = signatures[index.min(signatures.len() - 1)].to_string();
+                Box::pin(async move { Ok(signature) })
+            }),
+            std::time::Duration::from_secs(300),
+            std::time::Duration::ZERO,
+        );
+        let mut client = DiskImageCacheClient::new(
+            crate::transport_runtime::new_http_client_with_user_agent("test"),
+            vec![origin.to_string()],
+            String::new(),
+            String::new(),
+        );
+        client.signer = Some(Arc::new(signer));
+        client.dir = None;
+        (client, calls)
+    }
+
+    async fn get(client: &DiskImageCacheClient, url: &str) -> http::StatusCode {
+        let request = Request::builder()
+            .method(Method::GET)
+            .uri(url)
+            .body(AsyncBody::empty())
+            .unwrap();
+        client.send(request).await.unwrap().status()
+    }
+
+    #[tokio::test]
+    async fn a_channel_file_goes_out_with_its_signature() {
+        let (origin, seen) = fake_cdn(false).await;
+        let (client, _) = client_signing_for(&origin, vec!["1700000000-mac%2B%3D"]);
+        let video = format!("{origin}/{CHANNEL_PREFIX}/2107_clip.mp4");
+        let image = format!("{origin}/{CHANNEL_PREFIX}/2107_photo.png");
+        assert_eq!(get(&client, &video).await, http::StatusCode::OK);
+        assert_eq!(get(&client, &image).await, http::StatusCode::OK);
+        assert_eq!(
+            *seen.lock().unwrap(),
+            vec![
+                format!("/{CHANNEL_PREFIX}/2107_clip.mp4?1700000000-mac%2B%3D"),
+                format!("/{CHANNEL_PREFIX}/2107_photo.png?1700000000-mac%2B%3D"),
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn a_forbidden_answer_retries_once_with_a_fresh_signature() {
+        let (origin, seen) = fake_cdn(true).await;
+        let (client, calls) =
+            client_signing_for(&origin, vec!["1700000000-stale", "1700000300-fresh"]);
+        let video = format!("{origin}/{CHANNEL_PREFIX}/2107_clip.mp4");
+        assert_eq!(get(&client, &video).await, http::StatusCode::OK);
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+        assert_eq!(
+            *seen.lock().unwrap(),
+            vec![
+                format!("/{CHANNEL_PREFIX}/2107_clip.mp4?1700000000-stale"),
+                format!("/{CHANNEL_PREFIX}/2107_clip.mp4?1700000300-fresh"),
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn a_file_outside_any_channel_goes_out_unsigned() {
+        let (origin, seen) = fake_cdn(false).await;
+        let (client, calls) = client_signing_for(&origin, vec!["1700000000-mac"]);
+        let avatar = format!("{origin}/1767478432163199777/2100112663546695682.png");
+        assert_eq!(get(&client, &avatar).await, http::StatusCode::OK);
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+        assert_eq!(
+            *seen.lock().unwrap(),
+            vec!["/1767478432163199777/2100112663546695682.png".to_string()]
+        );
     }
 }

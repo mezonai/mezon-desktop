@@ -4,7 +4,10 @@ use std::time::{Duration, Instant};
 
 use futures::future::LocalBoxFuture;
 use gpui::{App, AppContext, Context, Entity, EventEmitter, Global, Task};
-use mezon_client::{AppApi, ConnectionStatus, is_unknown_api_error, mention_search_text_accepted};
+use mezon_client::{
+    ApiStatusError, AppApi, ConnectionStatus, api_status_from_error, is_unknown_api_error,
+    mention_search_text_accepted,
+};
 use mezon_proto::api;
 use unicode_normalization::UnicodeNormalization;
 
@@ -12,7 +15,8 @@ use crate::KeyedCache;
 use crate::clan_members::{ClanMember, User};
 use crate::ids::{ChannelId, ClanId, UserId};
 
-const SEARCH_DEBOUNCE: Duration = Duration::from_millis(200);
+const SEARCH_DEBOUNCE: Duration = Duration::from_millis(350);
+const FAILED_RETRY_DELAY: Duration = Duration::from_secs(1);
 const SERVER_RESULT_LIMIT: usize = 50;
 const SESSION_RESULTS: usize = 16;
 
@@ -79,6 +83,16 @@ struct InFlight {
     session_ended: bool,
 }
 
+struct PendingRetry {
+    key: MentionSearchKey,
+    owner: u64,
+    sent: bool,
+}
+
+fn is_transient(err: &anyhow::Error) -> bool {
+    api_status_from_error(err).is_none_or(|status| status.code == ApiStatusError::INTERNAL)
+}
+
 fn in_flight_answers(in_flight: Option<&InFlight>, key: &MentionSearchKey) -> bool {
     in_flight.is_some_and(|request| !request.session_ended && request.key == *key)
 }
@@ -99,11 +113,13 @@ pub struct MentionSearchStore {
     in_flight: Option<InFlight>,
     queued: Option<MentionSearchKey>,
     failed: Option<(u64, MentionSearchKey)>,
+    retry: Option<PendingRetry>,
     results: KeyedCache<MentionSearchKey, SettledSearch>,
     latest: Option<MentionSearchKey>,
     unsupported: bool,
     _debounce_task: Task<()>,
     _request_task: Task<()>,
+    _retry_task: Task<()>,
     _conn_watch: Task<()>,
 }
 
@@ -144,11 +160,13 @@ impl MentionSearchStore {
             in_flight: None,
             queued: None,
             failed: None,
+            retry: None,
             results: KeyedCache::new(Some(SESSION_RESULTS)),
             latest: None,
             unsupported: false,
             _debounce_task: Task::ready(()),
             _request_task: Task::ready(()),
+            _retry_task: Task::ready(()),
             _conn_watch: conn_watch,
         }
     }
@@ -184,11 +202,19 @@ impl MentionSearchStore {
 
     fn on_reconnected(&mut self, cx: &mut Context<Self>) {
         self.unsupported = false;
-        let Some((_, failed)) = self.failed.take() else {
+        let waiting = self
+            .retry
+            .as_ref()
+            .filter(|retry| !retry.sent)
+            .map(|retry| retry.key.clone());
+        let Some(key) = self.failed.take().map(|(_, key)| key).or(waiting) else {
             return;
         };
-        if self.in_flight.is_none() && self.wanted.as_ref() == Some(&failed) {
-            self.schedule(failed, cx);
+        if self.in_flight.is_none() && self.wanted.as_ref() == Some(&key) {
+            if let Some(retry) = self.retry.as_mut().filter(|retry| retry.key == key) {
+                retry.sent = true;
+            }
+            self.schedule(key, cx);
         }
     }
 
@@ -200,6 +226,8 @@ impl MentionSearchStore {
         self.unsupported = false;
         self.release_pipeline();
         self.failed = None;
+        self.retry = None;
+        self._retry_task = Task::ready(());
         self.latest = None;
         if !self.results.is_empty() {
             self.results.clear();
@@ -227,6 +255,14 @@ impl MentionSearchStore {
             .is_some_and(|(failed_owner, _)| *failed_owner == owner)
         {
             self.failed = None;
+        }
+        if self
+            .retry
+            .as_ref()
+            .is_some_and(|retry| retry.owner == owner)
+        {
+            self.retry = None;
+            self._retry_task = Task::ready(());
         }
         let owned: Vec<MentionSearchKey> = self
             .results
@@ -276,6 +312,12 @@ impl MentionSearchStore {
         self.queued = None;
     }
 
+    fn retry_waiting_on(&self, key: &MentionSearchKey) -> bool {
+        self.retry
+            .as_ref()
+            .is_some_and(|retry| !retry.sent && retry.key == *key)
+    }
+
     fn failed_on(&self, key: &MentionSearchKey) -> bool {
         self.failed
             .as_ref()
@@ -315,7 +357,10 @@ impl MentionSearchStore {
             && wanted.text == search_text(text)
             && !self.answered(wanted)
             && !self.failed_on(wanted)
-            && (self.debounce_pending || self.in_flight.is_some() || self.queued.is_some())
+            && (self.debounce_pending
+                || self.in_flight.is_some()
+                || self.queued.is_some()
+                || self.retry_waiting_on(wanted))
     }
 
     pub fn results(
@@ -410,6 +455,7 @@ impl MentionSearchStore {
         self.wanted = Some(key.clone());
         if self.answered(&key)
             || self.failed_on(&key)
+            || self.retry_waiting_on(&key)
             || in_flight_answers(self.in_flight.as_ref(), &key)
         {
             self.queued = None;
@@ -449,6 +495,36 @@ impl MentionSearchStore {
                 }
             });
         });
+    }
+
+    fn schedule_retry(&mut self, key: MentionSearchKey, cx: &mut Context<Self>) {
+        let reset_generation = self.reset_generation;
+        self._retry_task = cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(FAILED_RETRY_DELAY).await;
+            let _ = this.update(cx, |this, cx| {
+                if this.reset_generation == reset_generation {
+                    this.retry_due(key, cx);
+                }
+            });
+        });
+    }
+
+    fn retry_due(&mut self, key: MentionSearchKey, cx: &mut Context<Self>) {
+        if !self.retry_waiting_on(&key) {
+            return;
+        }
+        if self.wanted.as_ref() != Some(&key) {
+            self.retry = None;
+            return;
+        }
+        if let Some(retry) = self.retry.as_mut() {
+            retry.sent = true;
+        }
+        if self.in_flight.is_some() {
+            self.queued = Some(key);
+        } else {
+            self.send(key, cx);
+        }
     }
 
     fn send(&mut self, key: MentionSearchKey, cx: &mut Context<Self>) {
@@ -500,6 +576,9 @@ impl MentionSearchStore {
                     if self.failed_on(&key) {
                         self.failed = None;
                     }
+                    if self.retry.as_ref().is_some_and(|retry| retry.key == key) {
+                        self.retry = None;
+                    }
                     self.latest = Some(key);
                 }
                 Err(err) if is_unknown_api_error(&err) => {
@@ -509,16 +588,34 @@ impl MentionSearchStore {
                     self.unsupported = true;
                     self.wanted = None;
                     self.queued = None;
+                    self.retry = None;
                 }
                 Err(err) => {
                     tracing::warn!("SearchMentionUsers failed: {err}");
-                    self.failed = Some((owner, key));
+                    let retried = self
+                        .retry
+                        .as_ref()
+                        .is_some_and(|retry| retry.sent && retry.key == key);
+                    if !retried && is_transient(&err) {
+                        self.retry = Some(PendingRetry {
+                            key: key.clone(),
+                            owner,
+                            sent: false,
+                        });
+                        self.schedule_retry(key, cx);
+                    } else {
+                        if retried {
+                            self.retry = None;
+                        }
+                        self.failed = Some((owner, key));
+                    }
                 }
             }
         }
         if let Some(next) = self.queued.take().or_else(|| self.wanted.clone())
             && !self.answered(&next)
             && !self.failed_on(&next)
+            && !self.retry_waiting_on(&next)
         {
             self.schedule(next, cx);
         }
@@ -603,6 +700,8 @@ mod tests {
             store.search(COMPOSER, ClanId(1), None, text, cx)
         });
     }
+
+    const DEBOUNCE_MS: u64 = SEARCH_DEBOUNCE.as_millis() as u64;
 
     fn advance(ms: u64, cx: &mut TestAppContext) {
         cx.executor().advance_clock(Duration::from_millis(ms));
@@ -729,9 +828,9 @@ mod tests {
     fn a_query_is_sent_once_typing_pauses(cx: &mut TestAppContext) {
         let (store, server) = fake_store(cx);
         type_query(&store, "ng", cx);
-        advance(150, cx);
+        advance(DEBOUNCE_MS - 50, cx);
         type_query(&store, "ngu", cx);
-        advance(150, cx);
+        advance(DEBOUNCE_MS - 50, cx);
         assert!(sent(&server).is_empty());
         advance(60, cx);
         assert_eq!(sent(&server), vec!["ngu"]);
@@ -741,7 +840,7 @@ mod tests {
     fn repeating_the_waiting_query_does_not_restart_the_debounce(cx: &mut TestAppContext) {
         let (store, server) = fake_store(cx);
         type_query(&store, "ng", cx);
-        advance(150, cx);
+        advance(DEBOUNCE_MS - 50, cx);
         type_query(&store, "ng", cx);
         advance(60, cx);
         assert_eq!(sent(&server), vec!["ng"]);
@@ -751,10 +850,10 @@ mod tests {
     fn one_request_at_a_time_and_the_newest_query_follows(cx: &mut TestAppContext) {
         let (store, server) = fake_store(cx);
         type_query(&store, "ng", cx);
-        advance(200, cx);
+        advance(DEBOUNCE_MS, cx);
         type_query(&store, "ngu", cx);
         type_query(&store, "nguy", cx);
-        advance(300, cx);
+        advance(DEBOUNCE_MS + 100, cx);
         assert_eq!(sent(&server), vec!["ng"]);
         server.borrow_mut().answer(many(SERVER_RESULT_LIMIT));
         cx.run_until_parked();
@@ -771,14 +870,14 @@ mod tests {
     fn a_complete_result_answers_longer_queries_without_a_request(cx: &mut TestAppContext) {
         let (store, server) = fake_store(cx);
         type_query(&store, "bo", cx);
-        advance(200, cx);
+        advance(DEBOUNCE_MS, cx);
         server
             .borrow_mut()
             .answer(vec![mention_user(7, "alice", "Boss")]);
         cx.run_until_parked();
         type_query(&store, "bos", cx);
         type_query(&store, "boss", cx);
-        advance(400, cx);
+        advance(2 * DEBOUNCE_MS, cx);
         assert_eq!(sent(&server), vec!["bo"]);
         store.read_with(cx, |store, _| {
             assert!(!store.is_searching(COMPOSER, ClanId(1), None, "boss"));
@@ -793,13 +892,13 @@ mod tests {
     ) {
         let (store, server) = fake_store(cx);
         type_query(&store, "ng", cx);
-        advance(200, cx);
+        advance(DEBOUNCE_MS, cx);
         store.update(cx, |store, cx| store.end_session(COMPOSER, cx));
         type_query(&store, "ng", cx);
         server.borrow_mut().answer(many(3));
         cx.run_until_parked();
         assert!(store.read_with(cx, |store, _| shown(store, 1, "ng").1 == 0));
-        advance(200, cx);
+        advance(DEBOUNCE_MS, cx);
         assert_eq!(sent(&server), vec!["ng", "ng"]);
         server.borrow_mut().answer(many(3));
         cx.run_until_parked();
@@ -810,11 +909,11 @@ mod tests {
     fn a_short_query_drops_the_queued_one(cx: &mut TestAppContext) {
         let (store, server) = fake_store(cx);
         type_query(&store, "ng", cx);
-        advance(200, cx);
+        advance(DEBOUNCE_MS, cx);
         type_query(&store, "ngu", cx);
         type_query(&store, "n", cx);
         server.borrow_mut().answer(many(SERVER_RESULT_LIMIT));
-        advance(400, cx);
+        advance(2 * DEBOUNCE_MS, cx);
         assert_eq!(sent(&server), vec!["ng"]);
     }
 
@@ -822,11 +921,11 @@ mod tests {
     fn an_unknown_api_turns_the_search_off_until_reconnect(cx: &mut TestAppContext) {
         let (store, server) = fake_store(cx);
         type_query(&store, "ng", cx);
-        advance(200, cx);
+        advance(DEBOUNCE_MS, cx);
         server.borrow_mut().fail_unknown();
         cx.run_until_parked();
         type_query(&store, "ngu", cx);
-        advance(400, cx);
+        advance(2 * DEBOUNCE_MS, cx);
         assert_eq!(sent(&server), vec!["ng"]);
         assert!(!store.read_with(cx, |store, _| store.is_searching(
             COMPOSER,
@@ -836,7 +935,7 @@ mod tests {
         )));
         store.update(cx, |store, cx| store.on_reconnected(cx));
         type_query(&store, "nguy", cx);
-        advance(200, cx);
+        advance(DEBOUNCE_MS, cx);
         assert_eq!(sent(&server), vec!["ng", "nguy"]);
     }
 
@@ -844,14 +943,14 @@ mod tests {
     fn logout_forgets_results_and_waiting_queries(cx: &mut TestAppContext) {
         let (store, server) = fake_store(cx);
         type_query(&store, "bo", cx);
-        advance(200, cx);
+        advance(DEBOUNCE_MS, cx);
         server
             .borrow_mut()
             .answer(vec![mention_user(7, "alice", "Boss")]);
         cx.run_until_parked();
         type_query(&store, "tr", cx);
         store.update(cx, |store, cx| store.reset(cx));
-        advance(400, cx);
+        advance(2 * DEBOUNCE_MS, cx);
         assert_eq!(sent(&server), vec!["bo"]);
         store.read_with(cx, |store, _| {
             assert_eq!(shown(store, 1, "bo").1, 0);
@@ -863,7 +962,7 @@ mod tests {
     fn another_composer_cannot_end_the_session_it_does_not_own(cx: &mut TestAppContext) {
         let (store, server) = fake_store(cx);
         type_query(&store, "bo", cx);
-        advance(200, cx);
+        advance(DEBOUNCE_MS, cx);
         server
             .borrow_mut()
             .answer(vec![mention_user(7, "alice", "Boss")]);
@@ -878,15 +977,15 @@ mod tests {
     fn backspacing_to_an_answered_query_reuses_its_result(cx: &mut TestAppContext) {
         let (store, server) = fake_store(cx);
         type_query(&store, "ng", cx);
-        advance(200, cx);
+        advance(DEBOUNCE_MS, cx);
         server.borrow_mut().answer(many(SERVER_RESULT_LIMIT));
         cx.run_until_parked();
         type_query(&store, "ngu", cx);
-        advance(200, cx);
+        advance(DEBOUNCE_MS, cx);
         server.borrow_mut().answer(many(5));
         cx.run_until_parked();
         type_query(&store, "ng", cx);
-        advance(400, cx);
+        advance(2 * DEBOUNCE_MS, cx);
         assert_eq!(sent(&server), vec!["ng", "ngu"]);
         store.read_with(cx, |store, _| {
             assert!(!store.is_searching(COMPOSER, ClanId(1), None, "ng"));
@@ -902,11 +1001,11 @@ mod tests {
     fn a_late_answer_does_not_take_over_a_query_answered_by_another(cx: &mut TestAppContext) {
         let (store, server) = fake_store(cx);
         type_query(&store, "ng", cx);
-        advance(200, cx);
+        advance(DEBOUNCE_MS, cx);
         server.borrow_mut().answer(many(12));
         cx.run_until_parked();
         type_query(&store, "tr", cx);
-        advance(200, cx);
+        advance(DEBOUNCE_MS, cx);
         type_query(&store, "ngu", cx);
         server.borrow_mut().answer(many(3));
         cx.run_until_parked();
@@ -921,17 +1020,17 @@ mod tests {
     fn a_failed_query_is_not_sent_again_until_the_text_changes(cx: &mut TestAppContext) {
         let (store, server) = fake_store(cx);
         type_query(&store, "ng", cx);
-        advance(200, cx);
-        let reply = server
-            .borrow_mut()
-            .replies
-            .pop_front()
-            .expect("a request is waiting");
-        let _ = reply.send(Err(anyhow::anyhow!("API error: code=13")));
+        advance(DEBOUNCE_MS, cx);
+        fail_next(&server, "API error: code=13");
+        cx.run_until_parked();
+        assert!(searching(&store, "ng", cx));
+        advance(1000, cx);
+        assert_eq!(sent(&server), vec!["ng", "ng"]);
+        fail_next(&server, "API error: code=13");
         cx.run_until_parked();
         type_query(&store, "ng", cx);
-        advance(400, cx);
-        assert_eq!(sent(&server), vec!["ng"]);
+        advance(1400, cx);
+        assert_eq!(sent(&server), vec!["ng", "ng"]);
         assert!(!store.read_with(cx, |store, _| store.is_searching(
             COMPOSER,
             ClanId(1),
@@ -939,8 +1038,119 @@ mod tests {
             "ng"
         )));
         type_query(&store, "ngu", cx);
-        advance(200, cx);
+        advance(DEBOUNCE_MS, cx);
+        assert_eq!(sent(&server), vec!["ng", "ng", "ngu"]);
+    }
+
+    fn searching(store: &Entity<MentionSearchStore>, text: &str, cx: &mut TestAppContext) -> bool {
+        store.read_with(cx, |store, _| {
+            store.is_searching(COMPOSER, ClanId(1), None, text)
+        })
+    }
+
+    fn reject_next(server: &Rc<RefCell<FakeServer>>, code: u32) {
+        let reply = server
+            .borrow_mut()
+            .replies
+            .pop_front()
+            .expect("a request is waiting");
+        let _ = reply.send(Err(ApiStatusError { code }.into()));
+    }
+
+    #[gpui::test]
+    fn a_query_that_failed_once_is_retried_and_its_answer_shows(cx: &mut TestAppContext) {
+        let (store, server) = fake_store(cx);
+        type_query(&store, "ng", cx);
+        advance(DEBOUNCE_MS, cx);
+        reject_next(&server, ApiStatusError::INTERNAL);
+        cx.run_until_parked();
+        advance(999, cx);
+        assert_eq!(sent(&server), vec!["ng"]);
+        assert!(searching(&store, "ng", cx));
+        advance(1, cx);
+        assert_eq!(sent(&server), vec!["ng", "ng"]);
+        server.borrow_mut().answer(many(3));
+        cx.run_until_parked();
+        assert_eq!(store.read_with(cx, |store, _| shown(store, 1, "ng").1), 3);
+    }
+
+    #[gpui::test]
+    fn a_failed_query_the_user_moved_away_from_is_not_retried(cx: &mut TestAppContext) {
+        let (store, server) = fake_store(cx);
+        type_query(&store, "ng", cx);
+        advance(DEBOUNCE_MS, cx);
+        fail_next(&server, "API error: code=13");
+        cx.run_until_parked();
+        type_query(&store, "hoa", cx);
+        advance(DEBOUNCE_MS, cx);
+        server.borrow_mut().answer(many(2));
+        cx.run_until_parked();
+        advance(1000, cx);
+        assert_eq!(sent(&server), vec!["ng", "hoa"]);
+    }
+
+    #[gpui::test]
+    fn a_query_the_server_rejects_is_not_retried(cx: &mut TestAppContext) {
+        let (store, server) = fake_store(cx);
+        type_query(&store, "ng", cx);
+        advance(DEBOUNCE_MS, cx);
+        reject_next(&server, ApiStatusError::INVALID_ARGUMENT);
+        cx.run_until_parked();
+        assert!(!searching(&store, "ng", cx));
+        advance(2000, cx);
+        assert_eq!(sent(&server), vec!["ng"]);
+    }
+
+    #[gpui::test]
+    fn a_retry_due_while_another_query_is_out_goes_next(cx: &mut TestAppContext) {
+        let (store, server) = fake_store(cx);
+        type_query(&store, "ng", cx);
+        advance(DEBOUNCE_MS, cx);
+        fail_next(&server, "API error: code=13");
+        cx.run_until_parked();
+        type_query(&store, "ngu", cx);
+        advance(DEBOUNCE_MS, cx);
         assert_eq!(sent(&server), vec!["ng", "ngu"]);
+        type_query(&store, "ng", cx);
+        advance(1000, cx);
+        assert_eq!(sent(&server), vec!["ng", "ngu"]);
+        server.borrow_mut().answer(many(SERVER_RESULT_LIMIT));
+        cx.run_until_parked();
+        advance(DEBOUNCE_MS, cx);
+        assert_eq!(sent(&server), vec!["ng", "ngu", "ng"]);
+    }
+
+    #[gpui::test]
+    fn another_query_succeeding_does_not_grant_a_second_retry(cx: &mut TestAppContext) {
+        let (store, server) = fake_store(cx);
+        type_query(&store, "ng", cx);
+        advance(DEBOUNCE_MS, cx);
+        fail_next(&server, "API error: code=13");
+        cx.run_until_parked();
+        advance(1000, cx);
+        assert_eq!(sent(&server), vec!["ng", "ng"]);
+        fail_next(&server, "API error: code=13");
+        cx.run_until_parked();
+        type_query(&store, "hoa", cx);
+        advance(DEBOUNCE_MS, cx);
+        server.borrow_mut().answer(many(2));
+        cx.run_until_parked();
+        type_query(&store, "ng", cx);
+        advance(2000, cx);
+        assert_eq!(sent(&server), vec!["ng", "ng", "hoa"]);
+        assert!(!searching(&store, "ng", cx));
+    }
+
+    #[gpui::test]
+    fn ending_the_session_drops_a_waiting_retry(cx: &mut TestAppContext) {
+        let (store, server) = fake_store(cx);
+        type_query(&store, "ng", cx);
+        advance(DEBOUNCE_MS, cx);
+        fail_next(&server, "API error: code=13");
+        cx.run_until_parked();
+        store.update(cx, |store, cx| store.end_session(COMPOSER, cx));
+        advance(2000, cx);
+        assert_eq!(sent(&server), vec!["ng"]);
     }
 
     #[gpui::test]
@@ -974,13 +1184,13 @@ mod tests {
     fn ending_one_composer_s_session_keeps_another_composer_s_results(cx: &mut TestAppContext) {
         let (store, server) = fake_store(cx);
         type_query_as(&store, COMPOSER, "bo", cx);
-        advance(200, cx);
+        advance(DEBOUNCE_MS, cx);
         server
             .borrow_mut()
             .answer(vec![mention_user(7, "alice", "Boss")]);
         cx.run_until_parked();
         type_query_as(&store, OTHER_COMPOSER, "tr", cx);
-        advance(200, cx);
+        advance(DEBOUNCE_MS, cx);
         server.borrow_mut().answer(many(3));
         cx.run_until_parked();
         store.update(cx, |store, cx| store.end_session(OTHER_COMPOSER, cx));
@@ -1033,11 +1243,11 @@ mod tests {
     fn a_query_that_failed_while_offline_is_sent_again_on_reconnect(cx: &mut TestAppContext) {
         let (store, server) = fake_store(cx);
         type_query(&store, "ng", cx);
-        advance(200, cx);
+        advance(DEBOUNCE_MS, cx);
         fail_next(&server, "not connected");
         cx.run_until_parked();
         store.update(cx, |store, cx| store.on_reconnected(cx));
-        advance(200, cx);
+        advance(DEBOUNCE_MS, cx);
         assert_eq!(sent(&server), vec!["ng", "ng"]);
         server.borrow_mut().answer(many(3));
         cx.run_until_parked();
@@ -1048,17 +1258,17 @@ mod tests {
     fn a_late_answer_never_evicts_the_result_in_use(cx: &mut TestAppContext) {
         let (store, server) = fake_store(cx);
         type_query(&store, "ng", cx);
-        advance(200, cx);
+        advance(DEBOUNCE_MS, cx);
         server.borrow_mut().answer(many(12));
         cx.run_until_parked();
         for i in 0..SESSION_RESULTS - 1 {
             type_query(&store, &format!("q{i:02}"), cx);
-            advance(200, cx);
+            advance(DEBOUNCE_MS, cx);
             server.borrow_mut().answer(many(SERVER_RESULT_LIMIT));
             cx.run_until_parked();
         }
         type_query(&store, "tr", cx);
-        advance(200, cx);
+        advance(DEBOUNCE_MS, cx);
         type_query(&store, "ngu", cx);
         server.borrow_mut().answer(many(3));
         cx.run_until_parked();
@@ -1072,7 +1282,7 @@ mod tests {
     fn a_composer_waiting_on_an_ended_session_s_request_gets_its_own(cx: &mut TestAppContext) {
         let (store, server) = fake_store(cx);
         type_query_as(&store, COMPOSER, "ng", cx);
-        advance(200, cx);
+        advance(DEBOUNCE_MS, cx);
         type_query_as(&store, OTHER_COMPOSER, "ng", cx);
         store.update(cx, |store, cx| store.end_session(COMPOSER, cx));
         server.borrow_mut().answer(many(3));
@@ -1080,7 +1290,7 @@ mod tests {
         assert!(store.read_with(cx, |store, _| {
             store.is_searching(OTHER_COMPOSER, ClanId(1), None, "ng")
         }));
-        advance(200, cx);
+        advance(DEBOUNCE_MS, cx);
         assert_eq!(sent(&server), vec!["ng", "ng"]);
         server.borrow_mut().answer(many(3));
         cx.run_until_parked();
@@ -1119,11 +1329,11 @@ mod tests {
     fn a_cut_answer_is_reported_for_the_queries_it_answers(cx: &mut TestAppContext) {
         let (store, server) = fake_store(cx);
         type_query(&store, "kha", cx);
-        advance(200, cx);
+        advance(DEBOUNCE_MS, cx);
         server.borrow_mut().answer(many(SERVER_RESULT_LIMIT));
         cx.run_until_parked();
         type_query(&store, "bo", cx);
-        advance(200, cx);
+        advance(DEBOUNCE_MS, cx);
         server.borrow_mut().answer(many(2));
         cx.run_until_parked();
         store.read_with(cx, |store, _| {
@@ -1138,7 +1348,7 @@ mod tests {
     fn decomposed_text_is_sent_composed(cx: &mut TestAppContext) {
         let (store, server) = fake_store(cx);
         type_query(&store, "Nguye\u{0302}\u{0303}n", cx);
-        advance(200, cx);
+        advance(DEBOUNCE_MS, cx);
         assert_eq!(sent(&server), vec!["Nguy\u{1ec5}n"]);
         assert!(store.read_with(cx, |store, _| {
             store.is_searching(COMPOSER, ClanId(1), None, "Nguye\u{0302}\u{0303}n")
@@ -1149,12 +1359,12 @@ mod tests {
     fn ending_a_session_keeps_the_result_another_composer_is_reading(cx: &mut TestAppContext) {
         let (store, server) = fake_store(cx);
         type_query_as(&store, COMPOSER, "ng", cx);
-        advance(200, cx);
+        advance(DEBOUNCE_MS, cx);
         server.borrow_mut().answer(many(3));
         cx.run_until_parked();
         type_query_as(&store, OTHER_COMPOSER, "ngu", cx);
         store.update(cx, |store, cx| store.end_session(COMPOSER, cx));
-        advance(400, cx);
+        advance(2 * DEBOUNCE_MS, cx);
         assert_eq!(sent(&server), vec!["ng"]);
         store.read_with(cx, |store, _| {
             assert_eq!(shown(store, 1, "ngu"), ("ng".to_string(), 3));
@@ -1168,17 +1378,17 @@ mod tests {
     fn an_answer_to_a_request_sent_before_logout_never_lands(cx: &mut TestAppContext) {
         let (store, server) = fake_store(cx);
         type_query(&store, "ng", cx);
-        advance(200, cx);
+        advance(DEBOUNCE_MS, cx);
         store.update(cx, |store, cx| store.reset(cx));
         server.borrow_mut().answer(many(3));
-        advance(400, cx);
+        advance(2 * DEBOUNCE_MS, cx);
         assert_eq!(sent(&server), vec!["ng"]);
         store.read_with(cx, |store, _| {
             assert_eq!(shown(store, 1, "ng").1, 0);
             assert!(!store.is_searching(COMPOSER, ClanId(1), None, "ng"));
         });
         type_query(&store, "ng", cx);
-        advance(200, cx);
+        advance(DEBOUNCE_MS, cx);
         assert_eq!(sent(&server), vec!["ng", "ng"]);
         server.borrow_mut().answer(many(2));
         cx.run_until_parked();
@@ -1189,12 +1399,12 @@ mod tests {
     fn a_typed_space_counts_as_typing(cx: &mut TestAppContext) {
         let (store, server) = fake_store(cx);
         type_query(&store, "old", cx);
-        advance(150, cx);
+        advance(DEBOUNCE_MS - 50, cx);
         type_query(&store, "old ", cx);
-        advance(150, cx);
+        advance(DEBOUNCE_MS - 50, cx);
         assert!(sent(&server).is_empty());
         type_query(&store, "old t", cx);
-        advance(150, cx);
+        advance(DEBOUNCE_MS - 50, cx);
         assert!(sent(&server).is_empty());
         advance(60, cx);
         assert_eq!(sent(&server), vec!["old t"]);
@@ -1222,9 +1432,9 @@ mod tests {
     fn a_composer_taking_over_waits_its_own_debounce(cx: &mut TestAppContext) {
         let (store, server) = fake_store(cx);
         type_query_as(&store, COMPOSER, "ng", cx);
-        advance(150, cx);
+        advance(DEBOUNCE_MS - 50, cx);
         type_query_as(&store, OTHER_COMPOSER, "ng", cx);
-        advance(100, cx);
+        advance(DEBOUNCE_MS - 100, cx);
         assert!(sent(&server).is_empty());
         advance(110, cx);
         assert_eq!(sent(&server), vec!["ng"]);

@@ -2,8 +2,7 @@ use super::context::RowCtx;
 use super::parts::resolve_message_display_name;
 use super::time::format_relative_time_from_seconds;
 use crate::components::primitives::{
-    Icon, IconName, avatar_color, avatar_text_color, initials_tile, mention_count_badge,
-    name_initials,
+    Icon, IconName, avatar_color, avatar_text_color, initials_tile, name_initials, unread_dot,
 };
 use gpui::{AnyElement, App, ObjectFit, SharedString, div, img, prelude::*, px};
 use mezon_store::{ClanMembersStore, Message, TopicBadgeStore, TopicsStore};
@@ -51,13 +50,10 @@ pub fn render_topic_view_button(msg: &Message, ctx: &RowCtx) -> AnyElement {
     let time_label = last_reply_timestamp
         .map(|timestamp| format_relative_time_from_seconds(timestamp, ctx.locale, ctx.now))
         .filter(|label| !label.is_empty());
-    let topic_badge_count = msg
-        .topic_id
-        .and_then(|topic_id| {
-            TopicBadgeStore::try_global(ctx.app)
-                .map(|store| store.read(ctx.app).topic_badge_count(&topic_id.to_string()))
-        })
-        .unwrap_or(0);
+    let topic_unread = msg.topic_id.is_some_and(|topic_id| {
+        TopicBadgeStore::try_global(ctx.app)
+            .is_some_and(|store| store.read(ctx.app).topic_has_unread(&topic_id.to_string()))
+    });
 
     let meta = div()
         .flex()
@@ -76,9 +72,7 @@ pub fn render_topic_view_button(msg: &Message, ctx: &RowCtx) -> AnyElement {
                     .child(label),
             )
         })
-        .when(topic_badge_count > 0, |d| {
-            d.child(mention_count_badge(topic_badge_count))
-        });
+        .when(topic_unread, |d| d.child(unread_dot()));
 
     let left = div()
         .flex()

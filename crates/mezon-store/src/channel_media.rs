@@ -710,12 +710,15 @@ impl ChannelMediaStore {
     pub fn upload_attachment(
         &self,
         path: &Path,
+        channel_id: ChannelId,
         cx: &mut Context<Self>,
     ) -> gpui::Task<Result<ChannelTimelineAttachment, String>> {
         let path = path.to_path_buf();
         let api = self.api.clone();
         let base_img = AppConfig::global(cx).base_img_url.clone();
-        cx.spawn(async move |_this, _cx| upload_timeline_file(&api, &base_img, &path).await)
+        cx.spawn(async move |_this, _cx| {
+            upload_timeline_file(&api, &base_img, &path, channel_id.get()).await
+        })
     }
 
     fn insert_event_sorted(&mut self, channel_id: ChannelId, year: i32, event: ChannelTimeline) {
@@ -865,6 +868,7 @@ async fn upload_timeline_file(
     api: &AppApi,
     _base_img_url: &str,
     path: &Path,
+    channel_id: i64,
 ) -> Result<ChannelTimelineAttachment, String> {
     let filetype = mime_from_extension(path);
     if !filetype.starts_with("image/") && !filetype.starts_with("video/") {
@@ -900,6 +904,7 @@ async fn upload_timeline_file(
             height,
             duration: 0,
             thumbnail: None,
+            channel_id,
         })
         .await
         .map_err(|e| e.to_string())?;

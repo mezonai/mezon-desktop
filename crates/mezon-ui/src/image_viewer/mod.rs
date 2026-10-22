@@ -12,8 +12,9 @@ use gpui::{
 };
 use mezon_store::{
     AppConfig, ChannelAttachment, ChannelId, ChannelList, ClanId, DirectMessageStore, GalleryStore,
-    PlatformStore, Settings, UploaderInfo, fetch_channel_attachments, initial_page_has_more,
-    next_page_has_more, resolve_attachment_uploader,
+    Settings, UploaderInfo, copy_media_url_to_clipboard, fetch_channel_attachments,
+    initial_page_has_more, next_page_has_more, older_page_cursor, older_page_has_more,
+    open_media_url_external, resolve_attachment_uploader,
 };
 use ui::{ScrollAxes, Scrollbars, WithScrollbar};
 
@@ -240,6 +241,7 @@ pub struct ImageViewer {
     context_menu: Option<Point<Pixels>>,
     has_more_before: bool,
     has_more_after: bool,
+    oldest_fetched: Option<u32>,
     loading: bool,
     rotation_deg: i32,
     rotated_image: Option<Arc<RenderImage>>,
@@ -330,6 +332,7 @@ impl ImageViewer {
             context_menu: None,
             has_more_before: true,
             has_more_after: false,
+            oldest_fetched: None,
             loading: false,
             rotation_deg: 0,
             rotated_image: None,
@@ -501,6 +504,7 @@ impl ImageViewer {
         self.attachments = request.attachments;
         self.has_more_before = true;
         self.has_more_after = false;
+        self.oldest_fetched = None;
 
         if let Some(url) = &request.selected_url {
             self.index = index_of_url(&self.attachments, url).unwrap_or(0);
@@ -564,6 +568,7 @@ impl ImageViewer {
         cx.spawn(async move |this, cx| {
             let mut accumulated = Vec::new();
             let mut has_more_before = false;
+            let mut oldest_fetched: Option<u32> = None;
             let mut fetch_error = None;
             let mut hit_seek_cap = false;
 
@@ -586,6 +591,8 @@ impl ImageViewer {
                             break;
                         }
                         let oldest = page.oldest_create_time.unwrap_or(before);
+                        oldest_fetched =
+                            Some(oldest_fetched.map_or(oldest, |seen| seen.min(oldest)));
                         merge_attachment_page(&mut accumulated, page.attachments);
                         if let Some(url) = &select_url {
                             if index_of_url(&accumulated, url).is_some() {
@@ -651,6 +658,7 @@ impl ImageViewer {
                 resolve_uploaders(&mut accumulated, clan, channel, cx);
                 this.attachments = accumulated;
                 this.has_more_before = has_more_before;
+                this.oldest_fetched = oldest_fetched;
                 if let Some(url) = &select_url {
                     this.index = index_of_url(&this.attachments, url).unwrap_or(0);
                 }
@@ -729,10 +737,13 @@ impl ImageViewer {
         if self.loading || !self.has_more_before {
             return;
         }
-        let Some(oldest) = self.attachments.last() else {
+        let Some(oldest) = self
+            .oldest_fetched
+            .or_else(|| self.attachments.last().map(|a| a.create_time_seconds))
+        else {
             return;
         };
-        let before = oldest.create_time_seconds;
+        let before = older_page_cursor(oldest);
         let (Some(gallery), Some(cfg)) = (GalleryStore::try_global(cx), AppConfig::global_arc(cx))
         else {
             return;
@@ -756,16 +767,22 @@ impl ImageViewer {
                         resolve_uploaders(&mut page.attachments, clan, channel, cx);
                         let existing_urls: std::collections::HashSet<String> =
                             this.attachments.iter().map(|a| a.url.clone()).collect();
-                        let before_len = this.attachments.len();
                         for att in page.attachments {
                             if !existing_urls.contains(&att.url) {
                                 this.attachments.push(att);
                             }
                         }
                         sort_attachments_desc(&mut this.attachments);
-                        let added = this.attachments.len() - before_len;
-                        this.has_more_before =
-                            next_page_has_more(page.raw_count, VIEWER_FETCH_LIMIT, added);
+                        this.has_more_before = older_page_has_more(
+                            page.raw_count,
+                            VIEWER_FETCH_LIMIT,
+                            Some(oldest),
+                            page.oldest_create_time,
+                        );
+                        if let Some(oldest) = page.oldest_create_time {
+                            this.oldest_fetched =
+                                Some(this.oldest_fetched.map_or(oldest, |seen| seen.min(oldest)));
+                        }
                         cx.notify();
                     }
                     Err(e) => tracing::error!("image viewer page fetch failed: {e}"),
@@ -951,14 +968,13 @@ impl ImageViewer {
 
     fn copy_link(&self, cx: &mut App) {
         if let Some(att) = self.current() {
-            cx.write_to_clipboard(gpui::ClipboardItem::new_string(att.url.clone()));
+            copy_media_url_to_clipboard(att.url.clone(), cx);
         }
     }
 
     fn open_in_browser(&self, cx: &mut App) {
-        if let (Some(att), Some(platform)) = (self.current(), PlatformStore::try_global(cx)) {
-            let url = att.url.clone();
-            let _ = platform.read(cx).open_url_external(&url);
+        if let Some(att) = self.current() {
+            open_media_url_external(att.url.to_string(), cx);
         }
     }
 

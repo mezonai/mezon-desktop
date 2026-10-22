@@ -1,14 +1,17 @@
+use std::sync::Arc;
+
 use gpui::{
     AnyElement, App, ClickEvent, FontWeight, IntoElement, SharedString, Window, div, prelude::*, px,
 };
 use mezon_store::{
     AccountStore, BadgeService, ChannelId, ChannelList, ChannelType, ClanList, ClanMembersStore,
-    Message, MessageCode, MessageId, MessagesStore, PinnedMessagesStore, ThreadsStore,
+    GroupChange, GroupUpdate, Message, MessageCode, MessageId, MessageSpan, MessagesStore,
+    PinnedMessagesStore, RichLayout, ThreadsStore, build_rich_layout,
 };
 
 use super::content::{
     SelectableSectionCursor, SelectableTextContext, append_selectable_system_mention_spans,
-    memoized_selectable_message_layout, render_system_message_content,
+    memoized_selectable_message_layout, render_rich_layout, render_system_message_content,
 };
 use super::context::{CONTENT_INSET, OnboardingContext, RowCtx, WelcomeContext};
 use super::time::format_message_time;
@@ -21,6 +24,7 @@ use crate::router::{Route, navigate};
 
 const SYSTEM_ARROW_ICON: f32 = 20.;
 const SYSTEM_SMALL_ICON: f32 = 18.;
+const GROUP_UPDATE_LAYOUT_LIMIT: usize = 256;
 
 pub fn render_system_message(msg: &Message, ctx: &RowCtx) -> AnyElement {
     let theme = ctx.theme;
@@ -72,6 +76,8 @@ pub fn render_system_message(msg: &Message, ctx: &RowCtx) -> AnyElement {
             &mut selection_cursor,
             selection_context,
         );
+    } else if let Some(update) = msg.group_update() {
+        content_line = content_line.child(render_group_update(msg, &update, ctx));
     } else if !is_custom {
         content_line = content_line.child(render_system_message_content(msg, ctx, false));
     }
@@ -403,6 +409,94 @@ fn append_system_suffix(
             }
         }
         _ => row,
+    }
+}
+
+pub(crate) struct GroupUpdateLayout {
+    locale: SharedString,
+    own: bool,
+    layout: Arc<RichLayout>,
+}
+
+fn render_group_update(msg: &Message, update: &GroupUpdate, ctx: &RowCtx) -> AnyElement {
+    let own = is_own_group_update(update, ctx.current_user_id);
+    let cached = ctx
+        .row_memo
+        .borrow()
+        .group_updates
+        .get(&msg.id)
+        .filter(|entry| entry.own == own && entry.locale.as_ref() == ctx.locale)
+        .map(|entry| entry.layout.clone());
+    let layout = match cached {
+        Some(layout) => layout,
+        None => {
+            let Some(layout) = build_rich_layout(&group_update_spans(update, ctx.locale, own))
+            else {
+                return div().into_any_element();
+            };
+            let mut memo = ctx.row_memo.borrow_mut();
+            if memo.group_updates.len() >= GROUP_UPDATE_LAYOUT_LIMIT
+                && !memo.group_updates.contains_key(&msg.id)
+            {
+                memo.group_updates.clear();
+            }
+            memo.group_updates.insert(
+                msg.id,
+                GroupUpdateLayout {
+                    locale: SharedString::from(ctx.locale.to_string()),
+                    own,
+                    layout: layout.clone(),
+                },
+            );
+            layout
+        }
+    };
+    render_rich_layout(msg, &layout, ctx, ctx.theme.tokens.text_theme_primary)
+}
+
+fn is_own_group_update(update: &GroupUpdate, current_user_id: &str) -> bool {
+    !current_user_id.is_empty() && update.actor_id == Some(current_user_id)
+}
+
+fn group_update_spans(update: &GroupUpdate, locale: &str, own: bool) -> Vec<MessageSpan> {
+    let actor = if own {
+        MessageSpan::Text(mezon_i18n::t(locale, "message.directMessage.you").into())
+    } else {
+        MessageSpan::Mention {
+            display: SharedString::from(update.actor.to_string()),
+            user_id: update.actor_id.map(str::to_string),
+            role_id: None,
+        }
+    };
+    let (lead, name, tail) = group_update_phrase(update.change, locale);
+    let mut spans = vec![actor, MessageSpan::Text(lead.into())];
+    if !name.is_empty() {
+        spans.push(MessageSpan::Bold(SharedString::from(name.to_string())));
+    }
+    if !tail.is_empty() {
+        spans.push(MessageSpan::Text(tail.into()));
+    }
+    spans
+}
+
+fn group_update_phrase<'a>(
+    change: GroupChange<'a>,
+    locale: &str,
+) -> (String, &'a str, &'static str) {
+    match change {
+        GroupChange::Avatar => (
+            format!(
+                " {}",
+                mezon_i18n::t(locale, "message.systemMessages.changedGroupAvatar")
+            ),
+            "",
+            "",
+        ),
+        GroupChange::Name(name) => {
+            let template = mezon_i18n::t(locale, "message.systemMessages.changedGroupName");
+            let (before, after) = template.split_once("{{name}}").unwrap_or((template, ""));
+            (format!(" {before}"), name, after)
+        }
     }
 }
 
@@ -1084,4 +1178,72 @@ pub fn build_welcome_context(
         is_stream: channel.channel_type == ChannelType::Stream,
         age_restricted: channel.age_restricted,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use mezon_store::RichRunKind;
+
+    fn update(change: GroupChange<'static>) -> GroupUpdate<'static> {
+        GroupUpdate {
+            actor: "@Huy",
+            actor_id: Some("42"),
+            change,
+        }
+    }
+
+    fn layout(update: &GroupUpdate, locale: &str, current_user_id: &str) -> Arc<RichLayout> {
+        let own = is_own_group_update(update, current_user_id);
+        build_rich_layout(&group_update_spans(update, locale, own)).expect("layout")
+    }
+
+    #[test]
+    fn own_group_avatar_change_reads_as_you() {
+        let vi = layout(&update(GroupChange::Avatar), "vi", "42");
+        assert_eq!(vi.text.as_ref(), "Bạn đã đổi ảnh nhóm.");
+        assert!(vi.runs.iter().all(|run| run.kind != RichRunKind::Mention));
+        assert_eq!(
+            layout(&update(GroupChange::Avatar), "en", "42")
+                .text
+                .as_ref(),
+            "You changed the group avatar."
+        );
+    }
+
+    #[test]
+    fn group_name_change_by_someone_else_keeps_the_mention() {
+        let vi = layout(&update(GroupChange::Name("Team v2")), "vi", "7");
+        assert_eq!(vi.text.as_ref(), "@Huy đã đổi tên nhóm thành Team v2.");
+        let kinds: Vec<_> = vi
+            .runs
+            .iter()
+            .map(|run| (run.kind, &vi.text[run.range.clone()]))
+            .collect();
+        assert_eq!(
+            kinds,
+            vec![
+                (RichRunKind::Mention, "@Huy"),
+                (RichRunKind::Bold, "Team v2")
+            ]
+        );
+        assert_eq!(
+            layout(&update(GroupChange::Name("Team v2")), "jpn", "7")
+                .text
+                .as_ref(),
+            "@Huy がグループ名をTeam v2に変更しました。"
+        );
+    }
+
+    #[test]
+    fn group_update_without_a_viewer_never_reads_as_you() {
+        let anonymous = GroupUpdate {
+            actor_id: None,
+            ..update(GroupChange::Avatar)
+        };
+        assert_eq!(
+            layout(&anonymous, "en", "").text.as_ref(),
+            "@Huy changed the group avatar."
+        );
+    }
 }

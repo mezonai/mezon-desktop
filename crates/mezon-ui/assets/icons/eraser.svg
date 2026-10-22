@@ -1,0 +1,7 @@
+<svg width="20" height="20" aria-hidden="true" role="img" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+  <g transform="rotate(-45 12 12)">
+    <rect x="3.5" y="8" width="17" height="8" rx="2" stroke="currentColor" stroke-width="2"/>
+    <path fill="currentColor" d="M10 8H5.5a2 2 0 0 0-2 2v4a2 2 0 0 0 2 2H10Z"/>
+  </g>
+  <path stroke="currentColor" stroke-width="2" stroke-linecap="round" d="M13.5 21H21"/>
+</svg>

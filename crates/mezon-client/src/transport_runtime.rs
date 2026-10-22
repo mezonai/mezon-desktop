@@ -112,12 +112,8 @@ pub async fn fetch_bytes(url: &str) -> Result<(Vec<u8>, Option<String>)> {
     let url = url.to_string();
     runtime()
         .spawn(async move {
-            let request = http::Request::builder()
-                .method(http::Method::GET)
-                .uri(&url)
-                .body(AsyncBody::empty())?;
             match tokio::time::timeout(HTTP_TRANSFER_TIMEOUT, async move {
-                let mut response = http_client().send(request).await?;
+                let mut response = send_get(&url).await?;
                 let status = response.status();
                 if !status.is_success() {
                     anyhow::bail!("HTTP GET failed with status {}", status);
@@ -154,6 +150,37 @@ pub async fn sleep(duration: std::time::Duration) {
     let _ = runtime()
         .spawn(async move { tokio::time::sleep(duration).await })
         .await;
+}
+
+pub(crate) async fn fetch_prefix(
+    url: &str,
+    len: usize,
+    timeout: std::time::Duration,
+) -> Option<Vec<u8>> {
+    let url = url.to_string();
+    runtime()
+        .spawn(async move {
+            tokio::time::timeout(timeout, async move {
+                let mut response = send_get(&url).await.ok()?;
+                if !response.status().is_success() {
+                    return None;
+                }
+                let mut prefix = Vec::with_capacity(len);
+                response
+                    .body_mut()
+                    .take(len as u64)
+                    .read_to_end(&mut prefix)
+                    .await
+                    .ok()?;
+                Some(prefix)
+            })
+            .await
+            .ok()
+            .flatten()
+        })
+        .await
+        .ok()
+        .flatten()
 }
 
 /// HEAD the object and report whether it is already readable.
@@ -343,23 +370,29 @@ pub async fn download_to(
         .map_err(|e| anyhow::anyhow!("download task failed: {e}"))?
 }
 
+async fn send_get(url: &str) -> Result<http::Response<AsyncBody>> {
+    crate::cdn_signature::send(url, |url| async move {
+        let request = http::Request::builder()
+            .method(http::Method::GET)
+            .uri(url)
+            .body(AsyncBody::empty())?;
+        http_client().send(request).await
+    })
+    .await
+}
+
 async fn stream_to_file(
     url: &str,
     dest: &std::path::Path,
     on_progress: impl Fn(u64, Option<u64>),
 ) -> Result<()> {
-    let request = http::Request::builder()
-        .method(http::Method::GET)
-        .uri(url)
-        .body(AsyncBody::empty())?;
-    let mut response =
-        match tokio::time::timeout(HTTP_TRANSFER_TIMEOUT, http_client().send(request)).await {
-            Ok(result) => result?,
-            Err(_) => anyhow::bail!(
-                "download request timed out after {}s",
-                HTTP_TRANSFER_TIMEOUT.as_secs()
-            ),
-        };
+    let mut response = match tokio::time::timeout(HTTP_TRANSFER_TIMEOUT, send_get(url)).await {
+        Ok(result) => result?,
+        Err(_) => anyhow::bail!(
+            "download request timed out after {}s",
+            HTTP_TRANSFER_TIMEOUT.as_secs()
+        ),
+    };
     let status = response.status();
     if !status.is_success() {
         anyhow::bail!("HTTP GET failed with status {status}");
@@ -953,7 +986,7 @@ impl TransportClient {
         channel_id: &str,
         room_name: &str,
         metadata: &str,
-    ) -> Result<String> {
+    ) -> Result<mezon_proto::api::GenerateMeetTokenResponse> {
         let transport = self.inner.clone();
         let channel_id = channel_id
             .parse::<i64>()
@@ -965,7 +998,6 @@ impl TransportClient {
                 transport
                     .generate_meet_token(channel_id, &room_name, &metadata)
                     .await
-                    .map(|resp| resp.token)
             })
             .await
             .map_err(|e| anyhow::anyhow!("transport task failed: {e}"))?
@@ -1771,6 +1803,47 @@ impl TransportClient {
             .map_err(|e| anyhow::anyhow!("transport task failed: {e}"))?
     }
 
+    pub async fn generate_cdn_signature(&self, channel_id: i64) -> Result<String> {
+        let transport = self.inner.clone();
+
+        runtime()
+            .spawn(async move { transport.generate_cdn_signature(channel_id).await })
+            .await
+            .map_err(|e| anyhow::anyhow!("transport task failed: {e}"))?
+    }
+
+    pub async fn sfu_breakout_room(
+        &self,
+        request: mezon_proto::api::SfuBreakoutRoomRequest,
+    ) -> Result<mezon_proto::api::SfuBreakoutRoomResponse> {
+        let transport = self.inner.clone();
+
+        runtime()
+            .spawn(async move { transport.sfu_breakout_room(request).await })
+            .await
+            .map_err(|e| anyhow::anyhow!("transport task failed: {e}"))?
+    }
+
+    pub async fn sfu_breakout_merge(&self, breakout_id: i64) -> Result<()> {
+        let transport = self.inner.clone();
+
+        runtime()
+            .spawn(async move { transport.sfu_breakout_merge(breakout_id).await })
+            .await
+            .map_err(|e| anyhow::anyhow!("transport task failed: {e}"))?
+    }
+
+    pub async fn link_cdn_file(&self, src: &str, dst: &str) -> Result<()> {
+        let transport = self.inner.clone();
+        let src = src.to_string();
+        let dst = dst.to_string();
+
+        runtime()
+            .spawn(async move { transport.link_cdn_file(&src, &dst).await })
+            .await
+            .map_err(|e| anyhow::anyhow!("transport task failed: {e}"))?
+    }
+
     pub async fn join_chat(
         &self,
         clan_id: i64,
@@ -1837,7 +1910,7 @@ impl TransportClient {
         message_id: i64,
         content: &str,
         mentions: Vec<crate::transport::OutgoingMention>,
-        hashtags: Vec<crate::transport::OutgoingHashtag>,
+        hashtags: crate::transport::OutgoingHashtags,
         emojis: Vec<crate::transport::OutgoingEmoji>,
         mode: i32,
         is_public: bool,
@@ -2125,7 +2198,7 @@ impl TransportClient {
         is_public: bool,
         mode: i32,
         mentions: Vec<crate::transport::OutgoingMention>,
-        hashtags: Vec<crate::transport::OutgoingHashtag>,
+        hashtags: crate::transport::OutgoingHashtags,
         emojis: Vec<crate::transport::OutgoingEmoji>,
         attachments: Vec<mezon_proto::api::MessageAttachment>,
         reply: Option<crate::transport::OutgoingReply>,
@@ -2165,7 +2238,7 @@ impl TransportClient {
         is_public: bool,
         mode: i32,
         mentions: Vec<crate::transport::OutgoingMention>,
-        hashtags: Vec<crate::transport::OutgoingHashtag>,
+        hashtags: crate::transport::OutgoingHashtags,
         emojis: Vec<crate::transport::OutgoingEmoji>,
         attachments: Vec<mezon_proto::api::MessageAttachment>,
         reply: Option<crate::transport::OutgoingReply>,
@@ -2372,7 +2445,7 @@ impl TransportClient {
         is_public: bool,
         mode: i32,
         mentions: Vec<crate::transport::OutgoingMention>,
-        hashtags: Vec<crate::transport::OutgoingHashtag>,
+        hashtags: crate::transport::OutgoingHashtags,
         emojis: Vec<crate::transport::OutgoingEmoji>,
         ogp: Option<crate::transport::OutgoingOgp>,
         flags: crate::transport::OutgoingMessageFlags,
@@ -2785,7 +2858,7 @@ impl TransportClient {
         is_public: bool,
         mode: i32,
         mentions: Vec<crate::transport::OutgoingMention>,
-        hashtags: Vec<crate::transport::OutgoingHashtag>,
+        hashtags: crate::transport::OutgoingHashtags,
         emojis: Vec<crate::transport::OutgoingEmoji>,
         ogp: Option<crate::transport::OutgoingOgp>,
     ) -> Result<crate::transport::ApiMessage> {
@@ -2815,7 +2888,7 @@ impl TransportClient {
         mode: i32,
         topic_id: i64,
         mentions: Vec<crate::transport::OutgoingMention>,
-        hashtags: Vec<crate::transport::OutgoingHashtag>,
+        hashtags: crate::transport::OutgoingHashtags,
         emojis: Vec<crate::transport::OutgoingEmoji>,
         reply: Option<crate::transport::OutgoingReply>,
         flags: crate::transport::OutgoingMessageFlags,
@@ -2847,7 +2920,7 @@ impl TransportClient {
         topic_id: i64,
         attachments: Vec<mezon_proto::api::MessageAttachment>,
         mentions: Vec<crate::transport::OutgoingMention>,
-        hashtags: Vec<crate::transport::OutgoingHashtag>,
+        hashtags: crate::transport::OutgoingHashtags,
         emojis: Vec<crate::transport::OutgoingEmoji>,
         presign_finish: Option<Vec<String>>,
         reply: Option<crate::transport::OutgoingReply>,
@@ -2890,7 +2963,7 @@ impl TransportClient {
         mode: i32,
         reply: crate::transport::OutgoingReply,
         mentions: Vec<crate::transport::OutgoingMention>,
-        hashtags: Vec<crate::transport::OutgoingHashtag>,
+        hashtags: crate::transport::OutgoingHashtags,
         emojis: Vec<crate::transport::OutgoingEmoji>,
         ogp: Option<crate::transport::OutgoingOgp>,
         flags: crate::transport::OutgoingMessageFlags,
@@ -2921,7 +2994,7 @@ impl TransportClient {
         attachments: Vec<mezon_proto::api::MessageAttachment>,
         reply: Option<crate::transport::OutgoingReply>,
         mentions: Vec<crate::transport::OutgoingMention>,
-        hashtags: Vec<crate::transport::OutgoingHashtag>,
+        hashtags: crate::transport::OutgoingHashtags,
         emojis: Vec<crate::transport::OutgoingEmoji>,
         presign_finish: Option<Vec<String>>,
         flags: crate::transport::OutgoingMessageFlags,
@@ -2960,7 +3033,7 @@ impl TransportClient {
         message_id: i64,
         content: &str,
         mentions: Vec<crate::transport::OutgoingMention>,
-        hashtags: Vec<crate::transport::OutgoingHashtag>,
+        hashtags: crate::transport::OutgoingHashtags,
         emojis: Vec<crate::transport::OutgoingEmoji>,
         presign_finish: Vec<String>,
         create_time_seconds: u32,
@@ -3227,6 +3300,15 @@ impl TransportClient {
             .map_err(|e| anyhow::anyhow!("transport task failed: {e}"))?
     }
 
+    pub async fn open_dm_by_channel_id(&self, channel_id: i64) -> Result<()> {
+        let transport = self.inner.clone();
+
+        runtime()
+            .spawn(async move { transport.open_dm_by_channel_id(0, channel_id).await })
+            .await
+            .map_err(|e| anyhow::anyhow!("transport task failed: {e}"))?
+    }
+
     /// Add users to a channel.
     pub async fn add_channel_users(&self, channel_id: i64, user_ids: Vec<String>) -> Result<()> {
         let transport = self.inner.clone();
@@ -3414,6 +3496,7 @@ impl TransportClient {
         size: i32,
         width: i32,
         height: i32,
+        channel_id: i64,
     ) -> Result<mezon_proto::api::UploadAttachment> {
         let transport = self.inner.clone();
         let filename = filename.to_string();
@@ -3422,7 +3505,7 @@ impl TransportClient {
         runtime()
             .spawn(async move {
                 transport
-                    .upload_attachment_file(&filename, &filetype, size, width, height)
+                    .upload_attachment_file(&filename, &filetype, size, width, height, channel_id)
                     .await
             })
             .await
@@ -3468,17 +3551,21 @@ impl TransportClient {
     pub async fn update_user_profile_by_clan(
         &self,
         clan_id: i64,
-        nick_name: &str,
+        nick_name: Option<&str>,
         avatar_url: Option<&str>,
     ) -> Result<()> {
         let transport = self.inner.clone();
-        let nick_name = nick_name.to_string();
+        let nick_name = nick_name.map(str::to_string);
         let avatar_url = avatar_url.map(str::to_string);
 
         runtime()
             .spawn(async move {
                 transport
-                    .update_user_profile_by_clan(clan_id, &nick_name, avatar_url.as_deref())
+                    .update_user_profile_by_clan(
+                        clan_id,
+                        nick_name.as_deref(),
+                        avatar_url.as_deref(),
+                    )
                     .await
             })
             .await

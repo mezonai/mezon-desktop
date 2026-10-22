@@ -50,6 +50,7 @@ impl UserReactionPanel {
 impl Render for UserReactionPanel {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let emoji_cache = crate::image_cache::shared_emoji_cache(cx);
+        let font_family = crate::theme::ui_font_family(cx);
         let theme = cx.theme();
         let (count, senders) = MessagesStore::global(cx)
             .read(cx)
@@ -228,6 +229,7 @@ impl Render for UserReactionPanel {
 
         div()
             .occlude()
+            .font_family(font_family)
             .image_cache(self.image_cache.clone())
             .w(px(288.))
             .max_h(px(400.))

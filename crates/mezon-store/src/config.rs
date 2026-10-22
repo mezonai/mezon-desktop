@@ -63,6 +63,8 @@ pub struct AppConfig {
     pub profile_img_url: String,
     pub imgproxy_base_url: String,
     pub imgproxy_key: String,
+    pub mezon_cdn_url: String,
+    pub cloudflare_cdn_url: String,
 
     // ── Klipy (GIF search) ────────────────────────────────────────────────────
     pub klipy_key: String,
@@ -148,6 +150,8 @@ impl AppConfig {
             profile_img_url: "https://profile.mezon.ai".into(),
             imgproxy_base_url: "https://imgproxy.komu.vn".into(),
             imgproxy_key: "_AEhOrrckkG-NjqIdVLtzc-dtLFuE4u6ClM0P46ICEY".into(),
+            mezon_cdn_url: "https://cdn.mezon.ai".into(),
+            cloudflare_cdn_url: "https://cdn.komu.vn".into(),
 
             klipy_key: String::new(),
             klipy_base_url: "https://api.klipy.com/api/v1".into(),
@@ -266,6 +270,11 @@ impl AppConfig {
                 &defaults.imgproxy_base_url,
             ),
             imgproxy_key: opt_str(baked_env::NX_IMGPROXY_KEY, &defaults.imgproxy_key),
+            mezon_cdn_url: opt_str(baked_env::NX_MEZON_CDN_URL, &defaults.mezon_cdn_url),
+            cloudflare_cdn_url: opt_str(
+                baked_env::NX_CLOUDFLARE_CDN_URL,
+                &defaults.cloudflare_cdn_url,
+            ),
 
             klipy_key: opt_str(baked_env::NX_CHAT_APP_API_KLIPY_KEY, &defaults.klipy_key),
             klipy_base_url: opt_str(
@@ -392,9 +401,9 @@ impl AppConfig {
     }
 
     pub fn media_origins(&self) -> Vec<&str> {
-        let mut origins = Vec::with_capacity(READ_CDN_ORIGINS.len() + 2);
-        for origin in std::iter::once(self.base_img_url.trim_end_matches('/'))
-            .chain(std::iter::once(self.profile_img_url.trim_end_matches('/')))
+        let mut origins = Vec::with_capacity(READ_CDN_ORIGINS.len() + 4);
+        for origin in self
+            .own_media_bases()
             .chain(READ_CDN_ORIGINS.iter().copied())
         {
             if !origin.is_empty() && !origins.contains(&origin) {
@@ -405,17 +414,26 @@ impl AppConfig {
     }
 
     pub fn is_own_media_origin(&self, url: &str) -> bool {
-        let base = self.base_img_url.trim_end_matches('/');
-        if !base.is_empty() && url_has_origin(url, base) {
-            return true;
-        }
-        let profile = self.profile_img_url.trim_end_matches('/');
-        if !profile.is_empty() && url_has_origin(url, profile) {
+        if self
+            .own_media_bases()
+            .any(|base| !base.is_empty() && url_has_origin(url, base))
+        {
             return true;
         }
         READ_CDN_ORIGINS
             .iter()
             .any(|origin| url_has_origin(url, origin))
+    }
+
+    fn own_media_bases(&self) -> impl Iterator<Item = &str> {
+        [
+            &self.base_img_url,
+            &self.profile_img_url,
+            &self.mezon_cdn_url,
+            &self.cloudflare_cdn_url,
+        ]
+        .into_iter()
+        .map(|base| base.trim_end_matches('/'))
     }
 
     pub fn read_media_url<'a>(&self, url: &'a str) -> Cow<'a, str> {
@@ -479,6 +497,11 @@ impl AppConfig {
         }
     }
 
+    pub fn meeting_link(&self, code: &str) -> String {
+        let base = self.domain_url.trim_end_matches('/');
+        format!("{base}/meeting/{code}")
+    }
+
     pub fn channel_link(&self, clan_id: &str, channel_id: &str) -> String {
         let base = self.redirect_uri.trim_end_matches('/');
         format!("{base}/chat/clans/{clan_id}/channels/{channel_id}")
@@ -510,7 +533,12 @@ impl AppConfig {
         if emoji_id.is_empty() || emoji_id == "0" {
             return String::new();
         }
-        let source = format!("{}/emojis/{}.webp", self.base_img_url, emoji_id);
+        let known = crate::emoji::emoji_source(emoji_id)
+            .filter(|src| self.is_own_media_origin(&self.read_media_url(src)));
+        let source = match known.as_deref() {
+            Some(src) => Cow::Borrowed(src),
+            None => Cow::Owned(format!("{}/emojis/{}.webp", self.base_img_url, emoji_id)),
+        };
         self.imgproxy_url(&source, size, size, "fit")
     }
 
@@ -1051,6 +1079,20 @@ mod tests {
     }
 
     #[test]
+    fn configured_cdn_hosts_count_as_own_media() {
+        let cfg = AppConfig {
+            mezon_cdn_url: "https://cdn-dev.nccsoft.vn/".into(),
+            cloudflare_cdn_url: "https://cdn-dev.tx8.vn".into(),
+            ..AppConfig::dev_defaults()
+        };
+        let origins = cfg.media_origins();
+        assert!(origins.contains(&"https://cdn-dev.nccsoft.vn"));
+        assert!(origins.contains(&"https://cdn-dev.tx8.vn"));
+        assert!(cfg.is_own_media_origin("https://cdn-dev.nccsoft.vn/1d4bd2a126c01000/1_a.mp4"));
+        assert!(!cfg.is_own_media_origin("https://cdn-dev.nccsoft.vn.evil.example/a.mp4"));
+    }
+
+    #[test]
     fn web_canvas_cdns_are_own_media_and_imgproxied() {
         let cfg = AppConfig::dev_defaults();
         let r2 = "https://pub-35517170c1554a008bed9d7565fa4bb2.r2.dev/clan/photo.png";
@@ -1146,6 +1188,37 @@ mod tests {
         assert!(out.contains("/rs:fit:100:100:1/mb:2097152/plain/"));
         assert!(out.contains(src));
         assert!(out.ends_with("@webp"));
+    }
+
+    #[test]
+    fn emoji_src_uses_a_stored_source_only_on_a_media_origin() {
+        let cfg = AppConfig {
+            base_img_url: "https://cdn.komu.vn".into(),
+            ..AppConfig::dev_defaults()
+        };
+        let emoji = |id: &str, src: &str| crate::emoji::Emoji {
+            id: id.into(),
+            shortname: id.into(),
+            src: src.into(),
+            category: "Custom".into(),
+            clan_id: "1".into(),
+            clan_logo: String::new(),
+            creator_id: "2".into(),
+            is_for_sale: false,
+        };
+        crate::emoji::publish_emoji_sources(&[
+            emoji("880011", "https://cdn.mezon.ai/emojis/880011.webp"),
+            emoji("880012", "https://tracker.example/emojis/880012.webp"),
+        ]);
+
+        assert_eq!(
+            cfg.emoji_src("880011"),
+            cfg.imgproxy_url("https://cdn.mezon.ai/emojis/880011.webp", 100, 100, "fit")
+        );
+        assert_eq!(
+            cfg.emoji_src("880012"),
+            cfg.imgproxy_url("https://cdn.komu.vn/emojis/880012.webp", 100, 100, "fit")
+        );
     }
 
     #[test]

@@ -62,6 +62,7 @@ pub struct RowCtx<'a> {
     pub onboarding: Option<OnboardingContext>,
     pub suppress_hover: bool,
     pub is_topic_box: bool,
+    pub context_menu_enabled: bool,
     pub scroll_active: bool,
     /// Message whose hover toolbar should show, after the React-style hover-intent
     /// delay (fast mouse sweeps never latch it). `None` = no toolbar visible.
@@ -142,7 +143,9 @@ pub struct RowMemo {
     /// store the way message spans are, so without this the imgproxy url for
     /// every pill of every visible message is rebuilt on every frame.
     pub reaction_srcs: HashMap<SharedString, SharedString>,
+    pub reaction_srcs_generation: u64,
     pub rich_text: HashMap<MessageId, RichTextRenderPlan>,
+    pub group_updates: HashMap<MessageId, super::system_row::GroupUpdateLayout>,
     pub selection_layouts: HashMap<MessageId, super::content::SelectableMessageLayoutCacheEntry>,
     pub selection_text_pieces:
         HashMap<SharedString, Rc<[super::content::CachedSelectableTextPiece]>>,

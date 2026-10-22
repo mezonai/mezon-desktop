@@ -31,8 +31,12 @@ use crate::video::track_frame_key;
 use crate::{IceServerConfig, MEET_TOKEN_RETRY_LIMIT, ScreenShareMode, TokenRefresher};
 use crate::{SfuCloseAction, sfu_close_action, sfu_reconnect_delay};
 
-use super::messages::{ClientMessage, IceServerSpec, ServerMessage, SnapshotMember};
-use super::mid::{self, MID_AUDIO, MID_CAMERA, MID_SCREEN, RemoteKind};
+use super::messages::{
+    AssignedSlot, ClientMessage, IceServerSpec, MEDIA_POOL_VERSION, PoolSlotAssignment,
+    ServerMessage, SlotAssignment, SnapshotMember,
+};
+use super::mid::{self, MID_AUDIO, MID_CAMERA, MID_SCREEN, MidLayout, PoolLayout, RemoteKind};
+use super::network_quality::NetworkQuality;
 use super::screen_adaptation::{
     ScreenAdaptation, ScreenProfile, ScreenStats, TEXT_TIERS, VIDEO_TIERS,
 };
@@ -148,6 +152,8 @@ const MAX_RECONNECT_ATTEMPTS: u32 = 4;
 const MAX_INITIAL_CONNECT_ATTEMPTS: u32 = 3;
 const RECONNECTING_HEARTBEAT_TICKS: u32 = 10;
 const OFFER_REISSUE_DEADLINE: Duration = Duration::from_secs(8);
+const SCREEN_STOP_RETRIES: u32 = 3;
+const SCREEN_STOP_RETRY_BASE: Duration = Duration::from_millis(500);
 const TOKEN_EXPIRY_MARGIN: Duration = Duration::from_secs(60);
 const SIGNALING_OPERATION_TIMEOUT: Duration = Duration::from_secs(10);
 const NEGOTIATION_TIMEOUT: Duration = Duration::from_secs(15);
@@ -190,6 +196,7 @@ pub struct SfuConfig {
 pub struct SfuPeer {
     pub peer_id: u32,
     pub user_id: String,
+    pub metadata: String,
     pub muted: bool,
     pub is_audience: bool,
     pub audio: Option<u64>,
@@ -212,6 +219,14 @@ pub enum RemovalCause {
     Disconnected,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MediaRefusal {
+    CameraLimit,
+    ScreenShareLimit,
+    CameraUpdateFailed,
+    ScreenShareUpdateFailed,
+}
+
 pub enum SfuEvent {
     Connected {
         room: String,
@@ -232,6 +247,7 @@ pub enum SfuEvent {
         key: u64,
     },
     PttActive(bool),
+    NetworkWeak(bool),
     Reconnecting,
     Reconnected,
     Disconnected {
@@ -242,6 +258,10 @@ pub enum SfuEvent {
         reason: String,
     },
     MutedByModerator,
+    MediaRefused(MediaRefusal),
+    RoomMessage(String),
+    RoomMessageSent,
+    RoomMessageFailed,
     Error(String),
 }
 
@@ -257,6 +277,7 @@ enum EngineCommand {
     SetScreenShareMode(ScreenShareMode),
     PushToTalk(bool),
     ParticipantAction(String),
+    SendRoomMessage(String),
     Close,
 }
 
@@ -322,6 +343,10 @@ impl SfuEngine {
         let _ = self.cmd_tx.send(EngineCommand::ParticipantAction(token));
     }
 
+    pub fn send_room_message(&self, message: String) {
+        let _ = self.cmd_tx.send(EngineCommand::SendRoomMessage(message));
+    }
+
     pub(crate) fn refresh_remote_audio(&self, key: u64, recovery: PlaybackRecovery) {
         let _ = self
             .cmd_tx
@@ -337,8 +362,17 @@ fn remote_frame_key(mid: &str) -> u64 {
     track_frame_key("__sfu_remote__", mid)
 }
 
+struct SlotState<A> {
+    generation: u64,
+    assignment: Option<A>,
+}
+
 #[derive(Default)]
 struct Membership {
+    fixed_pool: bool,
+    layout: MidLayout,
+    slots: HashMap<u32, SlotState<SlotAssignment>>,
+    pool_slots: HashMap<(RemoteKind, u32), SlotState<PoolSlotAssignment>>,
     self_peer_id: u32,
     by_peer: HashMap<u32, SnapshotMember>,
     peer_by_mid: HashMap<String, u32>,
@@ -350,6 +384,35 @@ struct Membership {
 
 impl Membership {
     fn apply(&mut self, mut member: SnapshotMember) {
+        let seeded = member
+            .slot
+            .filter(|slot| *slot != u32::MAX)
+            .map(|slot| SlotAssignment {
+                slot,
+                generation: member.assignment_generation,
+                peer_id: member.peer_id,
+                user_id: member.user_id.clone(),
+                mid_audio: member.mid_audio,
+                mid_video: member.mid_video,
+                mid_screen: member.mid_screen,
+                audio_active: true,
+                video_active: member.camera_active,
+                screen_active: member.is_sharing_screen(),
+            });
+        let pooled: Vec<PoolSlotAssignment> = member
+            .media_slots
+            .iter()
+            .flat_map(|slots| slots.entries())
+            .map(|(kind, granted)| PoolSlotAssignment {
+                kind,
+                slot: granted.slot,
+                generation: granted.generation,
+                mid: granted.mid,
+                peer_id: member.peer_id,
+                user_id: member.user_id.clone(),
+                active: true,
+            })
+            .collect();
         let [audio, camera, screen] = self.mids_of(member.peer_id);
         if member.mid_audio == 0 {
             member.mid_audio = audio;
@@ -361,9 +424,25 @@ impl Membership {
             member.mid_screen = screen;
         }
         let peer_id = member.peer_id;
+        if member.metadata.is_empty()
+            && let Some(previous) = self.by_peer.get(&peer_id)
+            && previous.user_id == member.user_id
+        {
+            member.metadata.clone_from(&previous.metadata);
+        }
         let user_id = member.user_id.clone();
         let mids = member_mids(&member);
         self.by_peer.insert(peer_id, member);
+        if let Some(assignment) = seeded {
+            self.assign_slot(assignment, true);
+        }
+        for assignment in pooled {
+            self.assign_pool_slot(assignment, true);
+        }
+        if self.fixed_pool {
+            self.sync_slot_members();
+            return;
+        }
         for (mid, _) in mids {
             self.claim(peer_id, &mid);
             if !user_id.is_empty() {
@@ -372,13 +451,233 @@ impl Membership {
         }
     }
 
+    fn assign_slot(&mut self, assignment: SlotAssignment, membership: bool) -> bool {
+        if assignment.mids().is_none() {
+            return false;
+        }
+        if let Some(previous) = self.slots.get(&assignment.slot) {
+            if previous.generation > assignment.generation
+                || (membership && previous.generation == assignment.generation)
+                || (previous.generation == assignment.generation
+                    && previous.assignment.as_ref().map(|a| a.peer_id) != Some(assignment.peer_id))
+            {
+                return false;
+            }
+        }
+        if !membership {
+            self.fixed_pool = true;
+        }
+        let member = self
+            .by_peer
+            .entry(assignment.peer_id)
+            .or_insert_with(|| SnapshotMember {
+                peer_id: assignment.peer_id,
+                ..Default::default()
+            });
+        if !assignment.user_id.is_empty() {
+            member.user_id = assignment.user_id.clone();
+        }
+        self.slots.insert(
+            assignment.slot,
+            SlotState {
+                generation: assignment.generation,
+                assignment: Some(assignment),
+            },
+        );
+        if self.fixed_pool {
+            self.sync_slot_members();
+        }
+        true
+    }
+
+    fn release_slot(&mut self, slot: u32, generation: u64) -> bool {
+        if generation == 0
+            || slot > (u32::MAX - 5) / 3
+            || self
+                .slots
+                .get(&slot)
+                .is_some_and(|previous| previous.generation > generation)
+        {
+            return false;
+        }
+        self.fixed_pool = true;
+        self.slots.insert(
+            slot,
+            SlotState {
+                generation,
+                assignment: None,
+            },
+        );
+        self.sync_slot_members();
+        true
+    }
+
+    fn assign_pool_slot(&mut self, assignment: PoolSlotAssignment, membership: bool) -> bool {
+        let MidLayout::Pools(pools) = self.layout else {
+            return false;
+        };
+        let Some(mid) = pools.mid(assignment.kind, assignment.slot) else {
+            return false;
+        };
+        if assignment.generation == 0
+            || assignment.peer_id == 0
+            || (assignment.mid != 0 && assignment.mid != mid)
+        {
+            return false;
+        }
+        let key = (assignment.kind, assignment.slot);
+        if let Some(previous) = self.pool_slots.get(&key) {
+            if previous.generation > assignment.generation
+                || (membership && previous.generation == assignment.generation)
+                || (previous.generation == assignment.generation
+                    && previous.assignment.as_ref().map(|a| a.peer_id) != Some(assignment.peer_id))
+            {
+                return false;
+            }
+        }
+        let member = self
+            .by_peer
+            .entry(assignment.peer_id)
+            .or_insert_with(|| SnapshotMember {
+                peer_id: assignment.peer_id,
+                ..Default::default()
+            });
+        if !assignment.user_id.is_empty() {
+            member.user_id = assignment.user_id.clone();
+        }
+        self.pool_slots.insert(
+            key,
+            SlotState {
+                generation: assignment.generation,
+                assignment: Some(assignment),
+            },
+        );
+        self.sync_slot_members();
+        true
+    }
+
+    fn release_pool_slot(&mut self, kind: RemoteKind, slot: u32, generation: u64) -> bool {
+        let MidLayout::Pools(pools) = self.layout else {
+            return false;
+        };
+        if generation == 0
+            || pools.mid(kind, slot).is_none()
+            || self
+                .pool_slots
+                .get(&(kind, slot))
+                .is_some_and(|previous| previous.generation > generation)
+        {
+            return false;
+        }
+        self.pool_slots.insert(
+            (kind, slot),
+            SlotState {
+                generation,
+                assignment: None,
+            },
+        );
+        self.sync_slot_members();
+        true
+    }
+
+    fn release_pool_slots_of(&mut self, peer_id: u32) {
+        let held: Vec<_> = self
+            .pool_slots
+            .iter()
+            .filter(|(_, state)| matches!(&state.assignment, Some(a) if a.peer_id == peer_id))
+            .map(|(&(kind, slot), state)| (kind, slot, state.generation))
+            .collect();
+        for (kind, slot, generation) in held {
+            self.release_pool_slot(kind, slot, generation);
+        }
+    }
+
+    fn sync_slot_members(&mut self) {
+        self.peer_by_mid.clear();
+        self.user_by_mid.clear();
+        self.retired_mids.clear();
+        for member in self.by_peer.values_mut() {
+            member.mid_audio = 0;
+            member.mid_video = 0;
+            member.mid_screen = 0;
+        }
+        for state in self.slots.values() {
+            let Some(a) = &state.assignment else {
+                continue;
+            };
+            let Some(mids) = a.mids() else {
+                continue;
+            };
+            let Some(member) = self.by_peer.get_mut(&a.peer_id) else {
+                continue;
+            };
+            for mid in mids {
+                self.peer_by_mid.insert(mid.to_string(), a.peer_id);
+                self.user_by_mid
+                    .insert(mid.to_string(), member.user_id.clone());
+            }
+            member.mid_audio = if a.audio_active { mids[0] } else { 0 };
+            member.mid_video = if a.video_active { mids[1] } else { 0 };
+            member.mid_screen = if a.screen_active { mids[2] } else { 0 };
+            member.camera_active = a.video_active;
+            member.screen_active = a.screen_active;
+            member.screen_requested = Some(a.screen_active);
+        }
+        let MidLayout::Pools(pools) = self.layout else {
+            return;
+        };
+        for (&(kind, slot), state) in &self.pool_slots {
+            let Some(a) = &state.assignment else {
+                continue;
+            };
+            let Some(mid) = pools.mid(kind, slot) else {
+                continue;
+            };
+            let Some(member) = self.by_peer.get_mut(&a.peer_id) else {
+                continue;
+            };
+            self.peer_by_mid.insert(mid.to_string(), a.peer_id);
+            self.user_by_mid
+                .insert(mid.to_string(), member.user_id.clone());
+            match kind {
+                RemoteKind::Audio => member.mid_audio = if a.active { mid } else { 0 },
+                RemoteKind::Camera => member.mid_video = mid,
+                RemoteKind::Screen => member.mid_screen = mid,
+            }
+        }
+    }
+
+    fn slot_active(&self, mid: &str) -> bool {
+        let Some(remote) = self.layout.classify(mid) else {
+            return false;
+        };
+        if matches!(self.layout, MidLayout::Pools(_)) {
+            return self
+                .pool_slots
+                .get(&(remote.kind, remote.slot))
+                .and_then(|state| state.assignment.as_ref())
+                .is_some_and(|a| a.active || remote.kind != RemoteKind::Audio);
+        }
+        let Ok(number) = mid.parse::<u32>() else {
+            return false;
+        };
+        let Some(a) = self
+            .slots
+            .get(&((number - 3) / 3))
+            .and_then(|state| state.assignment.as_ref())
+        else {
+            return false;
+        };
+        [a.audio_active, a.video_active, a.screen_active][kind_index(remote.kind)]
+    }
+
     fn mids_of(&self, peer_id: u32) -> [u32; 3] {
         let mut mids = [0u32; 3];
         for (mid, owner) in &self.peer_by_mid {
             if *owner != peer_id {
                 continue;
             }
-            let (Some(remote), Ok(n)) = (mid::classify(mid), mid.parse::<u32>()) else {
+            let (Some(remote), Ok(n)) = (self.layout.classify(mid), mid.parse::<u32>()) else {
                 continue;
             };
             mids[kind_index(remote.kind)] = n;
@@ -431,6 +730,13 @@ impl Membership {
     }
 
     fn absorb_msids(&mut self, sdp: &str) {
+        if sdp.lines().any(|line| line.starts_with("a=msid:slot-")) {
+            self.fixed_pool = true;
+        }
+        if self.fixed_pool {
+            self.sync_slot_members();
+            return;
+        }
         for (mid, occupant) in mid::parse_msid_occupants(sdp) {
             if self.retired_mids.get(&mid).is_some_and(|retired| {
                 retired.blocks_reactivation(&occupant, self.peer_by_mid.get(&mid).copied())
@@ -456,6 +762,7 @@ impl Membership {
                 SfuPeer {
                     peer_id: m.peer_id,
                     user_id: m.user_id.clone(),
+                    metadata: m.metadata.clone(),
                     muted: m.is_mute,
                     is_audience: m.is_audience(),
                     audio: (m.mid_audio != 0).then(|| remote_frame_key(&m.mid_audio.to_string())),
@@ -864,6 +1171,9 @@ fn apply_offline_command(
                 let _ = evt_tx.send(SfuEvent::PttActive(false));
             }
         }
+        EngineCommand::SendRoomMessage(_) => {
+            let _ = evt_tx.send(SfuEvent::RoomMessageFailed);
+        }
         EngineCommand::SetCameraActive(_)
         | EngineCommand::SetScreenActive(_)
         | EngineCommand::ParticipantAction(_)
@@ -1023,6 +1333,7 @@ async fn session_loop(
         token: config.token.clone(),
         role: config.role.wire(),
         screen_codec: SCREEN_CODEC,
+        media_pool_version: MEDIA_POOL_VERSION,
     };
     if let Err(e) = send(&mut ws_tx, &join).await {
         return SessionOutcome::Dropped {
@@ -1033,19 +1344,20 @@ async fn session_loop(
 
     let mut membership = Membership::default();
     let mut audio_recovery: HashMap<u64, AudioRecoveryProgress> = HashMap::new();
-    // Several silent receivers can request recovery at once. Share one bounded
-    // stats read across them, including failures, to keep signaling responsive.
     let mut recovery_stats: Option<(Instant, Option<Vec<RtcStats>>)> = None;
     let mut screen_recovery = ScreenRecovery::default();
     let (transport_state_tx, transport_state_rx) = flume::unbounded::<PeerConnectionState>();
     let (ice_state_tx, ice_state_rx) = flume::unbounded::<IceConnectionState>();
-    // Coalesce track notifications without blocking WebRTC's callback thread.
     let (remote_media_tx, remote_media_rx) = flume::bounded::<()>(1);
     let mut stats_timer = tokio::time::interval(MEDIA_STATS_INTERVAL);
     stats_timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    let mut network_quality = NetworkQuality::default();
+    let mut network_weak = false;
     let mut pending_offer: Option<(u64, String)> = None;
     let mut offer_reissue_deadline: Option<tokio::time::Instant> = None;
     let mut mute_sync = MuteSync::default();
+    let mut screen_stop_attempts: u32 = 0;
+    let mut screen_stop_retry_at: Option<tokio::time::Instant> = None;
     let mut tiers = PublishTiers::default();
     let mut camera_tier_pending: Option<(usize, tokio::time::Instant)> = None;
     let mut screen_adaptation = ScreenAdaptation::default();
@@ -1184,8 +1496,23 @@ async fn session_loop(
                         }
                     }
                     ServerMessage::Pong => {}
-                    ServerMessage::Joined { room, ice_servers } => {
-                        tracing::info!(%room, ice_servers = ice_servers.len(), "sfu accepted join");
+                    ServerMessage::Joined {
+                        room,
+                        ice_servers,
+                        media_pool_mode,
+                        max_audio_slots,
+                        max_camera_slots,
+                        max_screen_slots,
+                    } => {
+                        if media_pool_mode == "decoupled" {
+                            membership.layout = MidLayout::Pools(PoolLayout {
+                                audio: max_audio_slots,
+                                camera: max_camera_slots,
+                                screen: max_screen_slots,
+                            });
+                            membership.fixed_pool = true;
+                        }
+                        tracing::info!(%room, ice_servers = ice_servers.len(), layout = ?membership.layout, "sfu accepted join");
                         joined_room = room;
                         match create_peer_connection(factory, &ice_servers, &config.fallback_ice_servers) {
                             Ok(created) => {
@@ -1226,7 +1553,6 @@ async fn session_loop(
                         }
                     }
                     ServerMessage::Offer { offer_generation, sdp } => {
-                        tracing::debug!(generation = offer_generation, bytes = sdp.len(), "sfu offer");
                         pending_offer = Some((offer_generation, sdp));
                         offer_reissue_deadline = None;
                     }
@@ -1245,11 +1571,13 @@ async fn session_loop(
                         }
                         let _ = evt_tx.send(SfuEvent::Peers(membership.peers()));
                         camera_tier_pending = schedule_camera_tier(&membership, local, tiers.camera, camera_tier_pending);
+                        if membership.fixed_pool && let Some(pc) = pc.as_ref() { sync_remote_media(pc, &mut membership, evt_tx, None); }
                         let _ = evt_tx.send(SfuEvent::RoomSnapshot);
                     }
                     ServerMessage::PeerJoined { peer } => {
                         if let Some(peer) = peer {
                             membership.apply(peer);
+                            if membership.fixed_pool && let Some(pc) = pc.as_ref() { sync_remote_media(pc, &mut membership, evt_tx, None); }
                             let _ = evt_tx.send(SfuEvent::Peers(membership.peers()));
                             camera_tier_pending = schedule_camera_tier(&membership, local, tiers.camera, camera_tier_pending);
                         }
@@ -1258,13 +1586,57 @@ async fn session_loop(
                         if let Some(peer) = peer {
                             if joined && peer.peer_id == membership.self_peer_id {
                                 mute_sync.observe_self(peer.is_mute, local.muted, Instant::now());
+                                if !peer.is_sharing_screen() {
+                                    screen_stop_attempts = 0;
+                                    screen_stop_retry_at = None;
+                                }
                             }
                             membership.apply(peer);
+                            if membership.fixed_pool && let Some(pc) = pc.as_ref() { sync_remote_media(pc, &mut membership, evt_tx, None); }
                             let _ = evt_tx.send(SfuEvent::Peers(membership.peers()));
                             camera_tier_pending = schedule_camera_tier(&membership, local, tiers.camera, camera_tier_pending);
                         }
                     }
-                    ServerMessage::PeerLeft { peer_id, mid_audio, mid_video, mid_screen } => {
+                    ServerMessage::SlotAssigned(assigned) => {
+                        let changed = match assigned {
+                            AssignedSlot::Triple(assignment) => membership.assign_slot(assignment, false),
+                            AssignedSlot::Pool(assignment) => membership.assign_pool_slot(assignment, false),
+                        };
+                        if changed {
+                            if let Some(pc) = pc.as_ref() { sync_remote_media(pc, &mut membership, evt_tx, None); }
+                            let _ = evt_tx.send(SfuEvent::Peers(membership.peers()));
+                            camera_tier_pending = schedule_camera_tier(&membership, local, tiers.camera, camera_tier_pending);
+                        }
+                    }
+                    ServerMessage::SlotReleased { kind, slot, generation } => {
+                        let changed = match kind {
+                            Some(kind) => membership.release_pool_slot(kind, slot, generation),
+                            None => membership.release_slot(slot, generation),
+                        };
+                        if changed {
+                            if let Some(pc) = pc.as_ref() { sync_remote_media(pc, &mut membership, evt_tx, None); }
+                            let _ = evt_tx.send(SfuEvent::Peers(membership.peers()));
+                            camera_tier_pending = schedule_camera_tier(&membership, local, tiers.camera, camera_tier_pending);
+                        }
+                    }
+                    ServerMessage::PeerLeft { peer_id, mid_audio, mid_video, mid_screen, assignment_generation } => {
+                        if membership.fixed_pool {
+                            if assignment_generation > 0 && membership.slots.values().any(|state| {
+                                state.generation > assignment_generation && state.assignment.as_ref().is_some_and(|a| a.peer_id == peer_id)
+                            }) { continue; }
+                            let slots: Vec<_> = membership.slots.iter().filter_map(|(slot, state)| {
+                                (state.assignment.as_ref().is_some_and(|a| a.peer_id == peer_id)
+                                    && (assignment_generation == 0 || state.generation == assignment_generation))
+                                    .then_some((*slot, state.generation))
+                            }).collect();
+                            for (slot, generation) in slots { membership.release_slot(slot, generation); }
+                            membership.release_pool_slots_of(peer_id);
+                            membership.by_peer.remove(&peer_id);
+                            if let Some(pc) = pc.as_ref() { sync_remote_media(pc, &mut membership, evt_tx, None); }
+                            let _ = evt_tx.send(SfuEvent::Peers(membership.peers()));
+                            camera_tier_pending = schedule_camera_tier(&membership, local, tiers.camera, camera_tier_pending);
+                            continue;
+                        }
                         let released = membership.remove_peer(peer_id, [mid_audio, mid_video, mid_screen]);
                         tracing::info!(peer_id, ?released, remaining_peers = membership.by_peer.len(),
                             "sfu peer left; retiring only its remote media");
@@ -1288,6 +1660,12 @@ async fn session_loop(
                     ServerMessage::MuteChanged { is_mute } => {
                         mute_sync.acknowledge(is_mute);
                     }
+                    ServerMessage::RoomMessage { message } => {
+                        let _ = evt_tx.send(SfuEvent::RoomMessage(message));
+                    }
+                    ServerMessage::MessageSent => {
+                        let _ = evt_tx.send(SfuEvent::RoomMessageSent);
+                    }
                     ServerMessage::KeyframeRequested { .. }
                     | ServerMessage::VisibilityChanged { .. }
                     | ServerMessage::RoleChanged { .. }
@@ -1295,6 +1673,11 @@ async fn session_loop(
                     ServerMessage::Error { message } => {
                         if screen_recovery.is_recent_request_error(&message, Instant::now()) {
                             tracing::warn!(%message, "sfu keyframe request rejected");
+                            continue;
+                        }
+                        if message == "invalid_message" {
+                            tracing::warn!("sfu rejected a room message");
+                            let _ = evt_tx.send(SfuEvent::RoomMessageFailed);
                             continue;
                         }
                         if matches!(message.as_str(), "invalid_push_to_talk" | "push_to_talk_rejected") {
@@ -1325,6 +1708,32 @@ async fn session_loop(
                             )
                         {
                             tracing::warn!(%message, "sfu rejected the participant action");
+                            continue;
+                        }
+                        let refusal = match message.as_str() {
+                            "camera_capacity_full" => Some(MediaRefusal::CameraLimit),
+                            "screen_share_capacity_full" => Some(MediaRefusal::ScreenShareLimit),
+                            "camera_update_failed" => Some(MediaRefusal::CameraUpdateFailed),
+                            "screen_share_update_failed" => Some(MediaRefusal::ScreenShareUpdateFailed),
+                            _ => None,
+                        };
+                        if let Some(refusal) = refusal {
+                            if matches!(refusal, MediaRefusal::ScreenShareUpdateFailed)
+                                && local.screen.is_none()
+                                && screen_stop_attempts < SCREEN_STOP_RETRIES
+                            {
+                                let delay = SCREEN_STOP_RETRY_BASE * 2u32.pow(screen_stop_attempts);
+                                screen_stop_attempts += 1;
+                                screen_stop_retry_at = Some(tokio::time::Instant::now() + delay);
+                                tracing::warn!(
+                                    %message,
+                                    attempt = screen_stop_attempts,
+                                    "sfu refused to stop the screen share; retrying"
+                                );
+                                continue;
+                            }
+                            tracing::warn!(%message, "sfu refused the media request");
+                            let _ = evt_tx.send(SfuEvent::MediaRefused(refusal));
                             continue;
                         }
                         tracing::warn!(%message, joined, "sfu reported an error");
@@ -1430,6 +1839,8 @@ async fn session_loop(
                         }
                     }
                     EngineCommand::SetScreenActive(active) => {
+                        screen_stop_attempts = 0;
+                        screen_stop_retry_at = None;
                         if joined && send(&mut ws_tx, &ClientMessage::ShareScreen { active }).await.is_err() {
                             return SessionOutcome::Dropped { joined, reason: "share_screen send failed".into() };
                         }
@@ -1445,6 +1856,16 @@ async fn session_loop(
                         }
                         if send(&mut ws_tx, &ClientMessage::ParticipantAction { token }).await.is_err() {
                             return SessionOutcome::Dropped { joined, reason: "participant_action send failed".into() };
+                        }
+                    }
+                    EngineCommand::SendRoomMessage(message) => {
+                        if !joined {
+                            tracing::warn!("sfu room message dropped before the join completed");
+                            let _ = evt_tx.send(SfuEvent::RoomMessageFailed);
+                            continue;
+                        }
+                        if send(&mut ws_tx, &ClientMessage::SendMessage { message }).await.is_err() {
+                            return SessionOutcome::Dropped { joined, reason: "room message send failed".into() };
                         }
                     }
                     EngineCommand::PushToTalk(active) => {
@@ -1589,8 +2010,10 @@ async fn session_loop(
                             waited_ms = waited.as_millis(),
                             "sfu media transport stalled; dropping the session to reconnect"
                         );
-                        if let Some(pc) = pc.as_ref() {
-                            let _ = log_media_stats(pc).await;
+                        if let Some(pc) = pc.as_ref()
+                            && let Some(stats) = read_media_stats(pc).await
+                        {
+                            log_media_stats(&stats);
                         }
                         return SessionOutcome::Dropped { joined, reason: reason.into() };
                     }
@@ -1614,7 +2037,17 @@ async fn session_loop(
                         PeerConnectionState::Connected => disconnected_since = None,
                         _ => {}
                     }
-                    let stats = log_media_stats(&peer_connection).await;
+                    let media_stats = read_media_stats(&peer_connection).await;
+                    let stats = media_stats.as_deref().and_then(log_media_stats);
+                    if peer_connection.connection_state() == PeerConnectionState::Connected
+                        && let Some(media_stats) = media_stats.as_deref()
+                    {
+                        let weak = network_quality.update(media_stats);
+                        if weak != network_weak {
+                            network_weak = weak;
+                            let _ = evt_tx.send(SfuEvent::NetworkWeak(weak));
+                        }
+                    }
                     if let (Some(stats), Some(screen)) = (stats, local.screen.as_ref()) {
                         let profile = screen_profile(screen.mode);
                         if let Some((next, sample)) = screen_adaptation.update(tiers.screen, profile, stats) {
@@ -1704,6 +2137,15 @@ async fn session_loop(
                     reason: "sfu never reissued the rejected offer".into(),
                 };
             }
+            () = tokio::time::sleep_until(screen_stop_retry_at.unwrap_or_else(tokio::time::Instant::now)), if screen_stop_retry_at.is_some() => {
+                screen_stop_retry_at = None;
+                if joined
+                    && local.screen.is_none()
+                    && send(&mut ws_tx, &ClientMessage::ShareScreen { active: false }).await.is_err()
+                {
+                    return SessionOutcome::Dropped { joined, reason: "share_screen send failed".into() };
+                }
+            }
             () = tokio::time::sleep_until(mute_sync.deadline().map(tokio::time::Instant::from_std).unwrap_or_else(tokio::time::Instant::now)), if mute_sync.deadline().is_some() => {
                 if mute_sync.take_forced_mute(Instant::now()) && !local.muted {
                     tracing::info!("sfu moderator muted this device");
@@ -1736,7 +2178,6 @@ async fn session_loop(
                 .and_then(|result| result)
                 {
                     Ok(()) => {
-                        tracing::debug!(generation, "sfu answer sent");
                         sync_remote_media(&peer_connection, &mut membership, evt_tx, None);
                         if !membership.live_tracks.is_empty()
                             && let Some(previous) = retiring.take()
@@ -1926,14 +2367,17 @@ fn close_reason(code: Option<CloseCode>, frame_reason: Option<&str>) -> String {
         .unwrap_or_else(|| "server closed link".to_owned())
 }
 
-async fn log_media_stats(pc: &PeerConnection) -> Option<ScreenStats> {
+async fn read_media_stats(pc: &PeerConnection) -> Option<Vec<RtcStats>> {
     let Ok(Ok(stats)) = tokio::time::timeout(STATS_TIMEOUT, pc.get_stats()).await else {
         tracing::warn!("sfu media stats unavailable or timed out");
         return None;
     };
+    Some(stats)
+}
 
+fn log_media_stats(stats: &[RtcStats]) -> Option<ScreenStats> {
     let mut codecs: HashMap<String, String> = HashMap::new();
-    for stat in &stats {
+    for stat in stats {
         if let RtcStats::Codec(codec) = stat {
             let mime = codec
                 .codec
@@ -1954,7 +2398,7 @@ async fn log_media_stats(pc: &PeerConnection) -> Option<ScreenStats> {
     let mut screen_stats = None;
     let mut screen_transport_id = None;
     let mut lines: Vec<String> = Vec::new();
-    for stat in &stats {
+    for stat in stats {
         match stat {
             RtcStats::OutboundRtp(out) => {
                 if out.outbound.mid == MID_SCREEN
@@ -2073,7 +2517,7 @@ async fn log_media_stats(pc: &PeerConnection) -> Option<ScreenStats> {
     }
 
     let mut candidates: HashMap<String, String> = HashMap::new();
-    for stat in &stats {
+    for stat in stats {
         match stat {
             RtcStats::LocalCandidate(c) => {
                 candidates.insert(c.rtc.id.clone(), describe_candidate(&c.local_candidate));
@@ -2091,8 +2535,6 @@ async fn log_media_stats(pc: &PeerConnection) -> Option<ScreenStats> {
             .cloned()
             .unwrap_or_else(|| "?".to_owned())
     };
-    // Only the selected pair belongs to the current screen transport; an old
-    // nominated pair can retain a stale, optimistic bandwidth estimate.
     let selected_pair_id = stats.iter().find_map(|stat| match stat {
         RtcStats::Transport(t) if Some(t.rtc.id.as_str()) == screen_transport_id => {
             Some(t.transport.selected_candidate_pair_id.as_str())
@@ -2101,7 +2543,7 @@ async fn log_media_stats(pc: &PeerConnection) -> Option<ScreenStats> {
     });
     let mut bwe_kbps: u32 = 0;
     let mut pairs: Vec<String> = Vec::new();
-    for stat in &stats {
+    for stat in stats {
         match stat {
             RtcStats::Transport(t) => tracing::info!(
                 dtls = ?t.transport.dtls_state,
@@ -2142,7 +2584,7 @@ async fn log_media_stats(pc: &PeerConnection) -> Option<ScreenStats> {
 
     if let Some(screen) = screen_stats.as_mut() {
         screen.bwe_kbps = bwe_kbps;
-        for stat in &stats {
+        for stat in stats {
             if let RtcStats::OutboundRtp(out) = stat {
                 if out.outbound.mid != MID_SCREEN
                     && Some(out.stream.transport_id.as_str()) == screen_transport_id
@@ -2176,21 +2618,6 @@ fn describe_candidate(candidate: &libwebrtc::stats::dictionaries::IceCandidateSt
     format!("{kind}/{} {address}", candidate.protocol)
 }
 
-fn transceiver_summary(pc: &PeerConnection) -> String {
-    pc.transceivers()
-        .iter()
-        .enumerate()
-        .map(|(index, transceiver)| {
-            format!(
-                "#{index}:{}={:?}",
-                transceiver.mid().unwrap_or_else(|| "-".to_owned()),
-                transceiver.direction(),
-            )
-        })
-        .collect::<Vec<_>>()
-        .join(" ")
-}
-
 #[allow(clippy::too_many_arguments)]
 async fn negotiate(
     pc: &PeerConnection,
@@ -2207,26 +2634,11 @@ async fn negotiate(
     let stabilized = sdp::stabilize_inactive_video_sections(offer_sdp, previous.as_deref());
     let hinted = sdp::munge_uplink_start_bitrate(&stabilized, UPLINK_START_KBPS);
 
-    tracing::debug!(
-        generation,
-        directions = %sdp::direction_summary(&stabilized),
-        codecs = %sdp::codec_summary(&stabilized),
-        ufrag = %sdp::ice_ufrags(&stabilized),
-        setup = %sdp::setup_roles(&stabilized),
-        "offer m-lines"
-    );
-
     let offer = SessionDescription::parse(&hinted, SdpType::Offer)
         .map_err(|e| anyhow::anyhow!("parse offer: {e}"))?;
     pc.set_remote_description(offer)
         .await
         .context("set remote description")?;
-
-    tracing::debug!(
-        generation,
-        transceivers = %transceiver_summary(pc),
-        "transceivers after remote offer"
-    );
 
     attach_local_tracks(Some(pc), local, role);
     open_uplink_directions(pc, &stabilized);
@@ -2238,12 +2650,6 @@ async fn negotiate(
 
     let derived = answer.to_string();
     let opened = sdp::force_uplink_sendonly(&derived, &stabilized);
-    tracing::debug!(
-        generation,
-        derived = %sdp::direction_summary(&derived),
-        opened = %sdp::direction_summary(&opened),
-        "answer uplinks reopened"
-    );
     let answer = SessionDescription::parse(&opened, SdpType::Answer)
         .map_err(|e| anyhow::anyhow!("parse patched answer: {e}"))?;
 
@@ -2254,25 +2660,10 @@ async fn negotiate(
     tune_uplinks(pc, local, tiers);
     local.apply_audio_gate(Some(pc), role);
 
-    tracing::debug!(
-        generation,
-        transceivers = %transceiver_summary(pc),
-        "transceivers after local answer"
-    );
-
     let local_sdp = pc
         .current_local_description()
         .map(|d| d.to_string())
         .context("local description missing after set_local_description")?;
-
-    tracing::debug!(
-        generation,
-        directions = %sdp::direction_summary(&local_sdp),
-        codecs = %sdp::codec_summary(&local_sdp),
-        ufrag = %sdp::ice_ufrags(&local_sdp),
-        setup = %sdp::setup_roles(&local_sdp),
-        "answer m-lines"
-    );
 
     membership.absorb_msids(offer_sdp);
     tracing::info!(generation, directions = %sdp::direction_summary(&local_sdp),
@@ -2406,23 +2797,14 @@ fn open_uplink_directions(pc: &PeerConnection, offer_sdp: &str) {
         if !invited || transceiver.direction() == RtpTransceiverDirection::SendOnly {
             continue;
         }
-        match transceiver.set_direction(RtpTransceiverDirection::SendOnly) {
-            Ok(()) => tracing::debug!(mid = %mid, "uplink opened for sending"),
-            Err(e) => tracing::warn!("uplink mid {mid} could not be opened for sending: {e}"),
+        if let Err(e) = transceiver.set_direction(RtpTransceiverDirection::SendOnly) {
+            tracing::warn!("uplink mid {mid} could not be opened for sending: {e}");
         }
     }
 }
 
 fn attach_local_tracks(pc: Option<&PeerConnection>, local: &LocalTracks, role: SfuRole) {
     let Some(pc) = pc else { return };
-
-    tracing::debug!(
-        role = role.wire(),
-        audio = local.audio.is_some(),
-        camera = local.camera.is_some(),
-        screen = local.screen.is_some(),
-        "attaching local tracks to the sfu uplinks"
-    );
 
     let publishes_video = role == SfuRole::Speaker;
 
@@ -2445,14 +2827,18 @@ fn attach_local_tracks(pc: Option<&PeerConnection>, local: &LocalTracks, role: S
             _ => continue,
         };
 
-        let Some(track) = wanted else { continue };
-        match transceiver.sender().set_track(Some(track)) {
-            Ok(()) => tracing::debug!(
-                mid = %mid,
-                direction = ?transceiver.direction(),
-                "local track attached"
-            ),
-            Err(e) => tracing::warn!("failed to attach local track on mid {mid}: {e}"),
+        let Some(track) = wanted else {
+            let sender = transceiver.sender();
+            if mid == MID_SCREEN
+                && sender.track().is_some()
+                && let Err(e) = sender.set_track(None)
+            {
+                tracing::warn!("failed to detach the screen track on mid {mid}: {e}");
+            }
+            continue;
+        };
+        if let Err(e) = transceiver.sender().set_track(Some(track)) {
+            tracing::warn!("failed to attach local track on mid {mid}: {e}");
         }
     }
 
@@ -2472,7 +2858,7 @@ fn sync_remote_media(
         if mid::is_local_mid(&mid) {
             continue;
         }
-        let Some(remote) = mid::classify(&mid) else {
+        let Some(remote) = membership.layout.classify(&mid) else {
             continue;
         };
 
@@ -2484,13 +2870,22 @@ fn sync_remote_media(
             negotiated,
             RtpTransceiverDirection::Inactive | RtpTransceiverDirection::Stopped
         );
-        let live = transceiver.receiver().track().filter(|track| {
-            !idle
+        let receiver_track = transceiver.receiver().track();
+        let assigned = !membership.fixed_pool || membership.slot_active(&mid);
+        if membership.fixed_pool
+            && let Some(MediaStreamTrack::Audio(audio)) = &receiver_track
+        {
+            audio.set_enabled(assigned && !idle);
+        }
+        let live = receiver_track.filter(|track| {
+            assigned
+                && !idle
                 && !membership.retired_mids.contains_key(&mid)
                 && track.state() == RtcTrackState::Live
         });
 
         let Some(track) = live else {
+            membership.video_receipts.remove(&key);
             if membership.live_tracks.remove(&key).is_some() {
                 tracing::info!(mid = %mid, key, "remote media dropped");
                 let _ = evt_tx.send(SfuEvent::RemoteGone { key });
@@ -2504,6 +2899,10 @@ fn sync_remote_media(
             user_id: membership.user_by_mid.get(&mid).cloned(),
         };
         let unchanged = membership.live_tracks.get(&key) == Some(&binding);
+        if membership.fixed_pool && !unchanged && membership.live_tracks.contains_key(&key) {
+            membership.video_receipts.remove(&key);
+            let _ = evt_tx.send(SfuEvent::RemoteGone { key });
+        }
         let recovery = unchanged && refresh_audio == Some(key) && remote.kind == RemoteKind::Audio;
         if unchanged && !recovery {
             continue;
@@ -2522,7 +2921,6 @@ fn sync_remote_media(
             (MediaStreamTrack::Video(track), RemoteKind::Camera | RemoteKind::Screen) => {
                 membership.live_tracks.insert(key, binding);
                 tracing::info!(mid = %mid, key, "remote video attached");
-                // Preserve the latest frame even before the consumer task is scheduled.
                 let stream = NativeVideoStream::new(track);
                 let receipt = Arc::new(FrameReceipt::default());
                 membership.video_receipts.insert(key, receipt.clone());
@@ -2541,6 +2939,7 @@ fn sync_remote_media(
 
 #[cfg(test)]
 mod tests {
+    use super::super::messages::{MediaSlots, PoolSlot};
     use super::*;
 
     #[test]
@@ -2728,8 +3127,11 @@ mod tests {
 
     fn member(peer_id: u32, user_id: &str, mids: [u32; 3]) -> SnapshotMember {
         SnapshotMember {
+            slot: None,
+            assignment_generation: 0,
             peer_id,
             user_id: user_id.to_owned(),
+            metadata: String::new(),
             role: "speaker".to_owned(),
             is_mute: false,
             camera_active: false,
@@ -2738,6 +3140,36 @@ mod tests {
             mid_audio: mids[0],
             mid_video: mids[1],
             mid_screen: mids[2],
+            media_slots: None,
+        }
+    }
+
+    fn decoupled_membership() -> Membership {
+        Membership {
+            fixed_pool: true,
+            layout: MidLayout::Pools(PoolLayout {
+                audio: 6,
+                camera: 8,
+                screen: 4,
+            }),
+            ..Default::default()
+        }
+    }
+
+    fn pool_assignment(
+        kind: RemoteKind,
+        slot: u32,
+        generation: u64,
+        mid: u32,
+    ) -> PoolSlotAssignment {
+        PoolSlotAssignment {
+            kind,
+            slot,
+            generation,
+            mid,
+            peer_id: 3,
+            user_id: "7".to_owned(),
+            active: false,
         }
     }
 
@@ -2774,6 +3206,26 @@ mod tests {
             membership.user_by_mid.get("4").map(String::as_str),
             Some("7")
         );
+    }
+
+    #[test]
+    fn a_peer_update_without_metadata_keeps_the_name_it_joined_with() {
+        let mut membership = Membership::default();
+        let mut joined = member(4, "9", [3, 4, 5]);
+        joined.metadata = "alice;https://cdn/a.png".to_owned();
+        membership.apply(joined);
+        membership.apply(member(4, "9", [3, 4, 5]));
+        assert_eq!(membership.peers()[0].metadata, "alice;https://cdn/a.png");
+    }
+
+    #[test]
+    fn a_reused_peer_id_does_not_inherit_another_users_metadata() {
+        let mut membership = Membership::default();
+        let mut joined = member(4, "9", [3, 4, 5]);
+        joined.metadata = "alice;https://cdn/a.png".to_owned();
+        membership.apply(joined);
+        membership.apply(member(4, "11", [3, 4, 5]));
+        assert!(membership.peers()[0].metadata.is_empty());
     }
 
     #[test]
@@ -3049,6 +3501,60 @@ mod tests {
         );
         assert_eq!(peers[0].screenshare, Some(remote_frame_key("5")));
         assert_eq!(membership.peer_by_mid.get("4"), Some(&3));
+    }
+
+    #[test]
+    fn decoupled_slots_put_each_kind_in_its_own_block() {
+        let mut membership = decoupled_membership();
+        let mut joined = member(3, "7", [0, 0, 0]);
+        joined.camera_active = true;
+        membership.apply(joined);
+
+        let camera = pool_assignment(RemoteKind::Camera, 1, 1, 10);
+        assert!(membership.assign_pool_slot(camera, false));
+        assert_eq!(membership.peers()[0].camera, Some(remote_frame_key("10")));
+        assert!(membership.slot_active("10"));
+
+        let misplaced = pool_assignment(RemoteKind::Camera, 1, 2, 4);
+        assert!(!membership.assign_pool_slot(misplaced, false));
+
+        let mut audio = pool_assignment(RemoteKind::Audio, 0, 2, 3);
+        audio.active = true;
+        assert!(membership.assign_pool_slot(audio, false));
+        assert_eq!(membership.peers()[0].audio, Some(remote_frame_key("3")));
+
+        assert!(membership.release_pool_slot(RemoteKind::Camera, 1, 1));
+        assert_eq!(membership.peers()[0].camera, None);
+        assert!(!membership.slot_active("10"));
+    }
+
+    #[test]
+    fn a_decoupled_member_brings_its_media_slots() {
+        let mut membership = decoupled_membership();
+        let mut joined = member(3, "7", [0, 0, 0]);
+        joined.screen_active = true;
+        joined.media_slots = Some(MediaSlots {
+            audio: Some(PoolSlot {
+                slot: 1,
+                generation: 1,
+                mid: 4,
+            }),
+            camera: None,
+            screen: Some(PoolSlot {
+                slot: 0,
+                generation: 1,
+                mid: 17,
+            }),
+        });
+        membership.apply(joined);
+
+        let peers = membership.peers();
+        assert_eq!(peers[0].audio, Some(remote_frame_key("4")));
+        assert_eq!(peers[0].screenshare, Some(remote_frame_key("17")));
+        assert_eq!(peers[0].camera, None);
+
+        membership.release_pool_slots_of(3);
+        assert_eq!(membership.peers()[0].screenshare, None);
     }
 
     #[test]

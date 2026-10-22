@@ -123,10 +123,13 @@ pub struct TopicDiscussion {
     pub channel_id: String,
     pub creator_id: String,
     pub last_sender_id: String,
+    pub last_sender_is_authoritative: bool,
+    pub last_message_id: String,
     pub content: String,
     pub last_message_content: String,
     pub last_message_attachments: Vec<crate::transport::ApiAttachment>,
     pub last_message_timestamp: u32,
+    pub unread_count: u32,
 }
 
 fn id_str(value: i64) -> String {
@@ -1090,6 +1093,15 @@ pub fn topic_discussion_from_api(t: api::SdTopic) -> TopicDiscussion {
         channel_id: id_str(t.channel_id),
         creator_id: id_str(t.creator_id),
         last_sender_id: id_str(last_sender_id),
+        last_sender_is_authoritative: t
+            .last_sent_message
+            .as_ref()
+            .is_some_and(|message| message.sender_id > 0),
+        last_message_id: t
+            .last_sent_message
+            .as_ref()
+            .map(|message| id_str(message.id))
+            .unwrap_or_default(),
         content: t.content.clone(),
         last_message_content: t
             .last_sent_message
@@ -1098,6 +1110,7 @@ pub fn topic_discussion_from_api(t: api::SdTopic) -> TopicDiscussion {
             .unwrap_or_default(),
         last_message_attachments: Vec::new(),
         last_message_timestamp,
+        unread_count: t.unread_count.max(0) as u32,
     }
 }
 
@@ -1660,9 +1673,11 @@ mod tests {
             channel_id: 5,
             content: "topic title".into(),
             update_time_seconds: 100,
+            unread_count: 3,
             ..Default::default()
         });
         assert_eq!(topic.id, "10");
+        assert_eq!(topic.unread_count, 3);
         assert_eq!(topic.message_id, "20");
         assert_eq!(topic.content, "topic title");
         assert_eq!(
@@ -1670,6 +1685,34 @@ mod tests {
             TopicReplyPreview::Text("topic title".into())
         );
         assert!(!topic.reply_is_attachment());
+        assert!(topic.last_message_id.is_empty());
+        assert!(!topic.last_sender_is_authoritative);
+        let latest = topic_discussion_from_api(api::SdTopic {
+            last_sent_message: Some(api::ChannelMessageHeader {
+                id: 30,
+                sender_id: 8,
+                content: "latest reply".into(),
+                timestamp_seconds: 200,
+            }),
+            ..Default::default()
+        });
+        assert_eq!(latest.last_message_id, "30");
+        assert!(latest.last_sender_is_authoritative);
+        let sparse = topic_discussion_from_api(api::SdTopic {
+            creator_id: 3,
+            last_sent_message: Some(api::ChannelMessageHeader {
+                id: 30,
+                ..Default::default()
+            }),
+            ..Default::default()
+        });
+        assert_eq!(sparse.last_sender_id, "3");
+        assert!(!sparse.last_sender_is_authoritative);
+        assert_eq!(latest.last_sender_id, "8");
+        assert_eq!(
+            latest.reply_preview(),
+            TopicReplyPreview::Text("latest reply".into())
+        );
     }
 
     #[test]

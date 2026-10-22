@@ -19,6 +19,7 @@ use crate::user_profile::{ProfileContext, resolve_user_profile};
 pub const GALLERY_CACHE_TTL: Duration = Duration::from_secs(60 * 60);
 /// Default page size (React gallery slice `limit = 50`).
 pub const GALLERY_PAGE_SIZE: i32 = 50;
+const GALLERY_EMPTY_PAGE_CHAIN: u8 = 10;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum MediaFilter {
@@ -134,7 +135,7 @@ impl ChannelAttachment {
     }
 
     pub fn is_media(&self) -> bool {
-        self.is_image || self.is_video
+        (self.is_image || self.is_video) && self.filetype != crate::message::STICKER_FILETYPE
     }
 
     pub fn seed_from_message(
@@ -262,16 +263,34 @@ pub async fn fetch_channel_attachments(
         .await?;
     let raw_count = list.len();
     let oldest_create_time = list.last().map(|a| a.create_time_seconds);
-    let attachments = list
+    let media: Vec<ChannelAttachment> = list
         .into_iter()
         .map(|a| ChannelAttachment::from_api(a, channel_id, clan_id, &cfg))
         .filter(ChannelAttachment::is_media)
         .collect();
+    let attachments = drop_denied_foreign_media(channel_id, media).await;
     Ok(FetchedChannelAttachments {
         attachments,
         raw_count,
         oldest_create_time,
     })
+}
+
+async fn drop_denied_foreign_media(
+    channel_id: ChannelId,
+    media: Vec<ChannelAttachment>,
+) -> Vec<ChannelAttachment> {
+    let denied = futures::future::join_all(media.iter().map(|attachment| async move {
+        mezon_client::cdn_signature::channel_of_url(&attachment.url)
+            .is_some_and(|source| source != channel_id.0)
+            && mezon_client::cdn_signature::access_denied(&attachment.url).await
+    }))
+    .await;
+    media
+        .into_iter()
+        .zip(denied)
+        .filter_map(|(attachment, denied)| (!denied).then_some(attachment))
+        .collect()
 }
 
 pub fn initial_page_has_more(raw_count: usize, limit: i32) -> bool {
@@ -280,6 +299,25 @@ pub fn initial_page_has_more(raw_count: usize, limit: i32) -> bool {
 
 pub fn next_page_has_more(raw_count: usize, limit: i32, new_items: usize) -> bool {
     initial_page_has_more(raw_count, limit) && new_items > 0
+}
+
+fn keeps_paging_past_empty_page(added: usize, has_more_before: bool, empty_pages: u8) -> bool {
+    added == 0 && has_more_before && empty_pages < GALLERY_EMPTY_PAGE_CHAIN
+}
+
+pub fn older_page_cursor(oldest: u32) -> u32 {
+    oldest.saturating_add(1)
+}
+
+pub fn older_page_has_more(
+    raw_count: usize,
+    limit: i32,
+    previous_oldest: Option<u32>,
+    page_oldest: Option<u32>,
+) -> bool {
+    initial_page_has_more(raw_count, limit)
+        && page_oldest
+            .is_some_and(|oldest| previous_oldest.is_none_or(|previous| oldest < previous))
 }
 
 /// Resolved uploader display info.
@@ -488,6 +526,8 @@ struct GalleryChannel {
     is_loading: bool,
     fetched_at: Option<Instant>,
     date_range: Option<(u32, u32)>,
+    oldest_fetched: Option<u32>,
+    empty_older_pages: u8,
 }
 
 impl GalleryChannel {
@@ -658,6 +698,8 @@ impl GalleryStore {
             channel.attachments.clear();
             channel.ids.clear();
             channel.date_range = None;
+            channel.oldest_fetched = None;
+            channel.empty_older_pages = 0;
             channel.fetched_at = None;
             channel.is_loading = false;
             channel.has_more_before = true;
@@ -701,8 +743,8 @@ impl GalleryStore {
             let channel = self.by_channel.get(&channel_id);
             match direction {
                 LoadDirection::Before => {
-                    if let Some(oldest) = channel.and_then(|c| c.attachments.last()) {
-                        before = oldest.create_time_seconds;
+                    if let Some(oldest) = channel.and_then(|c| c.oldest_fetched) {
+                        before = older_page_cursor(oldest);
                     }
                 }
                 LoadDirection::After => {
@@ -738,6 +780,7 @@ impl GalleryStore {
             let mapped_result = match result {
                 Ok(list) => {
                     let raw_count = list.len();
+                    let page_oldest = list.iter().map(|a| a.create_time_seconds).min();
                     let cfg = mapping_cfg.clone();
                     let mapped = cx
                         .background_executor()
@@ -754,15 +797,24 @@ impl GalleryStore {
                             }
                         })
                         .await;
-                    Ok((mapped, raw_count))
+                    let mapped = drop_denied_foreign_media(channel_id, mapped).await;
+                    Ok((mapped, raw_count, page_oldest))
                 }
                 Err(e) => Err(e),
             };
             let _ = this.update(cx, |this, cx| {
                 let entry = this.by_channel.entry(channel_id).or_default();
                 entry.is_loading = false;
+                let mut page_past_empty = false;
                 match mapped_result {
-                    Ok((mapped, raw_count)) => {
+                    Ok((mapped, raw_count, page_oldest)) => {
+                        let previous_oldest = if reset { None } else { entry.oldest_fetched };
+                        if reset || direction == LoadDirection::Before {
+                            entry.oldest_fetched = match (previous_oldest, page_oldest) {
+                                (Some(previous), Some(page)) => Some(previous.min(page)),
+                                (previous, page) => page.or(previous),
+                            };
+                        }
                         let added = merge_attachments(
                             &mut entry.attachments,
                             &mut entry.ids,
@@ -775,15 +827,32 @@ impl GalleryStore {
                                 initial_page_has_more(raw_count, GALLERY_PAGE_SIZE);
                             entry.has_more_after = false;
                         } else {
-                            let has_more = next_page_has_more(raw_count, GALLERY_PAGE_SIZE, added);
                             match direction {
                                 LoadDirection::Before => {
-                                    entry.has_more_before = has_more;
+                                    entry.has_more_before = older_page_has_more(
+                                        raw_count,
+                                        GALLERY_PAGE_SIZE,
+                                        previous_oldest,
+                                        page_oldest,
+                                    );
                                 }
                                 LoadDirection::After => {
-                                    entry.has_more_after = has_more;
+                                    entry.has_more_after =
+                                        next_page_has_more(raw_count, GALLERY_PAGE_SIZE, added);
                                 }
                             }
+                        }
+                        if reset || direction == LoadDirection::Before {
+                            entry.empty_older_pages = match (added, reset) {
+                                (0, true) => 1,
+                                (0, false) => entry.empty_older_pages.saturating_add(1),
+                                _ => 0,
+                            };
+                            page_past_empty = keeps_paging_past_empty_page(
+                                added,
+                                entry.has_more_before,
+                                entry.empty_older_pages,
+                            );
                         }
                         entry.fetched_at = Some(Instant::now());
                     }
@@ -793,6 +862,10 @@ impl GalleryStore {
                 }
                 cx.emit(GalleryEvent::Changed(channel_id));
                 cx.notify();
+                if page_past_empty {
+                    let range = this.by_channel.get(&channel_id).and_then(|c| c.date_range);
+                    this.fetch(clan_id, channel_id, range, LoadDirection::Before, false, cx);
+                }
             });
         })
         .detach();
@@ -904,6 +977,111 @@ mod tests {
             uploader_avatar: SharedString::default(),
             uploader_avatar_raw: SharedString::default(),
         }
+    }
+
+    #[test]
+    fn stickers_and_panel_gifs_are_left_out_of_the_gallery() {
+        use mezon_client::transport::ApiChannelAttachment;
+
+        let cfg = AppConfig::dev_defaults();
+        let from = |url: &str, filetype: &str| {
+            ChannelAttachment::from_api(
+                ApiChannelAttachment {
+                    url: url.into(),
+                    filetype: filetype.into(),
+                    ..ApiChannelAttachment::default()
+                },
+                ChannelId(1),
+                ClanId(1),
+                &cfg,
+            )
+        };
+        let sticker = from("https://cdn.mezon.ai/stickers/7.webp", "sticker");
+        let panel_gif = from("https://static.klipy.com/ii/abc/0b/d4/cat.gif", "sticker");
+        let uploaded_gif = from("https://cdn.mezon.ai/1/2/cat.gif", "image/gif");
+        let photo = from("https://cdn.mezon.ai/1/2/photo.png", "image/png");
+
+        assert!(!sticker.is_media());
+        assert!(!panel_gif.is_media());
+        assert!(uploaded_gif.is_media());
+        assert!(photo.is_media());
+    }
+
+    #[test]
+    fn paging_keeps_photos_behind_a_sticker_page_and_a_split_message() {
+        let sticker = |id: i64, ts: u32| ChannelAttachment {
+            is_image: true,
+            ..att(id, ts, "sticker")
+        };
+        let rows = [
+            att(10, 100, "image/png"),
+            sticker(9, 90),
+            sticker(8, 89),
+            sticker(7, 88),
+            sticker(12, 87),
+            att(6, 80, "application/pdf"),
+            att(5, 80, "image/png"),
+            att(4, 70, "image/png"),
+        ];
+        let server_page = |before: u32| -> Vec<ChannelAttachment> {
+            rows.iter()
+                .filter(|a| before == 0 || a.create_time_seconds < before)
+                .take(3)
+                .cloned()
+                .collect()
+        };
+        let mut kept = Vec::new();
+        let mut ids = std::collections::HashSet::new();
+        let mut oldest: Option<u32> = None;
+        let mut has_more = true;
+        let mut pages = 0;
+        while has_more && pages < 10 {
+            let page = server_page(oldest.map_or(0, older_page_cursor));
+            let page_oldest = page.iter().map(|a| a.create_time_seconds).min();
+            has_more = older_page_has_more(page.len(), 3, oldest, page_oldest);
+            oldest = page_oldest.or(oldest);
+            let media = page
+                .into_iter()
+                .filter(ChannelAttachment::is_media)
+                .collect();
+            merge_attachments(
+                &mut kept,
+                &mut ids,
+                media,
+                pages == 0,
+                LoadDirection::Before,
+            );
+            pages += 1;
+        }
+        let kept_ids: Vec<i64> = kept.iter().map(|a| a.id).collect();
+        assert_eq!(kept_ids, vec![10, 5, 4]);
+        assert!(pages < 10);
+    }
+
+    #[test]
+    fn a_first_page_of_only_stickers_fetches_on_by_itself() {
+        assert!(keeps_paging_past_empty_page(0, true, 1));
+        assert!(keeps_paging_past_empty_page(
+            0,
+            true,
+            GALLERY_EMPTY_PAGE_CHAIN - 1
+        ));
+        assert!(!keeps_paging_past_empty_page(
+            0,
+            true,
+            GALLERY_EMPTY_PAGE_CHAIN
+        ));
+        assert!(!keeps_paging_past_empty_page(1, true, 1));
+        assert!(!keeps_paging_past_empty_page(0, false, 1));
+    }
+
+    #[test]
+    fn a_page_of_only_stickers_still_lets_older_media_load() {
+        assert!(older_page_has_more(50, 50, Some(2_000), Some(1_500)));
+        assert!(older_page_has_more(50, 50, None, Some(1_500)));
+        assert!(!older_page_has_more(50, 50, Some(1_500), Some(1_500)));
+        assert!(!older_page_has_more(12, 50, Some(2_000), Some(1_500)));
+        assert!(!older_page_has_more(50, 50, Some(2_000), None));
     }
 
     #[test]
@@ -1084,6 +1262,36 @@ mod tests {
             "application/pdf",
             "https://cdn.example/a.pdf"
         ));
+    }
+
+    #[test]
+    fn denied_media_from_another_channel_is_dropped_but_a_channels_own_media_stays() {
+        crate::cdn_test_signer::install();
+        let with_url = |id: i64, url: &str| ChannelAttachment {
+            url: url.to_string(),
+            ..att(id, 1, "image/png")
+        };
+        let open_channel = ChannelId(0x1cb1_64db_dac0_1000);
+        let kept = futures::executor::block_on(drop_denied_foreign_media(
+            open_channel,
+            vec![
+                with_url(1, "https://cdn.example/1cb164dbdac01000/1_own.png"),
+                with_url(2, "https://cdn.example/1cb164dbdac01001/2_forwarded.png"),
+                with_url(3, "https://cdn.example/1cb164dbdac01002/3_forwarded.png"),
+                with_url(4, "https://cdn.example/1840673171137630208/4_legacy.png"),
+            ],
+        ));
+        assert_eq!(kept.iter().map(|a| a.id).collect::<Vec<_>>(), vec![1, 3, 4]);
+
+        let denied_channel = ChannelId(crate::cdn_test_signer::DENIED_CHANNEL);
+        let own = futures::executor::block_on(drop_denied_foreign_media(
+            denied_channel,
+            vec![with_url(
+                5,
+                "https://cdn.example/1cb164dbdac01001/5_own.png",
+            )],
+        ));
+        assert_eq!(own.len(), 1, "a channel's own media is never filtered");
     }
 
     #[test]

@@ -52,9 +52,11 @@ pub enum Route {
     SettingsDevices,
     SettingsAppearance,
     SettingsActivity,
+    SettingsChat,
     SettingsNotifications,
     SettingsLanguage,
     SettingsVoice,
+    SettingsServer,
     SettingsAdvanced,
     ClanSettings {
         clan_id: ClanId,
@@ -133,9 +135,11 @@ impl Route {
             Route::SettingsDevices => "/settings/devices".to_string(),
             Route::SettingsAppearance => "/settings/appearance".to_string(),
             Route::SettingsActivity => "/settings/activity".to_string(),
+            Route::SettingsChat => "/settings/chat".to_string(),
             Route::SettingsNotifications => "/settings/notifications".to_string(),
             Route::SettingsLanguage => "/settings/language".to_string(),
             Route::SettingsVoice => "/settings/voice".to_string(),
+            Route::SettingsServer => "/settings/server".to_string(),
             Route::SettingsAdvanced => "/settings/advanced".to_string(),
             Route::ClanSettings { clan_id, page } => {
                 format!("/chat/clans/{}/settings/{}", clan_id.get(), page.slug())
@@ -240,9 +244,11 @@ impl Route {
             ["settings", "devices"] => Route::SettingsDevices,
             ["settings", "appearance"] => Route::SettingsAppearance,
             ["settings", "activity"] => Route::SettingsActivity,
+            ["settings", "chat"] => Route::SettingsChat,
             ["settings", "notifications"] => Route::SettingsNotifications,
             ["settings", "language"] => Route::SettingsLanguage,
             ["settings", "voice"] => Route::SettingsVoice,
+            ["settings", "server"] => Route::SettingsServer,
             ["settings", "advanced"] => Route::SettingsAdvanced,
             ["chat", "clans", clan_id, "settings"] => Route::ClanSettings {
                 clan_id: clan_id.parse().ok()?,
@@ -563,6 +569,12 @@ mod tests {
             Route::from_path("/settings/profile"),
             Route::SettingsProfile
         );
+    }
+
+    #[test]
+    fn settings_server_round_trips_through_its_path() {
+        assert_eq!(Route::from_path("/settings/server"), Route::SettingsServer);
+        assert_eq!(Route::SettingsServer.to_path(), "/settings/server");
     }
 
     #[test]

@@ -83,6 +83,10 @@ impl<K: Eq + Hash + Clone, V> KeyedCache<K, V> {
         self.entries.iter().map(|(k, e)| (k, &e.value))
     }
 
+    pub fn iter_mut(&mut self) -> impl Iterator<Item = (&K, &mut V)> {
+        self.entries.iter_mut().map(|(k, e)| (k, &mut e.value))
+    }
+
     /// Insert (or replace) `key` with a fresh timestamp; evicts the LRU entry past `max`,
     /// never evicting `protect` (e.g. the active channel).
     pub fn insert(&mut self, key: K, value: V, protect: Option<&K>) {

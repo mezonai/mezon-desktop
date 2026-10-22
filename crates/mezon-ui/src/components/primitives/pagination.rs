@@ -76,9 +76,10 @@ pub fn pagination_button(
         } else {
             theme.brand
         })
-        .text_color(match button {
-            PaginationButton::Page(_) => gpui::Hsla::from(theme.text_primary),
-            PaginationButton::Previous | PaginationButton::Next => gpui::white(),
+        .text_color(match (button, selected) {
+            (PaginationButton::Page(_), true) => gpui::Hsla::from(theme.text_primary),
+            (PaginationButton::Page(_), false) => gpui::white(),
+            (PaginationButton::Previous | PaginationButton::Next, _) => gpui::white(),
         })
         .when(disabled, |element| element.opacity(0.5))
         .when(!disabled, |element| element.cursor_pointer())

@@ -1201,6 +1201,10 @@ impl X11WindowStatePtr {
         }
     }
 
+    pub fn has_input_handler(&self) -> bool {
+        self.state.borrow().input_handler.is_some()
+    }
+
     pub fn handle_ime_commit(&self, text: String) {
         if self.is_blocked() {
             return;

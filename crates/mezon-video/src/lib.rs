@@ -10,14 +10,22 @@ mod image_scale_windows;
 mod linux;
 #[cfg(target_os = "macos")]
 mod macos;
+#[cfg(target_os = "macos")]
+mod matroska_remux;
 #[cfg(not(target_os = "macos"))]
 mod poster;
 #[cfg(target_os = "linux")]
 mod poster_fallback;
+#[cfg(target_os = "macos")]
+mod remux_cache;
 #[cfg(not(target_os = "macos"))]
 mod render_frame;
 #[cfg(not(any(target_os = "macos", target_os = "linux", windows)))]
 mod unsupported;
+#[cfg(target_os = "macos")]
+mod webm_frame_macos;
+#[cfg(any(windows, target_os = "macos"))]
+mod webm_player;
 #[cfg(windows)]
 #[path = "windows.rs"]
 mod windows_impl;
@@ -44,6 +52,8 @@ pub enum PlayerError {
     InvalidUrl,
     #[error("could not open media for playback")]
     Open,
+    #[error("a gstreamer plugin needed for playback is missing")]
+    MissingPlugin,
 }
 
 #[derive(Debug, Clone)]
@@ -112,6 +122,58 @@ pub fn scaled_image_decode_path(_path: &std::path::Path, _max_px: u32) -> Option
     None
 }
 
+pub fn needs_prepared_open(url: &str) -> bool {
+    #[cfg(target_os = "macos")]
+    {
+        remux_cache::is_matroska_source(url)
+    }
+    #[cfg(windows)]
+    {
+        webm_player::is_webm_source(url)
+    }
+    #[cfg(not(any(windows, target_os = "macos")))]
+    {
+        let _ = url;
+        false
+    }
+}
+
+#[cfg(any(windows, target_os = "macos"))]
+pub struct PreparedVideo {
+    inner: PreparedInner,
+    max_size: Option<(u32, u32)>,
+}
+
+#[cfg(any(windows, target_os = "macos"))]
+enum PreparedInner {
+    Webm(Box<webm_player::WebmPlayerImpl>),
+    #[cfg(target_os = "macos")]
+    Remuxed(std::path::PathBuf),
+    #[cfg(windows)]
+    MediaFoundation(platform::MediaFoundationSource),
+}
+
+#[cfg(any(windows, target_os = "macos"))]
+impl PreparedVideo {
+    pub fn open(url: &str, max_size: Option<(u32, u32)>) -> Result<Self, PlayerError> {
+        #[cfg(target_os = "macos")]
+        let inner = match remux_cache::prepare(url)? {
+            remux_cache::PreparedSource::Remuxed(path) => PreparedInner::Remuxed(path),
+            remux_cache::PreparedSource::Vp8(bytes) => PreparedInner::Webm(Box::new(
+                webm_player::WebmPlayerImpl::open_bytes(bytes, max_size)?,
+            )),
+        };
+        #[cfg(windows)]
+        let inner = match platform::prepare_media_foundation(url) {
+            Some(source) => PreparedInner::MediaFoundation(source),
+            None => {
+                PreparedInner::Webm(Box::new(webm_player::WebmPlayerImpl::open(url, max_size)?))
+            }
+        };
+        Ok(Self { inner, max_size })
+    }
+}
+
 pub struct VideoPlayer {
     inner: platform::PlayerImpl,
 }
@@ -119,6 +181,31 @@ pub struct VideoPlayer {
 impl VideoPlayer {
     pub fn open(url: &str, max_size: Option<(u32, u32)>) -> Result<Self, PlayerError> {
         let inner = platform::PlayerImpl::open(url, max_size)?;
+        Ok(Self { inner })
+    }
+
+    #[cfg(any(windows, target_os = "macos"))]
+    pub fn from_prepared(prepared: PreparedVideo) -> Result<Self, PlayerError> {
+        let inner = match prepared.inner {
+            PreparedInner::Webm(player) => platform::PlayerImpl::from_webm(*player),
+            #[cfg(target_os = "macos")]
+            PreparedInner::Remuxed(path) => {
+                platform::PlayerImpl::open_file(&path, prepared.max_size)?
+            }
+            #[cfg(windows)]
+            PreparedInner::MediaFoundation(source) => {
+                platform::PlayerImpl::from_media_foundation(source, prepared.max_size)?
+            }
+        };
+        Ok(Self { inner })
+    }
+
+    #[cfg(any(windows, target_os = "macos"))]
+    pub fn open_webm_bytes(
+        bytes: Vec<u8>,
+        max_size: Option<(u32, u32)>,
+    ) -> Result<Self, PlayerError> {
+        let inner = platform::PlayerImpl::from_webm_bytes(bytes, max_size)?;
         Ok(Self { inner })
     }
 
@@ -169,4 +256,36 @@ impl VideoPlayer {
     pub fn failed(&self) -> bool {
         self.inner.failed()
     }
+
+    pub fn missing_plugin(&self) -> bool {
+        #[cfg(target_os = "linux")]
+        {
+            self.inner.missing_plugin()
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            false
+        }
+    }
+}
+
+pub fn plugin_install_command() -> Option<&'static str> {
+    #[cfg(target_os = "linux")]
+    {
+        linux::plugin_install_command()
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        None
+    }
+}
+
+pub fn rescan_plugins() {
+    #[cfg(target_os = "linux")]
+    linux::rescan_plugins();
+}
+
+#[cfg(any(windows, target_os = "macos"))]
+pub fn load_webm_bytes(url: &str) -> Result<Vec<u8>, PlayerError> {
+    webm_player::load_webm_bytes(url)
 }

@@ -68,7 +68,7 @@ pub(super) struct ClanDragPreview {
 }
 
 impl Render for ClanDragPreview {
-    fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let size = px(CLAN_AVATAR_PX);
         let radius = px(CLAN_AVATAR_RADIUS);
         if let Some(avatar) = self.avatar.clone() {
@@ -87,6 +87,7 @@ impl Render for ClanDragPreview {
                 bg = bg.grayscale();
             }
             div()
+                .font_family(crate::theme::ui_font_family(cx))
                 .opacity(0.8)
                 .child(initials_tile(
                     size,

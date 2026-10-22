@@ -802,7 +802,7 @@ pub(crate) fn render_poll_card_readonly(
         .into_any_element()
 }
 
-fn render_poll_label_plain(
+pub(super) fn render_poll_label_plain(
     answer: &PollAnswerView,
     poll_id: i64,
     position: usize,
@@ -822,6 +822,7 @@ fn render_poll_label_plain(
                     img(src.clone())
                         .w(px(20.))
                         .h(px(20.))
+                        .flex_shrink_0()
                         .aspect_square()
                         .object_fit(ObjectFit::Contain)
                         .image_cache(image_cache)

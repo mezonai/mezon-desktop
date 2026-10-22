@@ -248,6 +248,7 @@ fn process_reverse(apm: &mut AudioProcessingModule, mut chunk: ReverseChunk) {
     let _ = apm.process_reverse_stream(&mut chunk.data, chunk.rate, chunk.channels);
 }
 
+#[allow(clippy::too_many_arguments)]
 fn process_capture_dual(
     apm: &mut AudioProcessingModule,
     apm_for_mezon_ns: &mut AudioProcessingModule,
@@ -255,6 +256,7 @@ fn process_capture_dual(
     mic_tx: &flume::Sender<Vec<i16>>,
     mut chunk: CaptureChunk,
     mezon_ns_requested: &AtomicBool,
+    mezon_ns_ready: &AtomicBool,
 ) {
     for _ in 0..MAX_REVERSE_DRAIN_PER_CAPTURE {
         let Ok(render) = reverse_rx.try_recv() else {
@@ -268,11 +270,12 @@ fn process_capture_dual(
     let mut mezon_input = chunk.data.clone();
     let _ = apm.process_stream(&mut chunk.data, chunk.rate, chunk.channels);
     let _ = apm_for_mezon_ns.process_stream(&mut mezon_input, chunk.rate, chunk.channels);
-    let chosen = if mezon_ns_requested.load(Ordering::Acquire) {
-        mezon_input
-    } else {
-        chunk.data
-    };
+    let chosen =
+        if mezon_ns_requested.load(Ordering::Acquire) && mezon_ns_ready.load(Ordering::Acquire) {
+            mezon_input
+        } else {
+            chunk.data
+        };
     let _ = mic_tx.try_send(chosen);
 }
 
@@ -281,6 +284,7 @@ fn run_apm(
     reverse_rx: flume::Receiver<ReverseChunk>,
     mic_tx: flume::Sender<Vec<i16>>,
     mezon_ns_requested: Arc<AtomicBool>,
+    mezon_ns_ready: Arc<AtomicBool>,
 ) {
     enum Event {
         Capture(CaptureChunk),
@@ -288,8 +292,8 @@ fn run_apm(
         Stop,
     }
     let mut apm = AudioProcessingModule::new(true, true, true, true);
-    // Keep the same automatic mic level as the normal path. Mezon-NS replaces
-    // WebRTC's noise suppression, not its gain control.
+    // Retain microphone gain before denoising, so enabling NS does not remove
+    // the level boost used by normal audio. Post-filter gain remains fixed.
     let mut apm_for_mezon_ns = AudioProcessingModule::new(true, true, true, false);
     loop {
         match capture_rx.try_recv() {
@@ -301,6 +305,7 @@ fn run_apm(
                     &mic_tx,
                     chunk,
                     &mezon_ns_requested,
+                    &mezon_ns_ready,
                 );
                 continue;
             }
@@ -328,6 +333,7 @@ fn run_apm(
                     &mic_tx,
                     chunk,
                     &mezon_ns_requested,
+                    &mezon_ns_ready,
                 );
             }
             Event::Stop => break,
@@ -335,7 +341,7 @@ fn run_apm(
     }
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct AudioFormat {
     pub sample_rate: u32,
     pub channels: u32,
@@ -465,6 +471,7 @@ impl AudioIo {
             output_device_id,
             record_taps,
             Arc::new(AtomicBool::new(false)),
+            Arc::new(AtomicBool::new(false)),
         )
     }
 
@@ -473,6 +480,7 @@ impl AudioIo {
         output_device_id: Option<String>,
         record_taps: crate::record::RecordTaps,
         mezon_ns_requested: Arc<AtomicBool>,
+        mezon_ns_ready: Arc<AtomicBool>,
     ) -> Result<Self> {
         let mixer = Arc::new(PlaybackMixer::new(record_taps));
         let (mic_tx, mic_rx) = flume::bounded::<Vec<i16>>(128);
@@ -490,7 +498,13 @@ impl AudioIo {
             .name("mezon-voice-apm".into())
             .spawn(move || {
                 let _exit = WorkerExitSignal(apm_stopped_tx);
-                run_apm(capture_rx, reverse_rx, mic_tx, mezon_ns_requested);
+                run_apm(
+                    capture_rx,
+                    reverse_rx,
+                    mic_tx,
+                    mezon_ns_requested,
+                    mezon_ns_ready,
+                );
             })?;
 
         let mixer_for_thread = mixer.clone();
@@ -548,6 +562,7 @@ impl AudioIo {
                 let mut output_absent_streak: u32 = 0;
                 let mut input_absent_streak: u32 = 0;
                 let mut current_in_fmt: Option<AudioFormat> = None;
+                let mut in_stream_device_id: Option<String> = None;
                 let mut output_stall_recovery = StallRecovery::new(&output_heartbeat);
                 let mut input_stall_recovery = StallRecovery::new(&input_heartbeat);
                 let mut active_default_output_id = if current_output_id.is_none() {
@@ -657,6 +672,14 @@ impl AudioIo {
                             }
                             bluetooth_release_at = None;
                             capture_started = true;
+                            if in_stream.is_some()
+                                && input_stream_orphaned(&host, in_stream_device_id.as_deref())
+                            {
+                                in_alive.store(false, Ordering::Relaxed);
+                                if let Some(old) = in_stream.take() {
+                                    drop_stream_detached(old);
+                                }
+                            }
                             if in_stream.is_none() {
                                 request_macos_microphone_permission();
                                 let new_alive = Arc::new(AtomicBool::new(true));
@@ -676,6 +699,10 @@ impl AudioIo {
                                         in_alive.store(false, Ordering::Relaxed);
                                         in_alive = new_alive;
                                         input_bluetooth = bluetooth;
+                                        in_stream_device_id = input_stream_device_id(
+                                            &host,
+                                            current_input_id.as_deref(),
+                                        );
                                         input_healthy = true;
                                         in_rebuild_pending.store(false, Ordering::Relaxed);
                                         if input_format_changed(current_in_fmt, in_fmt) {
@@ -757,6 +784,8 @@ impl AudioIo {
                                     in_alive = new_alive;
                                     current_input_id = device_id;
                                     input_bluetooth = bluetooth;
+                                    in_stream_device_id =
+                                        input_stream_device_id(&host, current_input_id.as_deref());
                                     if let Some(old) = in_stream.take() {
                                         drop_stream_detached(old);
                                     }
@@ -778,6 +807,10 @@ impl AudioIo {
                                                 in_alive = restored_alive;
                                                 in_stream = Some(stream);
                                                 input_bluetooth = bluetooth;
+                                                in_stream_device_id = input_stream_device_id(
+                                                    &host,
+                                                    current_input_id.as_deref(),
+                                                );
                                                 input_running = running;
                                                 input_healthy = true;
                                                 if input_format_changed(current_in_fmt, fmt) {
@@ -905,6 +938,8 @@ impl AudioIo {
                                     in_alive.store(false, Ordering::Relaxed);
                                     in_alive = new_alive;
                                     input_bluetooth = bluetooth;
+                                    in_stream_device_id =
+                                        input_stream_device_id(&host, current_input_id.as_deref());
                                     if let Some(old) = in_stream.take() {
                                         drop_stream_detached(old);
                                     }
@@ -1051,17 +1086,11 @@ impl AudioIo {
 
 impl Drop for AudioIo {
     fn drop(&mut self) {
-        let started = Instant::now();
-        let deadline = started + AUDIO_SHUTDOWN_TIMEOUT;
+        let deadline = Instant::now() + AUDIO_SHUTDOWN_TIMEOUT;
         let _ = self.ctrl_tx.send(AudioCmd::Shutdown);
         let audio_stopped = wait_for_worker(&self.audio_stopped_rx, deadline);
         let apm_stopped = wait_for_worker(&self.apm_stopped_rx, deadline);
-        if audio_stopped && apm_stopped {
-            tracing::debug!(
-                elapsed_ms = started.elapsed().as_millis(),
-                "voice audio workers stopped"
-            );
-        } else {
+        if !audio_stopped || !apm_stopped {
             tracing::warn!(
                 audio_stopped,
                 apm_stopped,
@@ -1255,7 +1284,7 @@ enum OutputRebuild {
     },
 }
 
-fn output_device_absent(id: &str) -> bool {
+pub(crate) fn output_device_absent(id: &str) -> bool {
     let host = cpal::default_host();
     match host.output_devices() {
         Ok(mut devices) => {
@@ -1387,7 +1416,7 @@ fn select_input(host: &cpal::Host, id: Option<&str>) -> Result<cpal::Device> {
         .ok_or_else(|| anyhow!("no audio input device available"))
 }
 
-fn default_output_id(host: &cpal::Host) -> Option<String> {
+pub(crate) fn default_output_id(host: &cpal::Host) -> Option<String> {
     host.default_output_device()
         .and_then(|device| device.id().ok())
         .map(|id| id.to_string())
@@ -1460,6 +1489,29 @@ fn input_device_absent(host: &cpal::Host, id: &str) -> bool {
         }
         Err(_) => false,
     }
+}
+
+fn default_input_id(host: &cpal::Host) -> Option<String> {
+    host.default_input_device()
+        .and_then(|device| device.id().ok())
+        .map(|id| id.to_string())
+}
+
+fn input_stream_device_id(host: &cpal::Host, requested: Option<&str>) -> Option<String> {
+    requested
+        .map(str::to_string)
+        .or_else(|| default_input_id(host))
+}
+
+fn input_stream_orphaned(host: &cpal::Host, device_id: Option<&str>) -> bool {
+    cfg!(target_os = "macos")
+        && device_id.is_some_and(|id| {
+            default_input_id(host).as_deref() != Some(id)
+                && host.devices().is_ok_and(|mut devices| {
+                    !devices
+                        .any(|device| matches!(device.id(), Ok(found) if found.to_string() == id))
+                })
+        })
 }
 
 fn rebuild_input_stream(

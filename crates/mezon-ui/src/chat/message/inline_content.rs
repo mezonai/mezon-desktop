@@ -4,9 +4,9 @@ use std::ops::Range;
 use std::rc::Rc;
 
 use gpui::{
-    App, Bounds, CursorStyle, DispatchPhase, Element, ElementId, FontWeight, GlobalElementId,
-    HighlightStyle, Hitbox, HitboxBehavior, Hsla, InspectorElementId, IntoElement, LayoutId,
-    MouseDownEvent, MouseUpEvent, Pixels, SharedString, StyledText, TextLayout,
+    AnyElement, App, Bounds, CursorStyle, DispatchPhase, Element, ElementId, FontWeight,
+    GlobalElementId, HighlightStyle, Hitbox, HitboxBehavior, Hsla, InspectorElementId, IntoElement,
+    LayoutId, MouseDownEvent, MouseUpEvent, Pixels, SharedString, StyledText, TextLayout,
     TransformationMatrix, Window, point, px, size,
 };
 
@@ -39,6 +39,13 @@ pub struct IconOverlay {
     pub color: Hsla,
 }
 
+pub struct ImageOverlay {
+    pub byte_index: usize,
+    pub size: Pixels,
+    pub element: AnyElement,
+    pub prepainted: bool,
+}
+
 pub struct ClickRegion {
     pub range: Range<usize>,
     pub action: Box<dyn Fn(&mut Window, &mut App)>,
@@ -53,8 +60,10 @@ pub struct InlineContent {
     element_id: ElementId,
     styled: StyledText,
     icons: Vec<IconOverlay>,
+    images: Vec<ImageOverlay>,
     clicks: Vec<ClickRegion>,
     selection_state: SharedSelection,
+    cursor_style: CursorStyle,
 }
 
 impl InlineContent {
@@ -77,9 +86,21 @@ impl InlineContent {
             element_id: id.into(),
             styled,
             icons,
+            images: Vec::new(),
             clicks,
             selection_state,
+            cursor_style: CursorStyle::IBeam,
         }
+    }
+
+    pub fn cursor_style(mut self, cursor_style: CursorStyle) -> Self {
+        self.cursor_style = cursor_style;
+        self
+    }
+
+    pub fn image_overlays(mut self, images: Vec<ImageOverlay>) -> Self {
+        self.images = images;
+        self
     }
 
     pub fn text_layout(&self) -> TextLayout {
@@ -157,6 +178,30 @@ impl Element for InlineContent {
     ) -> Hitbox {
         self.styled
             .prepaint(None, inspector_id, bounds, state, window, cx);
+        let text_layout = self.styled.layout().clone();
+        let line_height = text_layout.line_height();
+        for overlay in &mut self.images {
+            overlay.prepainted = false;
+            let Some(position) = text_layout.position_for_index(overlay.byte_index) else {
+                continue;
+            };
+            let line = text_layout.line_layout_for_index(overlay.byte_index);
+            let image_size = overlay.size.min(line_height);
+            let baseline = line
+                .map(|line| {
+                    let ascent = line.unwrapped_layout.ascent;
+                    let descent = line.unwrapped_layout.descent;
+                    (line_height - ascent - descent) / 2. + ascent
+                })
+                .unwrap_or(line_height);
+            overlay.element.prepaint_as_root(
+                point(position.x, position.y + baseline - image_size),
+                size(image_size, image_size).into(),
+                window,
+                cx,
+            );
+            overlay.prepainted = true;
+        }
         window.insert_hitbox(bounds, HitboxBehavior::Normal)
     }
 
@@ -176,7 +221,7 @@ impl Element for InlineContent {
             let state = state.unwrap_or_default();
 
             let mouse_position = window.mouse_position();
-            window.set_cursor_style(CursorStyle::IBeam, hitbox);
+            window.set_cursor_style(self.cursor_style, hitbox);
             if let Some(Ok(ix)) = text_layout.try_index_for_position(mouse_position)
                 && self.clicks.iter().any(|region| region.range.contains(&ix))
             {
@@ -294,6 +339,11 @@ impl Element for InlineContent {
                     overlay.color,
                     cx,
                 );
+            }
+            for overlay in &mut self.images {
+                if overlay.prepainted {
+                    overlay.element.paint(window, cx);
+                }
             }
 
             ((), state)

@@ -25,6 +25,7 @@ use crate::theme::ActiveTheme;
 
 struct MessagePreview {
     sender_label: SharedString,
+    is_anonymous: bool,
     avatar_src: Option<SharedString>,
     avatar_fallback: Option<SharedString>,
     body: gpui::AnyElement,
@@ -365,6 +366,7 @@ fn preview_from_message(
 
     MessagePreview {
         sender_label,
+        is_anonymous: mezon_store::is_anonymous_sender_id(&msg.sender_id, cx),
         avatar_src,
         avatar_fallback,
         body: render_pin_message_preview(msg, theme, locale, image_cache, ogp_cache, cx),
@@ -401,7 +403,8 @@ fn preview_from_pin(
             resolve_pin_avatar_url(&pin.sender_id, &pin.avatar_url, clan_id, channel_id, cx);
         if !from_member.is_empty() {
             from_member
-        } else if let Ok(message_id) = pin.message_id.parse::<MessageId>()
+        } else if !pin.has_authoritative_empty_avatar(cx)
+            && let Ok(message_id) = pin.message_id.parse::<MessageId>()
             && let Some(msg) = find_channel_message(message_id, channel_id, cx)
             && !msg.avatar_url.is_empty()
         {
@@ -415,6 +418,7 @@ fn preview_from_pin(
 
     MessagePreview {
         sender_label,
+        is_anonymous: mezon_store::is_anonymous_sender_id(&pin.sender_id, cx),
         avatar_src,
         avatar_fallback,
         body: render_pinned_message_preview(pin, theme, locale, image_cache, ogp_cache, cx),
@@ -447,6 +451,7 @@ fn render_preview(
 
     let mut avatar = Avatar::new()
         .name(&preview.sender_label)
+        .anonymous(preview.is_anonymous && preview.avatar_src.is_none())
         .with_size(Size::Small)
         .image_cache(avatar_cache);
     if let Some(src) = &preview.avatar_src {

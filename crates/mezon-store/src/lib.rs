@@ -10,6 +10,7 @@ pub mod buzz;
 pub mod cache;
 pub mod call;
 pub mod canvas;
+pub mod cdn_access;
 pub mod channel;
 pub mod channel_media;
 pub mod channel_members;
@@ -24,6 +25,7 @@ pub mod compose;
 pub mod config;
 pub mod connection;
 pub mod ctrlk_search;
+pub mod desktop_draw;
 pub mod dialog;
 pub mod direct;
 pub mod emoji;
@@ -56,7 +58,9 @@ pub mod presence;
 pub mod presign;
 pub mod quick_menu;
 pub mod realtime;
+pub mod realtime_server;
 pub mod roles;
+pub mod screen_draw;
 pub mod sprite_atlas;
 pub mod sticker;
 pub mod stream;
@@ -113,6 +117,7 @@ pub use buzz::BuzzStore;
 pub use cache::{Freshness, KeyedCache};
 pub use call::{CallPeer, CallPhase, CallStore, MediaFlags, MediaKind};
 pub use canvas::{CanvasDetail, CanvasStore, CanvasSummary, UploadedCanvasImage, canvas_web_link};
+pub use cdn_access::{CdnAccess, hides_media};
 pub use channel::*;
 pub use channel_media::{
     CHANNEL_MEDIA_CACHE_TTL, CHANNEL_MEDIA_PAGE_SIZE, ChannelMediaEvent, ChannelMediaStore,
@@ -140,7 +145,9 @@ pub use config::{AppConfig, sticker_display_dimensions, sticker_search_display_d
 pub use connection::{ConnectionStore, resolve_initial_auth_state};
 pub use ctrlk_search::{
     CtrlKChannel, CtrlKSearchEvent, CtrlKSearchState, CtrlKSearchStore, CtrlKSearchType, CtrlKUser,
+    SEARCH_CTRL_K_MAX_TEXT_BYTES,
 };
+pub use desktop_draw::DesktopDraw;
 pub use direct::{
     DirectChannel, DirectEvent, DirectKind, DirectMessageBody, DirectMessageStore,
     dm_counts_toward_unread_badge,
@@ -148,9 +155,9 @@ pub use direct::{
 pub use emoji::{
     EMOJI_SHORTNAME_MAX, EMOJI_UPLOAD_MAX_PX, EMOTICON_ALLOWED_EXTENSIONS, EMOTICON_SHORTNAME_MAX,
     EMOTICON_SHORTNAME_MIN, Emoji, EmojiEvent, EmojiStore, EmoticonError, EmoticonErrorKind,
-    MAX_EMOJI_BYTES, MAX_STICKER_BYTES, STICKER_UPLOAD_MAX_PX, generate_snowflake_id,
-    is_valid_emoticon_shortname, normalize_emoji_shortname, strip_emoji_colons,
-    validate_emoji_create_shortname, validate_emoticon_file,
+    MAX_EMOJI_BYTES, MAX_STICKER_BYTES, STICKER_UPLOAD_MAX_PX, emoji_sources_generation,
+    generate_snowflake_id, is_valid_emoticon_shortname, normalize_emoji_shortname,
+    strip_emoji_colons, validate_emoji_create_shortname, validate_emoticon_file,
 };
 pub use events::{ClanEventItem, CreateEventDraft, EventsEvent, EventsStore, UpdateEventDraft};
 pub use files::{
@@ -161,7 +168,8 @@ pub use friend::{Friend, FriendEvent, FriendState, FriendStore};
 pub use gallery::{
     AttachmentSeedInput, ChannelAttachment, FetchedChannelAttachments, GalleryEvent, GalleryStore,
     LoadDirection, MediaFilter, UploaderInfo, enrich_uploader, fetch_channel_attachments,
-    initial_page_has_more, next_page_has_more, resolve_attachment_uploader,
+    initial_page_has_more, next_page_has_more, older_page_cursor, older_page_has_more,
+    resolve_attachment_uploader,
 };
 pub use gif::{Gif, GifCategory, GifEvent, GifStore};
 pub use gifts::{
@@ -193,31 +201,35 @@ pub use message_search::{
     enrich_search_results_ogp, resolve_search_hit_ogp, search_hit_from_document,
 };
 pub use messages::*;
+pub use mezon_client::meeting_room_id;
 pub use mezon_client::{
     InboxCategory, InboxMentionSpan, InboxMessagePreview, InboxNotification, TopicDiscussion,
     TopicReplyPreview, attachment_link_is_image, attachment_link_is_video,
     message_content_is_attachment,
 };
 pub use mezon_client::{
-    SearchDropdownMode, SearchPageToken, autocomplete_needle, expand_mention_name_tokens,
-    finalize_incomplete_filter_token, has_filter_options, insert_filter_markup,
-    search_content_highlight_terms, search_dropdown_mode, search_filter_chip_ranges,
-    search_page_count, search_page_numbers, should_show_search_dropdown,
+    PickedSearchUser, SearchDropdownMode, SearchPageToken, autocomplete_needle,
+    expand_user_name_tokens, finalize_incomplete_filter_token, has_filter_options,
+    insert_filter_markup, retain_picked_search_users, search_content_highlight_terms,
+    search_dropdown_mode, search_filter_chip_ranges, search_page_count, search_page_numbers,
+    should_show_search_dropdown,
 };
-pub use mezon_voice::{MediaDevice, MediaPermission};
+pub use mezon_voice::{MediaDevice, MediaPermission, running_packaged};
 pub use mmn_client::{
     DECIMAL_FACTOR as TOKEN_DECIMAL_FACTOR, DECIMALS as TOKEN_DECIMALS,
     MAX_MEMO_BYTES as TOKEN_NOTE_MAX_BYTES,
 };
 pub use name_validation::{
-    CLAN_NAME_MAX_CHARS, DISPLAY_NAME_MAX_BYTES, DisplayNameError, is_valid_clan_name,
-    is_valid_name_content, prepare_display_name_for_update,
+    CLAN_NAME_MAX_CHARS, ClanNicknameError, DISPLAY_NAME_MAX_BYTES, DisplayNameError,
+    is_valid_clan_name, is_valid_menu_name, is_valid_name_content,
+    prepare_clan_nickname_for_update, prepare_display_name_for_update,
 };
 pub use notification_push::NotificationPushStore;
 pub use notification_setting::{NotificationSettingEvent, NotificationSettingStore};
 pub use ogp::{
     OgpResult, OutgoingOgp, fetch_invite_preview, fetch_ogp, first_previewable_url,
-    internal_invite_id, invite_id_from_url, is_clan_invite_url, trusted_invite_id,
+    internal_invite_id, internal_meeting_code, invite_id_from_url, is_clan_invite_url,
+    trusted_invite_id,
 };
 pub use onboarding::{
     ClanOnboarding, DONE_ONBOARDING_STATUS, GUIDE_TYPE_GREETING, GUIDE_TYPE_QUESTION,
@@ -233,19 +245,28 @@ pub use pinned::{PinnedEvent, PinnedMessage, PinnedMessagesStore};
 pub use platform::{
     CliInstallHooks, CliInstallStateFn, CliInstallToggleFn, CliInstallVisibleFn,
     DesktopNotification, DownloadEvent, McpServerHooks, McpServerStatus, McpSetPortFn, McpStartFn,
-    McpStatusFn, McpStopFn, NotifyFn, OpenManagedAppWindowFn, OpenUrlFn, PlatformStore,
-    copy_image_url_to_clipboard, download_url_with_dialog,
+    McpStatusFn, McpStopFn, NotificationTopicReply, NotifyFn, OpenManagedAppWindowFn, OpenUrlFn,
+    PlatformStore, copy_image_url_to_clipboard, copy_media_url_to_clipboard,
+    download_url_with_dialog, may_be_transcoded, open_media_url_external, transcoded_hls_playlist,
 };
 pub use presence::*;
 pub use quick_menu::{
     QUICK_MENU_ACTION_MSG_MAX_BYTES, QUICK_MENU_NAME_MAX_RUNES, QUICK_MENU_TYPE_FLASH,
-    QUICK_MENU_TYPE_QUICK, QuickMenuItem, QuickMenuStore, is_valid_action_msg, is_valid_menu_name,
-    name_exists,
+    QUICK_MENU_TYPE_QUICK, QuickMenuItem, QuickMenuStore, is_valid_action_msg, name_exists,
 };
 pub use realtime::{RealtimeDispatch, RealtimeKind};
+pub use realtime_server::RealtimeServer;
 pub use roles::{
     ClanRoleDetail, DEFAULT_ROLE_COLOR, MAX_ROLE_ICON_BYTES, Role, RoleDraft, RolePermission,
     RoleStyle, RoleUser, RolesEvent, RolesStore, everyone_slug, parse_role_color,
+};
+pub use screen_draw::{
+    AnnotationDrag, COLOR_BLACK, COLOR_BLUE, COLOR_GREEN, COLOR_ORANGE, COLOR_PURPLE, COLOR_RED,
+    COLOR_WHITE, COLOR_YELLOW, ContentViewport, DrawAnnotation, DrawTool, HitBox, NormalizedPoint,
+    PRESET_COLORS, PRESET_WIDTHS, PenStroke, STROKE_WIDTH_MEDIUM, STROKE_WIDTH_THICK,
+    STROKE_WIDTH_THIN, ScreenDrawState, ShapeAnnotation, ShapeKind, StrokeKind, TEXT_HANDLE_SIZE,
+    TEXT_LINE_HEIGHT, TEXT_PAD_X, TEXT_PAD_Y, TextAnnotation, TextResize, VanishingStroke,
+    scale_alpha, text_font_px,
 };
 pub use sprite_atlas::{SpriteAtlas, SpriteFrame, fetch_sprite_atlas, parse_sprite_atlas};
 pub use sticker::{ClanSound, Sticker, StickerEvent, StickerStore};
@@ -267,15 +288,16 @@ pub use voice::SimulatedCall;
 #[cfg(any(target_os = "linux", target_os = "freebsd"))]
 pub use voice::record_wayland_session;
 pub use voice::{
-    DeviceKind, DeviceMenuKind, DisplayedFlower, DisplayedReaction, MAX_SOUND_BYTES,
-    NetworkQuality, NoiseSuppressionStatus, PickedScreen, RecordingState, RecordingToast,
-    RemovalCause, SOUND_ALLOWED_EXTENSIONS, ScreenShareKind, ScreenShareListError, ScreenShareMode,
-    ScreenShareOption, ScreenSharePreview, SfuRole, VideoFrameData, VideoFrameStore,
-    VoiceCallStatus, VoiceConnection, VoiceModerationError, VoiceParticipant, VoiceRenderFrame,
-    VoiceStore, VoiceStoreEvent, camera_tile_id, capture_screen_share_preview,
-    list_screen_share_options, peek_screen_share_options, request_screen_capture_access,
-    screen_capture_permitted, screen_tile_id, system_screen_share_pick, upload_sound_file,
-    validate_sound_file,
+    BreakoutInvite, BreakoutNotice, BreakoutRule, DeviceKind, DeviceMenuKind, DisplayedFlower,
+    DisplayedReaction, ExternalMeeting, HostedBreakout, MAX_SOUND_BYTES, MediaRefusal,
+    MeetingChatMessage, MeetingChatStatus, NetworkQuality, NoiseSuppressionStatus, PickedScreen,
+    RecordingState, RecordingToast, RemovalCause, SOUND_ALLOWED_EXTENSIONS, ScreenShareKind,
+    ScreenShareListError, ScreenShareMode, ScreenShareOption, ScreenSharePreview, SfuRole,
+    VideoFrameData, VideoFrameStore, VoiceCallStatus, VoiceConnection, VoiceModerationError,
+    VoiceParticipant, VoiceRenderFrame, VoiceStore, VoiceStoreEvent, camera_tile_id,
+    capture_screen_share_preview, list_screen_share_options, peek_screen_share_options,
+    request_screen_capture_access, screen_capture_permitted, screen_tile_id,
+    system_screen_share_pick, upload_sound_bytes, upload_sound_file, validate_sound_file,
 };
 pub use wallet::{
     SendTokenRequest, TransactionCursor, WalletDetail, WalletEvent, WalletStore, WalletTransaction,
@@ -347,6 +369,29 @@ pub fn clear_tour_progress(cx: &mut gpui::App) {
     }
 }
 
+pub fn set_output_device(output_device_id: Option<String>, cx: &mut gpui::App) {
+    if let Some(voice) = VoiceStore::try_global(cx) {
+        voice.update(cx, |voice, cx| {
+            voice.set_output_device(output_device_id.clone(), cx)
+        });
+    } else if let Some(settings) = Settings::try_global(cx) {
+        settings.update(cx, |settings, _| {
+            settings.output_device_id = output_device_id.clone();
+        });
+        schedule_settings_save(&settings, cx);
+    }
+    if let Some(call) = CallStore::try_global(cx) {
+        call.update(cx, |call, cx| {
+            call.set_output_device(output_device_id.clone(), cx)
+        });
+    }
+    if let Some(stream) = StreamStore::try_global(cx) {
+        stream.update(cx, |stream, cx| {
+            stream.set_output_device(output_device_id, cx)
+        });
+    }
+}
+
 /// Persist [`Settings`] through one serialized, coalescing writer: burst
 /// changes (slider drags) collapse into a single debounced write, writes never
 /// overlap (so the shared tmp-file path cannot commit an older snapshot last),
@@ -406,6 +451,8 @@ pub struct ActivityStripDismissal {
     pub channel_id: i64,
     #[serde(default)]
     pub newest_topic_id: Option<i64>,
+    #[serde(default)]
+    pub newest_topic_timestamp: u32,
     #[serde(default)]
     pub pin_record_ids: Vec<i64>,
 }
@@ -474,6 +521,14 @@ pub struct Settings {
     pub screen_capture_access_requested: bool,
     #[serde(default)]
     pub activity_strip_dismissals: Vec<ActivityStripDismissal>,
+    #[serde(default)]
+    pub realtime_server: RealtimeServer,
+    #[serde(default)]
+    pub agent_hint_dismissed: bool,
+    #[serde(default)]
+    pub quick_replies_enabled: bool,
+    #[serde(default)]
+    pub grammar_correction_enabled: bool,
 }
 
 impl Default for Settings {
@@ -506,6 +561,10 @@ impl Default for Settings {
             tour_eligible: None,
             screen_capture_access_requested: false,
             activity_strip_dismissals: Vec::new(),
+            realtime_server: RealtimeServer::Auto,
+            agent_hint_dismissed: false,
+            quick_replies_enabled: false,
+            grammar_correction_enabled: false,
         }
     }
 }
@@ -707,6 +766,40 @@ impl AuthState {
 }
 
 #[cfg(test)]
+pub(crate) mod cdn_test_signer {
+    use futures::FutureExt;
+    use std::sync::{Arc, Once};
+
+    pub(crate) const SIGNATURE: &str = "1791259679-mac";
+    pub(crate) const DENIED_CHANNEL: i64 = 0x1cb1_64db_dac0_1001;
+
+    pub(crate) fn install() {
+        static INSTALL: Once = Once::new();
+        INSTALL.call_once(|| {
+            mezon_client::cdn_signature::install(mezon_client::cdn_signature::CdnSigner::new(
+                vec!["https://cdn.example/".to_string()],
+                Vec::new(),
+                Arc::new(|channel_id| {
+                    async move {
+                        if channel_id == DENIED_CHANNEL {
+                            Err(anyhow::Error::new(
+                                mezon_client::transport::ApiStatusError {
+                                    code:
+                                        mezon_client::transport::ApiStatusError::PERMISSION_DENIED,
+                                },
+                            ))
+                        } else {
+                            Ok(SIGNATURE.to_string())
+                        }
+                    }
+                    .boxed()
+                }),
+            ));
+        });
+    }
+}
+
+#[cfg(test)]
 mod settings_tests {
     use super::{ActivityStripDismissal, Settings};
 
@@ -748,6 +841,7 @@ mod settings_tests {
                 clan_id: 2,
                 channel_id: 3,
                 newest_topic_id: Some(4),
+                newest_topic_timestamp: 5,
                 pin_record_ids: vec![5, 6],
             }],
             ..Settings::default()
@@ -784,5 +878,16 @@ mod settings_tests {
     fn clearing_an_untouched_tour_state_reports_no_change() {
         let mut settings = Settings::default();
         assert!(!settings.clear_tour_progress());
+    }
+
+    #[test]
+    fn grammar_chat_toggles_default_off_and_legacy_settings_parse() {
+        let defaults = Settings::default();
+        assert!(!defaults.quick_replies_enabled);
+        assert!(!defaults.grammar_correction_enabled);
+        let legacy = r#"{"language":"en"}"#;
+        let settings: Settings = serde_json::from_str(legacy).expect("legacy settings parse");
+        assert!(!settings.quick_replies_enabled);
+        assert!(!settings.grammar_correction_enabled);
     }
 }

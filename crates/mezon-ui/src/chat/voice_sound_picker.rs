@@ -393,8 +393,8 @@ fn render_sound_row(
     let mut row = div()
         .w_full()
         .h(px(ROW_PX))
-        .flex()
-        .flex_row()
+        .grid()
+        .grid_cols(2)
         .items_start()
         .gap_3();
     row = row.child(render_sound_cell(theme, left, previewing, entity));

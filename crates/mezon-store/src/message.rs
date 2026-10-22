@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::ops::Range;
 use std::sync::Arc;
 
@@ -8,8 +8,9 @@ use mezon_client::transport::{
 };
 
 use crate::album_layout::AlbumLayout;
+use crate::channel::ChannelType;
 use crate::config::AppConfig;
-use crate::ids::{ChannelId, MessageId, MessageRef, UserId};
+use crate::ids::{ChannelId, ClanId, MessageId, MessageRef, UserId};
 use crate::message_time::{format_local_time_hhmm, local_datetime, local_day_key};
 
 #[derive(Debug, Clone, Default)]
@@ -32,9 +33,38 @@ pub struct MessageAttachment {
     pub local_source: Option<std::path::PathBuf>,
     pub uploading: bool,
     pub upload_failed: bool,
+    pub source_denied: bool,
 }
 
 pub const STICKER_FILETYPE: &str = "sticker";
+
+const TRANSCODED_CONTAINERS: [&str; 3] = ["avi", "flv", "wmv"];
+const MATROSKA_CONTAINERS: [&str; 1] = ["mkv"];
+
+fn has_container_extension(url: &str, containers: &[&str]) -> bool {
+    let path = url.split(['?', '#']).next().unwrap_or(url);
+    let name = path.rsplit('/').next().unwrap_or(path);
+    name.rsplit_once('.').is_some_and(|(_, ext)| {
+        containers
+            .iter()
+            .any(|container| ext.eq_ignore_ascii_case(container))
+    })
+}
+
+fn is_transcoded_container(filename: &str, url: &str) -> bool {
+    (has_container_extension(filename, &TRANSCODED_CONTAINERS)
+        || has_container_extension(url, &TRANSCODED_CONTAINERS))
+        && crate::platform::may_be_transcoded(url)
+}
+
+fn is_matroska_container(filename: &str, url: &str) -> bool {
+    has_container_extension(filename, &MATROSKA_CONTAINERS)
+        || has_container_extension(url, &MATROSKA_CONTAINERS)
+}
+
+fn plays_in_app(filename: &str, url: &str) -> bool {
+    is_matroska_container(filename, url) || is_transcoded_container(filename, url)
+}
 
 pub fn url_extension(url: &str) -> Option<String> {
     let path = url.split(['?', '#']).next()?;
@@ -76,6 +106,10 @@ pub fn format_file_size(bytes: u64) -> String {
 }
 
 impl MessageAttachment {
+    pub fn is_visual_media(&self) -> bool {
+        !self.is_unsupported_media() && (self.is_video() || self.is_image())
+    }
+
     pub fn is_audio(&self) -> bool {
         self.filetype.contains("audio") && !self.is_unsupported_media()
     }
@@ -90,35 +124,24 @@ impl MessageAttachment {
             || (filetype.starts_with("video") && !filetype.ends_with("vnd.dlna.mpeg-tts"))
     }
 
-    pub fn is_video(&self) -> bool {
-        Self::media_is_video(&self.filetype, &self.url)
+    pub fn plays_as_video(filetype: &str, filename: &str, url: &str) -> bool {
+        Self::media_is_video(filetype, url) || plays_in_app(filename, url)
     }
 
-    /// A Matroska video (`.webm`, and the `video/matroska` MIME a browser
-    /// recorder writes) rides on whatever demuxer the platform player has:
-    /// GStreamer reads it, AVFoundation (macOS) and Media Foundation (Windows)
-    /// do not. There the inline player can only mount, fail, and sit on a play
-    /// button that never does anything, so hand the file to the download box
-    /// instead. Audio `.webm` (voice messages) is decoded in-app by symphonia
-    /// and is deliberately left alone.
-    fn is_undecodable_matroska(&self, ext: Option<&str>) -> bool {
-        if cfg!(target_os = "linux") || self.filetype.contains("audio") {
-            return false;
-        }
-        matches!(
-            self.filetype.as_str(),
-            "video/webm" | "video/matroska" | "video/x-matroska"
-        ) || ext == Some("webm")
+    pub fn is_video(&self) -> bool {
+        Self::plays_as_video(&self.filetype, &self.filename, &self.url)
     }
 
     pub fn is_unsupported_media(&self) -> bool {
+        if plays_in_app(&self.filename, &self.url) {
+            return false;
+        }
         if matches!(
             self.filetype.as_str(),
             "video/x-ms-wmv"
                 | "video/wmv"
                 | "video/avi"
                 | "video/flv"
-                | "video/mkv"
                 | "video/rmvb"
                 | "audio/wma"
                 | "audio/ra"
@@ -130,24 +153,9 @@ impl MessageAttachment {
             return true;
         }
         let ext = url_extension(&self.filename).or_else(|| url_extension(&self.url));
-        if self.is_undecodable_matroska(ext.as_deref()) {
-            return true;
-        }
         matches!(
             ext.as_deref(),
-            Some(
-                "wmv"
-                    | "avi"
-                    | "flv"
-                    | "mkv"
-                    | "rmvb"
-                    | "wma"
-                    | "ra"
-                    | "tiff"
-                    | "tif"
-                    | "bmp"
-                    | "psd"
-            )
+            Some("wmv" | "avi" | "flv" | "rmvb" | "wma" | "ra" | "tiff" | "tif" | "bmp" | "psd")
         )
     }
 }
@@ -240,6 +248,22 @@ impl MessageCode {
                 | MessageCode::DeleteEphemeralMsg
         ) && !self.is_system()
     }
+}
+
+const GROUP_NAME_CHANGED: &str = " changed the group name to ";
+const GROUP_AVATAR_CHANGED: &str = " changed the group avatar.";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GroupChange<'a> {
+    Name(&'a str),
+    Avatar,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct GroupUpdate<'a> {
+    pub actor: &'a str,
+    pub actor_id: Option<&'a str>,
+    pub change: GroupChange<'a>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -385,6 +409,7 @@ pub enum MessageSpan {
     Hashtag {
         display: SharedString,
         channel_id: Option<String>,
+        meta: Option<Box<HashtagMeta>>,
     },
     Emoji {
         name: SharedString,
@@ -401,6 +426,15 @@ pub enum MessageSpan {
         level: u8,
         text: SharedString,
     },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HashtagMeta {
+    pub label: SharedString,
+    pub clan_id: ClanId,
+    pub parent_id: Option<ChannelId>,
+    pub channel_type: ChannelType,
+    pub private: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -704,7 +738,7 @@ pub enum RichRunKind {
 pub enum RichClick {
     Link(SharedString),
     Mention(UserId),
-    Channel(ChannelId),
+    Channel(ChannelId, Option<ClanId>),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -753,6 +787,7 @@ pub struct Message {
     pub sender_name: SharedString,
     pub avatar_url: SharedString,
     pub avatar_proxied: SharedString,
+    pub anonymous_sender: bool,
     pub create_time: i64,
     pub update_time: i64,
     pub day_label: String,
@@ -803,6 +838,17 @@ pub struct ViewerMedia {
 pub const COMBINE_TIME_WINDOW: i64 = 600;
 
 pub fn same_message_sender(a: &Message, b: &Message) -> bool {
+    same_sender_id(a, b) && same_anonymous_persona(a, b)
+}
+
+fn same_anonymous_persona(a: &Message, b: &Message) -> bool {
+    if !a.anonymous_sender && !b.anonymous_sender {
+        return true;
+    }
+    a.sender_name == b.sender_name && a.avatar_url == b.avatar_url
+}
+
+fn same_sender_id(a: &Message, b: &Message) -> bool {
     if let (Some(au), Some(bu)) = (resolved_sender_user_id(a), resolved_sender_user_id(b))
         && au == bu
     {
@@ -1101,6 +1147,7 @@ pub fn parse_spans(content: &ApiMessageContent) -> Vec<MessageSpan> {
             Kind::Hashtag => spans.push(MessageSpan::Hashtag {
                 display: inner.into(),
                 channel_id: tok.channel_id.clone(),
+                meta: hashtag_meta(&tok),
             }),
             Kind::Emoji => spans.push(MessageSpan::Emoji {
                 name: inner.into(),
@@ -1114,6 +1161,7 @@ pub fn parse_spans(content: &ApiMessageContent) -> Vec<MessageSpan> {
                     url,
                     link_kind,
                     &content.cvtt,
+                    hashtag_meta(&tok),
                 ));
             }
             Kind::Markdown => {
@@ -1136,6 +1184,7 @@ pub fn parse_spans(content: &ApiMessageContent) -> Vec<MessageSpan> {
                             url,
                             link_kind_from_marker(ty),
                             &content.cvtt,
+                            hashtag_meta(&tok),
                         ));
                     }
                     "lk_ogp" => {
@@ -1215,6 +1264,14 @@ struct ChannelUrlIds {
     canvas_id: Option<String>,
 }
 
+pub fn channel_url_clan_id(url: &str) -> Option<ClanId> {
+    extract_channel_url_ids(url)?
+        .clan_id
+        .parse::<i64>()
+        .ok()
+        .map(ClanId)
+}
+
 fn extract_channel_url_ids(url: &str) -> Option<ChannelUrlIds> {
     let marker = "/chat/clans/";
     let idx = url.find(marker)?;
@@ -1245,11 +1302,42 @@ fn extract_channel_url_ids(url: &str) -> Option<ChannelUrlIds> {
     })
 }
 
+fn hashtag_meta(tok: &ContentToken) -> Option<Box<HashtagMeta>> {
+    let label = tok
+        .channel_label
+        .as_deref()
+        .filter(|label| !label.is_empty())?;
+    let clan_id = tok
+        .clan_id
+        .as_deref()?
+        .parse::<i64>()
+        .ok()
+        .map(ClanId)
+        .filter(|clan_id| !clan_id.is_zero())?;
+    let channel_type = u32::try_from(tok.channel_type?)
+        .ok()
+        .map(ChannelType::from_raw)?;
+    let parent_id = tok
+        .parent_id
+        .as_deref()
+        .and_then(|raw| raw.parse::<i64>().ok())
+        .map(ChannelId)
+        .filter(|parent_id| !parent_id.is_zero());
+    Some(Box::new(HashtagMeta {
+        label: label.to_string().into(),
+        clan_id,
+        parent_id,
+        channel_type,
+        private: tok.channel_private.is_some_and(|private| private != 0),
+    }))
+}
+
 fn resolve_link_span(
     text: SharedString,
     url: String,
     kind: LinkKind,
     cvtt: &HashMap<String, String>,
+    meta: Option<Box<HashtagMeta>>,
 ) -> MessageSpan {
     if let Some(ids) = extract_channel_url_ids(&url) {
         if let Some(canvas_id) = ids.canvas_id {
@@ -1263,9 +1351,11 @@ fn resolve_link_span(
             }
             return MessageSpan::Link { text, url, kind };
         }
+        let meta = meta.filter(|meta| meta.clan_id.get().to_string() == ids.clan_id);
         return MessageSpan::Hashtag {
             display: text,
             channel_id: Some(ids.channel_id),
+            meta,
         };
     }
     MessageSpan::Link { text, url, kind }
@@ -1460,10 +1550,12 @@ pub(crate) fn split_token_transaction(content: &str) -> TokenTransaction {
 const REPLY_PREVIEW_MAX_CHARS: usize = 120;
 
 pub(crate) fn reply_preview_spans(spans: &[MessageSpan]) -> Vec<MessageSpan> {
-    if !spans
-        .iter()
-        .any(|span| matches!(span, MessageSpan::Hashtag { .. }))
-    {
+    if !spans.iter().any(|span| {
+        matches!(
+            span,
+            MessageSpan::Hashtag { .. } | MessageSpan::Emoji { .. }
+        )
+    }) {
         return Vec::new();
     }
     let mut builder = ReplyPreviewBuilder::default();
@@ -1475,14 +1567,19 @@ pub(crate) fn reply_preview_spans(spans: &[MessageSpan]) -> Vec<MessageSpan> {
             MessageSpan::Hashtag {
                 display,
                 channel_id,
-            } => builder.push_hashtag(display, channel_id.clone()),
+                meta,
+            } => builder.push_hashtag(display, channel_id.clone(), meta.clone()),
+            MessageSpan::Emoji {
+                name,
+                emoji_id,
+                src,
+            } => builder.push_emoji(name, emoji_id, src),
             MessageSpan::Text(text)
             | MessageSpan::Bold(text)
             | MessageSpan::Code(text)
             | MessageSpan::CodeBlock { text, .. }
             | MessageSpan::Link { text, .. }
             | MessageSpan::Mention { display: text, .. }
-            | MessageSpan::Emoji { name: text, .. }
             | MessageSpan::Canvas { title: text, .. }
             | MessageSpan::Heading { text, .. } => builder.push_text(text),
         }
@@ -1510,7 +1607,11 @@ impl ReplyPreviewBuilder {
     }
 
     fn push_text(&mut self, text: &str) {
-        for word in text.split_whitespace() {
+        let mut words = text.split_whitespace().peekable();
+        if text.chars().next().is_some_and(char::is_whitespace) && words.peek().is_some() {
+            self.needs_space = true;
+        }
+        while let Some(word) = words.next() {
             if self.full {
                 return;
             }
@@ -1520,21 +1621,55 @@ impl ReplyPreviewBuilder {
             for ch in word.chars() {
                 self.push_char(ch);
             }
-            self.needs_space = true;
+            self.needs_space = words.peek().is_some();
         }
+        self.needs_space |= text.chars().last().is_some_and(char::is_whitespace);
     }
 
-    fn push_hashtag(&mut self, display: &str, channel_id: Option<String>) {
+    fn push_hashtag(
+        &mut self,
+        display: &str,
+        channel_id: Option<String>,
+        meta: Option<Box<HashtagMeta>>,
+    ) {
         let label: String = display.split_whitespace().collect::<Vec<_>>().join(" ");
-        if self.chars + label.chars().count() > REPLY_PREVIEW_MAX_CHARS {
+        let separator = usize::from(self.needs_space);
+        if self.chars + separator + label.chars().count() > REPLY_PREVIEW_MAX_CHARS {
             self.full = true;
             return;
+        }
+        if self.needs_space {
+            self.push_char(' ');
         }
         self.flush_text();
         self.chars += label.chars().count();
         self.out.push(MessageSpan::Hashtag {
             display: label.into(),
             channel_id,
+            meta,
+        });
+        self.needs_space = false;
+    }
+
+    fn push_emoji(&mut self, name: &SharedString, emoji_id: &str, src: &SharedString) {
+        if emoji_id.is_empty() || emoji_id == "0" {
+            self.push_text(name);
+            return;
+        }
+        let separator = usize::from(self.needs_space);
+        if self.chars + separator + 1 > REPLY_PREVIEW_MAX_CHARS {
+            self.full = true;
+            return;
+        }
+        if self.needs_space {
+            self.push_char(' ');
+        }
+        self.flush_text();
+        self.chars += 1;
+        self.out.push(MessageSpan::Emoji {
+            name: name.clone(),
+            emoji_id: emoji_id.to_string(),
+            src: src.clone(),
         });
         self.needs_space = false;
     }
@@ -1548,6 +1683,36 @@ impl ReplyPreviewBuilder {
     }
 
     fn finish(mut self) -> Vec<MessageSpan> {
+        if self.full {
+            while self.chars >= REPLY_PREVIEW_MAX_CHARS {
+                if self.text.pop().is_some() {
+                    self.chars -= 1;
+                    continue;
+                }
+                match self.out.last_mut() {
+                    Some(MessageSpan::Text(text)) if !text.is_empty() => {
+                        let mut owned = text.to_string();
+                        owned.pop();
+                        *text = owned.into();
+                        self.chars -= 1;
+                    }
+                    Some(MessageSpan::Emoji { .. }) => {
+                        self.out.pop();
+                        self.chars -= 1;
+                    }
+                    Some(MessageSpan::Hashtag { display, .. }) if !display.is_empty() => {
+                        let mut truncated = display.to_string();
+                        truncated.pop();
+                        *self.out.last_mut().expect("the hashtag still exists") =
+                            MessageSpan::Text(truncated.into());
+                        self.chars -= 1;
+                    }
+                    _ => break,
+                }
+            }
+            self.text.push('…');
+            self.chars += 1;
+        }
         self.flush_text();
         self.out
     }
@@ -1657,13 +1822,16 @@ pub fn build_rich_layout(spans: &[MessageSpan]) -> Option<Arc<RichLayout>> {
             MessageSpan::Hashtag {
                 display,
                 channel_id,
+                meta,
             } => {
                 let start = text.len();
                 text.push_str(display);
                 let click = channel_id
                     .as_deref()
                     .and_then(rich_channel_id)
-                    .map(RichClick::Channel);
+                    .map(|channel_id| {
+                        RichClick::Channel(channel_id, meta.as_ref().map(|meta| meta.clan_id))
+                    });
                 runs.push(RichRun {
                     range: start..text.len(),
                     kind: RichRunKind::Hashtag,
@@ -1774,6 +1942,41 @@ pub fn fill_emoji_sources(spans: &mut [MessageSpan], cfg: Option<&AppConfig>) {
     }
 }
 
+pub(crate) fn spans_use_any_emoji(
+    spans: &[MessageSpan],
+    emoji_ids: Option<&HashSet<String>>,
+) -> bool {
+    spans.iter().any(|span| {
+        matches!(
+            span,
+            MessageSpan::Emoji { emoji_id, .. }
+                if !emoji_id.is_empty() && emoji_ids.is_none_or(|ids| ids.contains(emoji_id))
+        )
+    })
+}
+
+pub(crate) fn emoji_span_sources(spans: &[MessageSpan]) -> impl Iterator<Item = &SharedString> {
+    spans.iter().filter_map(|span| match span {
+        MessageSpan::Emoji { src, .. } => Some(src),
+        _ => None,
+    })
+}
+
+pub(crate) fn fill_reply_emoji_sources(spans: &mut [MessageSpan], cfg: Option<&AppConfig>) {
+    const REPLY_EMOJI_SOURCE_PX: u32 = 32;
+    let Some(cfg) = cfg else {
+        return;
+    };
+    for span in spans.iter_mut() {
+        if let MessageSpan::Emoji { emoji_id, src, .. } = span
+            && !emoji_id.is_empty()
+            && emoji_id != "0"
+        {
+            *src = cfg.emoji_src_sized(emoji_id, REPLY_EMOJI_SOURCE_PX).into();
+        }
+    }
+}
+
 impl Message {
     pub fn new(
         id: MessageId,
@@ -1813,6 +2016,7 @@ impl Message {
             is_forwarded: false,
             show_forwarded_label: false,
             combined_with_prev: false,
+            anonymous_sender: false,
             highlights_viewer_direct: false,
             send_failed: false,
             ogp: None,
@@ -1883,6 +2087,29 @@ impl Message {
         (tx.title, tx.detail)
     }
 
+    pub fn group_update(&self) -> Option<GroupUpdate<'_>> {
+        if self.code != MessageCode::AuditLog {
+            return None;
+        }
+        let Some(MessageSpan::Mention {
+            display, user_id, ..
+        }) = self.spans.first()
+        else {
+            return None;
+        };
+        let action = self.content.strip_prefix(display.as_ref())?;
+        let change = if action == GROUP_AVATAR_CHANGED {
+            GroupChange::Avatar
+        } else {
+            GroupChange::Name(action.strip_prefix(GROUP_NAME_CHANGED)?.strip_suffix('.')?)
+        };
+        Some(GroupUpdate {
+            actor: display,
+            actor_id: user_id.as_deref(),
+            change,
+        })
+    }
+
     pub fn with_attachments(mut self, attachments: Vec<MessageAttachment>) -> Self {
         self.attachments = attachments;
         self
@@ -1935,6 +2162,11 @@ impl Message {
 
     pub fn with_reactions(mut self, reactions: Vec<Reaction>) -> Self {
         self.reactions = reactions;
+        self
+    }
+
+    pub fn with_anonymous_sender(mut self, anonymous_sender: bool) -> Self {
+        self.anonymous_sender = anonymous_sender;
         self
     }
 
@@ -2053,6 +2285,7 @@ mod tests {
         MessageSpan::Hashtag {
             display: display.into(),
             channel_id: Some(channel_id.into()),
+            meta: None,
         }
     }
 
@@ -2106,7 +2339,7 @@ mod tests {
     }
 
     #[test]
-    fn reply_preview_spans_is_empty_without_a_hashtag() {
+    fn reply_preview_spans_is_empty_without_rich_tokens() {
         let spans = vec![
             MessageSpan::Text("hello ".into()),
             MessageSpan::Mention {
@@ -2135,9 +2368,9 @@ mod tests {
         assert_eq!(
             reply_preview_spans(&spans),
             vec![
-                MessageSpan::Text("see".into()),
+                MessageSpan::Text("see ".into()),
                 hashtag("#general", "10"),
-                MessageSpan::Text("and @bob in".into()),
+                MessageSpan::Text(" and @bob in ".into()),
                 hashtag("#voice room", "11"),
             ]
         );
@@ -2150,8 +2383,125 @@ mod tests {
         let preview = reply_preview_spans(&spans);
         assert_eq!(preview.len(), 1);
         match &preview[0] {
-            MessageSpan::Text(text) => assert_eq!(text.chars().count(), REPLY_PREVIEW_MAX_CHARS),
+            MessageSpan::Text(text) => {
+                assert_eq!(text.chars().count(), REPLY_PREVIEW_MAX_CHARS);
+                assert!(text.ends_with('…'));
+            }
             other => panic!("expected text, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn reply_preview_spans_keeps_valid_emoji_as_one_preview_slot() {
+        let spans = vec![
+            MessageSpan::Text("x".repeat(REPLY_PREVIEW_MAX_CHARS - 1).into()),
+            MessageSpan::Emoji {
+                name: ":a_very_long_shortcode:".into(),
+                emoji_id: "123".into(),
+                src: "cached-source".into(),
+            },
+        ];
+
+        let preview = reply_preview_spans(&spans);
+        assert!(
+            matches!(preview.last(), Some(MessageSpan::Emoji { emoji_id, .. }) if emoji_id == "123")
+        );
+    }
+
+    #[test]
+    fn reply_preview_spans_keeps_emoji_only_content() {
+        let emoji = MessageSpan::Emoji {
+            name: ":melon:".into(),
+            emoji_id: "123".into(),
+            src: "cached-source".into(),
+        };
+        assert_eq!(
+            reply_preview_spans(std::slice::from_ref(&emoji)),
+            vec![emoji]
+        );
+    }
+
+    #[test]
+    fn reply_preview_spans_preserves_authored_spacing_around_emoji() {
+        let emoji = MessageSpan::Emoji {
+            name: ":melon:".into(),
+            emoji_id: "123".into(),
+            src: "cached-source".into(),
+        };
+        assert_eq!(
+            reply_preview_spans(&[
+                MessageSpan::Text("before ".into()),
+                emoji.clone(),
+                MessageSpan::Text(" after".into()),
+            ]),
+            vec![
+                MessageSpan::Text("before ".into()),
+                emoji.clone(),
+                MessageSpan::Text(" after".into()),
+            ]
+        );
+        assert_eq!(
+            reply_preview_spans(&[
+                MessageSpan::Text("before".into()),
+                emoji.clone(),
+                MessageSpan::Text("after".into()),
+            ]),
+            vec![
+                MessageSpan::Text("before".into()),
+                emoji,
+                MessageSpan::Text("after".into()),
+            ]
+        );
+    }
+
+    #[test]
+    fn reply_preview_spans_marks_content_dropped_after_the_cap() {
+        let spans = vec![
+            MessageSpan::Text("x".repeat(REPLY_PREVIEW_MAX_CHARS).into()),
+            MessageSpan::Emoji {
+                name: ":melon:".into(),
+                emoji_id: "123".into(),
+                src: "cached-source".into(),
+            },
+        ];
+        let preview = reply_preview_spans(&spans);
+        assert_eq!(preview.len(), 1);
+        assert!(matches!(&preview[0], MessageSpan::Text(text) if text.ends_with('…')));
+    }
+
+    #[test]
+    fn reply_preview_spans_keeps_ellipsis_with_hashtag_at_the_cap() {
+        let spans = vec![
+            MessageSpan::Text(format!("{} ", "x".repeat(REPLY_PREVIEW_MAX_CHARS - 2)).into()),
+            hashtag("#", "10"),
+            MessageSpan::Text("later".into()),
+        ];
+        let preview = reply_preview_spans(&spans);
+        let visible_chars: usize = preview
+            .iter()
+            .map(|span| match span {
+                MessageSpan::Text(text) => text.chars().count(),
+                MessageSpan::Hashtag { display, .. } => display.chars().count(),
+                MessageSpan::Emoji { .. } => 1,
+                _ => 0,
+            })
+            .sum();
+        assert_eq!(visible_chars, REPLY_PREVIEW_MAX_CHARS);
+        assert!(matches!(preview.last(), Some(MessageSpan::Text(text)) if text.ends_with('…')));
+    }
+
+    #[test]
+    fn reply_preview_spans_falls_back_to_text_for_missing_emoji_id() {
+        for emoji_id in ["", "0"] {
+            let spans = vec![MessageSpan::Emoji {
+                name: ":melon:".into(),
+                emoji_id: emoji_id.into(),
+                src: SharedString::default(),
+            }];
+            assert_eq!(
+                reply_preview_spans(&spans),
+                vec![MessageSpan::Text(":melon:".into())]
+            );
         }
     }
 
@@ -2193,6 +2543,78 @@ mod tests {
         ));
     }
 
+    fn channel_meta_token(s: i64, e: i64, clan_id: &str) -> ContentToken {
+        ContentToken {
+            channel_id: Some("900".into()),
+            channel_label: Some("voice elsewhere".into()),
+            clan_id: Some(clan_id.into()),
+            channel_type: Some(10),
+            ..token(s, e)
+        }
+    }
+
+    #[test]
+    fn parse_spans_reads_channel_meta_from_hashtags_and_channel_links() {
+        let url = "https://mezon.ai/chat/clans/5/channels/900";
+        let mut link = channel_meta_token(7, 7 + url.len() as i64, "5");
+        link.kind = Some("lk".into());
+        let content = ApiMessageContent {
+            t: format!("#voice {url}"),
+            hg: vec![channel_meta_token(0, 6, "5")],
+            mk: vec![link],
+            ..Default::default()
+        };
+        let spans = parse_spans(&content);
+        let metas: Vec<&HashtagMeta> = spans
+            .iter()
+            .filter_map(|span| match span {
+                MessageSpan::Hashtag {
+                    meta: Some(meta), ..
+                } => Some(meta.as_ref()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(metas.len(), 2);
+        for meta in metas {
+            assert_eq!(meta.label.as_ref(), "voice elsewhere");
+            assert_eq!(meta.clan_id, ClanId(5));
+            assert_eq!(meta.channel_type, ChannelType::Voice);
+            assert!(!meta.private);
+        }
+    }
+
+    #[test]
+    fn parse_spans_reads_the_private_flag_from_channel_meta() {
+        let content = ApiMessageContent {
+            t: "#voice".into(),
+            hg: vec![ContentToken {
+                channel_private: Some(1),
+                ..channel_meta_token(0, 6, "5")
+            }],
+            ..Default::default()
+        };
+        assert!(matches!(
+            parse_spans(&content).as_slice(),
+            [MessageSpan::Hashtag { meta: Some(meta), .. }] if meta.private
+        ));
+    }
+
+    #[test]
+    fn parse_spans_drops_link_meta_naming_another_clan() {
+        let url = "https://mezon.ai/chat/clans/5/channels/900";
+        let mut link = channel_meta_token(0, url.len() as i64, "6");
+        link.kind = Some("lk".into());
+        let content = ApiMessageContent {
+            t: url.into(),
+            mk: vec![link],
+            ..Default::default()
+        };
+        assert!(matches!(
+            parse_spans(&content).as_slice(),
+            [MessageSpan::Hashtag { meta: None, .. }]
+        ));
+    }
+
     fn token(s: i64, e: i64) -> ContentToken {
         ContentToken {
             s: Some(s),
@@ -2224,7 +2646,7 @@ mod tests {
     }
 
     fn edit_source_for_composer_text(raw: &str) -> (String, Option<String>) {
-        let sent = mezon_client::transport::build_send_content(raw, &[], &[], &[]);
+        let sent = mezon_client::transport::build_send_content(raw, &[], &Default::default(), &[]);
         let content: ApiMessageContent =
             serde_json::from_str(&sent.json).expect("send content json");
         let spans = parse_spans(&content);
@@ -2738,6 +3160,59 @@ mod tests {
         assert!(!message_combined_with_prev(Some(&prev), &sys));
     }
 
+    fn audit_log_message(text: &str, actor: &str) -> Message {
+        let content = ApiMessageContent {
+            t: text.into(),
+            mentions: vec![ContentToken {
+                user_id: Some("42".into()),
+                username: Some("huy".into()),
+                ..token(0, actor.encode_utf16().count() as i64)
+            }],
+            ..Default::default()
+        };
+        let mut msg = Message::new(MessageId(1), text, "0", "System", 100);
+        msg.code = MessageCode::AuditLog;
+        msg.spans = parse_spans(&content);
+        msg
+    }
+
+    #[test]
+    fn group_update_reads_a_group_name_change() {
+        let msg = audit_log_message("@Huy Lê changed the group name to Team v2.", "@Huy Lê");
+        assert_eq!(
+            msg.group_update(),
+            Some(GroupUpdate {
+                actor: "@Huy Lê",
+                actor_id: Some("42"),
+                change: GroupChange::Name("Team v2"),
+            })
+        );
+    }
+
+    #[test]
+    fn group_update_reads_a_group_avatar_change() {
+        let msg = audit_log_message("@Huy 🙂 changed the group avatar.", "@Huy 🙂");
+        assert_eq!(
+            msg.group_update()
+                .map(|update| (update.actor, update.change)),
+            Some(("@Huy 🙂", GroupChange::Avatar))
+        );
+    }
+
+    #[test]
+    fn group_update_ignores_clan_audit_logs_and_other_codes() {
+        let audit = audit_log_message("@huy update channel: general", "@huy");
+        assert_eq!(audit.group_update(), None);
+
+        let mut welcome = audit_log_message("@Huy changed the group avatar.", "@Huy");
+        welcome.code = MessageCode::Welcome;
+        assert_eq!(welcome.group_update(), None);
+
+        let mut no_mention = audit_log_message("@Huy changed the group avatar.", "@Huy");
+        no_mention.spans = vec![MessageSpan::Text(no_mention.content.as_str().into())];
+        assert_eq!(no_mention.group_update(), None);
+    }
+
     #[test]
     fn same_sender_matches_via_sender_user_id_when_ack_sender_id_is_zero() {
         let mut ack = Message::new(MessageId(1), "a", "0", "U1", 100);
@@ -2770,6 +3245,35 @@ mod tests {
         let ack = Message::new(MessageId(1), "a", "42", "U1", 105);
         let optimistic = Message::new(MessageId::next_optimistic(), "b", "42", "U1", 101);
         assert!(message_combined_with_prev(Some(&ack), &optimistic));
+    }
+
+    fn anonymous(id: i64, name: &str, avatar: &str, at: i64) -> Message {
+        Message::new(MessageId(id), "a", "9876", name, at)
+            .with_avatar(avatar)
+            .with_anonymous_sender(true)
+    }
+
+    #[test]
+    fn different_anonymous_personas_do_not_combine() {
+        let money = anonymous(1, "money", "https://cdn/money.webp", 100);
+        let saumui = anonymous(2, "saumui", "https://cdn/saumui.webp", 105);
+        assert!(!same_message_sender(&money, &saumui));
+        assert!(!message_combined_with_prev(Some(&money), &saumui));
+    }
+
+    #[test]
+    fn the_same_anonymous_persona_still_combines() {
+        let first = anonymous(1, "money", "https://cdn/money.webp", 100);
+        let second = anonymous(2, "money", "https://cdn/money.webp", 105);
+        assert!(message_combined_with_prev(Some(&first), &second));
+    }
+
+    #[test]
+    fn a_named_sender_combines_across_name_changes() {
+        let before = Message::new(MessageId(1), "a", "42", "old.name", 100);
+        let after = Message::new(MessageId(2), "b", "42", "New Name", 105)
+            .with_avatar("https://cdn/new.webp");
+        assert!(message_combined_with_prev(Some(&before), &after));
     }
 
     #[test]
@@ -2999,6 +3503,84 @@ mod tests {
     }
 
     #[test]
+    fn containers_the_transcoder_converts_play_from_the_minio_cdn() {
+        for (filetype, url) in [
+            (
+                "video/x-matroska",
+                "https://cdn.mezon.ai/1cf93b197d401000/2081_movie.mkv",
+            ),
+            (
+                "video/avi",
+                "https://cdn.mezon.ai/1cf93b197d401000/2081_old.avi",
+            ),
+            (
+                "video",
+                "https://cdn.mezon.vn/1cf93b197d401000/2081_clip.WMV",
+            ),
+            (
+                "video/x-flv",
+                "https://cdn.mezon.ai/1cf93b197d401000/2081_stream.flv",
+            ),
+            (
+                "application/octet-stream",
+                "https://cdn.mezon.ai/1cf93b197d401000/2081_sent_from_desktop.mkv",
+            ),
+        ] {
+            let att = attachment(filetype, url);
+            assert!(!att.is_unsupported_media(), "{url}");
+            assert!(att.is_video(), "{url}");
+            assert!(att.is_visual_media(), "{url}");
+        }
+    }
+
+    #[test]
+    fn containers_the_transcoder_never_converts_stay_unsupported() {
+        for (filetype, url) in [
+            (
+                "video/avi",
+                "https://cdn.komu.vn/1cf93b197d401000/2081_old.avi",
+            ),
+            (
+                "video",
+                "https://cdn.mezon.ai/1cf93b197d401000/2081_old.rmvb",
+            ),
+            (
+                "audio/wma",
+                "https://cdn.mezon.ai/1cf93b197d401000/2081_song.wma",
+            ),
+            (
+                "image/bmp",
+                "https://cdn.mezon.ai/1cf93b197d401000/2081_pic.bmp",
+            ),
+        ] {
+            assert!(attachment(filetype, url).is_unsupported_media(), "{url}");
+        }
+    }
+
+    #[test]
+    fn matroska_files_play_from_any_origin() {
+        for (filetype, filename, url) in [
+            (
+                "application/octet-stream",
+                "movie.mkv",
+                "https://cdn.komu.vn/1cf93b197d401000/2081_movie.mkv",
+            ),
+            (
+                "doc",
+                "Mkv.mkv",
+                "https://cdn-dev.nccsoft.vn/1d4bd2a126c01000/2113199456017977344_Mkv.mkv",
+            ),
+            ("video/mkv", "clip.MKV", "https://cdn.example/clip.MKV"),
+        ] {
+            let mut att = attachment(filetype, url);
+            att.filename = filename.to_string();
+            assert!(!att.is_unsupported_media(), "{url}");
+            assert!(att.is_video(), "{url}");
+            assert!(att.is_visual_media(), "{url}");
+        }
+    }
+
+    #[test]
     fn supported_video_and_image_are_not_unsupported() {
         let mp4 = attachment("video/mp4", "https://cdn.example/x.mp4");
         assert!(!mp4.is_unsupported_media());
@@ -3010,20 +3592,17 @@ mod tests {
     }
 
     #[test]
-    fn matroska_video_is_unsupported_where_the_platform_cannot_demux_it() {
-        // GStreamer reads Matroska; AVFoundation and Media Foundation do not.
-        let expected = !cfg!(target_os = "linux");
-
+    fn matroska_video_is_supported_on_desktop() {
         let webm = attachment("video/webm", "https://cdn.example/x.webm");
-        assert_eq!(webm.is_unsupported_media(), expected);
+        assert!(!webm.is_unsupported_media());
+        assert!(webm.is_video());
 
-        // A browser recorder writes `video/matroska`, and the web client uploads
-        // the bare "video" category instead of a MIME, so the extension has to
-        // carry the decision on its own.
         let matroska = attachment("video/matroska", "https://cdn.example/1234.webm");
-        assert_eq!(matroska.is_unsupported_media(), expected);
+        assert!(!matroska.is_unsupported_media());
+        assert!(matroska.is_video());
         let uploaded = attachment("video", "https://cdn.example/1234.webm");
-        assert_eq!(uploaded.is_unsupported_media(), expected);
+        assert!(!uploaded.is_unsupported_media());
+        assert!(uploaded.is_video());
     }
 
     #[test]
