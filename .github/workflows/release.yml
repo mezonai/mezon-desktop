@@ -5,6 +5,14 @@ on:
     tags:
       - "v*"
   workflow_dispatch:
+    inputs:
+      environment:
+        description: Backend the Windows build points at
+        type: choice
+        options:
+          - prod
+          - dev
+        default: prod
 
 permissions:
   contents: write
@@ -147,7 +155,18 @@ jobs:
 
       - name: Build release binary
         shell: bash
+        env:
+          BUILD_ENV: ${{ inputs.environment || 'prod' }}
+          ENV_DEV: ${{ secrets.ENV_DEV }}
         run: |
+          if [ "$BUILD_ENV" = "dev" ]; then
+            if [ -z "$ENV_DEV" ]; then
+              echo "ENV_DEV secret is not set" >&2
+              exit 1
+            fi
+            printf '%s\n' "$ENV_DEV" > .env
+            unset $(compgen -e | grep '^NX_')
+          fi
           VERSION="$(grep -m1 '^version' Cargo.toml | sed -E 's/.*"(.*)".*/\1/')"
           MEZON_STORE_VERSION="$VERSION" cargo build --release -p mezon-app --locked
 
@@ -160,7 +179,7 @@ jobs:
       - name: Upload Store package
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          name: appx-store
+          name: appx-store${{ inputs.environment == 'dev' && '-dev' || '' }}
           path: target/appx/*.appx
           if-no-files-found: error
 
@@ -186,7 +205,7 @@ jobs:
       - name: Upload Windows executables
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          name: mezon-windows-x86_64
+          name: mezon-windows-x86_64${{ inputs.environment == 'dev' && '-dev' || '' }}
           path: |
             target/release/mezon.exe
             target/installer/*.exe
