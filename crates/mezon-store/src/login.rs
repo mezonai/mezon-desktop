@@ -232,6 +232,10 @@ impl LoginStore {
         }
         crate::clear_tour_progress(cx);
         mezon_client::cdn_signature::clear();
+        crate::platform::reset_dismissed();
+        if let Some(platform) = crate::platform::PlatformStore::try_global(cx) {
+            platform.read(cx).close_all_notifications();
+        }
     }
 }
 

@@ -36,6 +36,24 @@ pub fn first_previewable_url(text: &str, internal_domain: Option<&str>) -> Optio
         .find(|url| is_previewable(url, internal_domain))
 }
 
+fn trim_trailing_punctuation(token: &str) -> &str {
+    let mut unmatched_close = token
+        .matches(')')
+        .count()
+        .saturating_sub(token.matches('(').count());
+    let mut end = token.len();
+    while let Some(ch) = token[..end].chars().next_back() {
+        if !TRAILING_PUNCTUATION.contains(&ch) || (ch == ')' && unmatched_close == 0) {
+            break;
+        }
+        if ch == ')' {
+            unmatched_close -= 1;
+        }
+        end -= ch.len_utf8();
+    }
+    &token[..end]
+}
+
 fn extract_urls(text: &str) -> Vec<String> {
     let mut urls = Vec::new();
     let mut rest = text;
@@ -44,7 +62,7 @@ fn extract_urls(text: &str) -> Vec<String> {
         let end = from
             .find(|c: char| c.is_whitespace() || matches!(c, '<' | '>' | '"' | '|' | '`'))
             .unwrap_or(from.len());
-        let token = from[..end].trim_end_matches(TRAILING_PUNCTUATION);
+        let token = trim_trailing_punctuation(&from[..end]);
         if token.len() > "https://".len() {
             urls.push(token.to_string());
         }
@@ -224,6 +242,20 @@ mod tests {
         assert_eq!(
             first_previewable_url("see https://example.com/a).", None).as_deref(),
             Some("https://example.com/a")
+        );
+    }
+
+    #[test]
+    fn keeps_a_close_paren_the_url_opened() {
+        let url = "https://en.wikipedia.org/wiki/Rust_(programming_language)";
+        assert_eq!(first_previewable_url(url, None).as_deref(), Some(url));
+        assert_eq!(
+            first_previewable_url(&format!("see ({url})."), None).as_deref(),
+            Some(url)
+        );
+        assert_eq!(
+            first_previewable_url("(https://example.com/a_(b)c))!", None).as_deref(),
+            Some("https://example.com/a_(b)c")
         );
     }
 

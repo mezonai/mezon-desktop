@@ -399,12 +399,21 @@ fn rich_highlights_with_link_hover(
 }
 
 fn render_rich_styled(msg: &Message, ctx: &RowCtx, body_color: gpui::Rgba) -> AnyElement {
-    let theme = ctx.theme;
-    let palette = RichRunPalette::from_theme(theme);
-    let colors = palette.memo_key(theme.text_muted.into());
     let Some(layout) = msg.rich_layout.as_ref() else {
         return div().into_any_element();
     };
+    render_rich_layout(msg, layout, ctx, body_color)
+}
+
+pub(crate) fn render_rich_layout(
+    msg: &Message,
+    layout: &std::sync::Arc<mezon_store::RichLayout>,
+    ctx: &RowCtx,
+    body_color: gpui::Rgba,
+) -> AnyElement {
+    let theme = ctx.theme;
+    let palette = RichRunPalette::from_theme(theme);
+    let colors = palette.memo_key(theme.text_muted.into());
     let cached = ctx.row_memo.borrow().rich_text.get(&msg.id).cloned();
     let plan = match cached {
         Some(plan) if rich_text_plan_matches(&plan, layout, colors, msg.is_edited) => plan,

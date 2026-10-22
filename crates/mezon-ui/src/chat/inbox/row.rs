@@ -5,11 +5,12 @@ use gpui::{
     App, ClickEvent, Entity, FontWeight, HighlightStyle, Hsla, ObjectFit, SharedString, StyledText,
     UnderlineStyle, Window, div, img, prelude::*, px, rgb,
 };
+use mezon_store::user_profile::CachedUserProfiles;
 use mezon_store::{
     AppConfig, AttachmentSeedInput, Channel, ChannelAttachment, ChannelId, ChannelList,
     ChannelType, ClanId, ClanList, ClanMembersStore, DirectMessageStore, InboxCategory,
     InboxMentionSpan, InboxNotification, MessageId, MessageSpan, ProfileContext, RolesStore,
-    Settings, TopicDiscussion, TopicReplyPreview, UserId, UsersByUserStore,
+    Settings, TopicDiscussion, TopicReplyPreview, TopicsStore, UserId, UserProfileView,
     attachment_link_is_image, attachment_link_is_video, format_file_size, inbox_spans_from_raw,
     message_content_is_attachment, resolve_user_profile,
 };
@@ -25,6 +26,7 @@ use crate::theme::Theme;
 use crate::util::download::save_with_progress_toast;
 
 const DEFAULT_ROLE_COLOR: u32 = 0x99_aab5;
+const TOPIC_DEFAULT_AVATAR: &str = "icons/avatar-user.svg";
 pub const FOR_YOU_ROW_HEIGHT: f32 = 76.;
 pub const MENTION_ROW_HEIGHT: f32 = 120.;
 pub const MESSAGE_ROW_HEIGHT: f32 = 128.;
@@ -75,6 +77,13 @@ pub(crate) struct NotificationRowView {
     has_more_attachment: bool,
     media: Option<InboxMediaOpen>,
     pub(crate) can_jump: bool,
+    pub(crate) profile_dependencies: ProfileDependencies,
+}
+
+#[derive(Clone, Copy, Default)]
+pub(crate) struct ProfileDependencies {
+    pub(crate) clans: [Option<ClanId>; 2],
+    pub(crate) global: bool,
 }
 
 #[derive(Clone)]
@@ -106,68 +115,74 @@ fn format_inbox_time(ts: u32, locale: &SharedString) -> String {
 fn resolve_for_you_profile(
     notification: &InboxNotification,
     sender_id: &str,
-    cx: &App,
-) -> (String, String, Option<SharedString>, String) {
+    profile_clan_id: Option<ClanId>,
+    profiles: &CachedUserProfiles,
+    mut clan_profile_for: impl FnMut(ClanId, UserId) -> Option<UserProfileView>,
+) -> (String, Option<SharedString>, String, ProfileDependencies) {
     let message = notification.message.as_ref();
-    let user_id = sender_id.parse::<UserId>().ok();
-    let store_user = user_id.and_then(|uid| UsersByUserStore::global(cx).read(cx).user(uid));
-    let clan_profile = notification
-        .clan_id
-        .parse::<ClanId>()
-        .ok()
-        .and_then(|clan| {
-            user_id.and_then(|uid| resolve_user_profile(uid, ProfileContext::Clan(clan), cx))
-        });
-
-    let username = message
-        .map(|m| m.username.as_str())
-        .filter(|name| !name.is_empty())
-        .map(str::to_string)
-        .or_else(|| store_user.map(|user| user.username.clone()))
+    let user_id = sender_id.parse::<UserId>().ok().filter(|id| !id.is_zero());
+    let payload_avatar = message
+        .map(|message| message.avatar.as_str())
+        .filter(|url| !url.is_empty())
         .or_else(|| {
-            clan_profile
-                .as_ref()
-                .map(|profile| profile.username.clone())
-        })
-        .unwrap_or_default();
-
-    let display_name = store_user
-        .map(|user| {
-            if user.display_name.is_empty() {
-                user.username.clone()
-            } else {
-                user.display_name.clone()
+            (!notification.avatar_url.is_empty()).then_some(notification.avatar_url.as_str())
+        });
+    let mut dependencies = ProfileDependencies::default();
+    let mut clan_profile = None;
+    if payload_avatar.is_none()
+        && let Some(uid) = user_id
+    {
+        let notification_clan = notification
+            .effective_clan_id()
+            .and_then(|id| id.parse::<ClanId>().ok());
+        for (index, clan) in [
+            notification_clan,
+            profile_clan_id.filter(|clan| Some(*clan) != notification_clan),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            dependencies.clans[index] = clan;
+            if let Some(profile) = clan.and_then(|clan| clan_profile_for(clan, uid))
+                && !profile.avatar_url.is_empty()
+            {
+                clan_profile = Some(profile);
+                break;
             }
-        })
-        .or_else(|| message.map(sender_display_name))
-        .or_else(|| {
-            clan_profile.as_ref().map(|profile| {
-                if profile.display_name.is_empty() {
-                    profile.username.clone()
-                } else {
-                    profile.display_name.clone()
-                }
-            })
-        })
+        }
+    }
+    dependencies.global = clan_profile.is_none();
+    let profile = clan_profile
+        .as_ref()
+        .or_else(|| user_id.and_then(|uid| profiles.profile(uid)));
+    let username = message
+        .map(|message| message.username.as_str())
         .filter(|name| !name.is_empty())
-        .or_else(|| (!username.is_empty()).then(|| username.clone()))
+        .or_else(|| profile.map(|profile| profile.username.as_str()))
         .unwrap_or_default();
+    let display_name = if clan_profile.is_some() {
+        profile
+            .map(|profile| profile.display_name.clone())
+            .unwrap_or_default()
+    } else {
+        message
+            .map(sender_display_name)
+            .filter(|name| !name.is_empty())
+            .or_else(|| {
+                profile
+                    .map(|profile| profile.display_name.clone())
+                    .filter(|name| !name.is_empty())
+            })
+            .unwrap_or_else(|| username.to_string())
+    };
+    let avatar = payload_avatar.or_else(|| {
+        clan_profile
+            .as_ref()
+            .map(|profile| profile.avatar_url.as_str())
+            .or_else(|| user_id.and_then(|uid| profiles.cached_avatar_url(uid)))
+    });
 
-    let avatar = message
-        .and_then(|m| (!m.avatar.is_empty()).then(|| m.avatar.clone()))
-        .or_else(|| (!notification.avatar_url.is_empty()).then(|| notification.avatar_url.clone()))
-        .or_else(|| {
-            store_user
-                .map(|user| user.avatar_url.clone())
-                .filter(|url| !url.is_empty())
-        })
-        .or_else(|| {
-            clan_profile
-                .map(|profile| profile.avatar_url)
-                .filter(|url| !url.is_empty())
-        });
-
-    let subject_suffix = if !username.is_empty() && notification.subject.starts_with(&username) {
+    let subject_suffix = if !username.is_empty() && notification.subject.starts_with(username) {
         notification.subject[username.len()..].to_string()
     } else {
         notification.subject.clone()
@@ -175,9 +190,9 @@ fn resolve_for_you_profile(
 
     (
         display_name,
-        username,
-        avatar_from(avatar.as_deref().unwrap_or("")),
+        avatar_from(avatar.unwrap_or("")),
         subject_suffix,
+        dependencies,
     )
 }
 
@@ -362,17 +377,14 @@ pub(crate) fn notification_jump_route(notification: &InboxNotification, cx: &App
 pub(crate) fn build_notification_row_view(
     notification: &InboxNotification,
     locale: &SharedString,
+    profile_clan_id: Option<ClanId>,
+    profiles: &CachedUserProfiles,
     cx: &App,
 ) -> NotificationRowView {
     let clan_id = notification
         .effective_clan_id()
         .and_then(|id| id.parse::<ClanId>().ok());
-    let sender_id = notification
-        .message
-        .as_ref()
-        .map(|m| m.sender_id.as_str())
-        .filter(|id| !id.is_empty() && *id != "0")
-        .unwrap_or(notification.sender_id.as_str());
+    let sender_id = notification_sender_id(notification);
     let fallback_avatar = notification
         .message
         .as_ref()
@@ -389,6 +401,7 @@ pub(crate) fn build_notification_row_view(
     let is_mentions = notification.category == InboxCategory::Mentions;
     let is_messages = notification.category == InboxCategory::Messages;
     let (resolved_name, mut avatar_url, _) = clan_id
+        .filter(|_| notification.category != InboxCategory::ForYou)
         .map(|clan| resolve_sender(clan, sender_id, fallback_avatar, &fallback_name, cx))
         .unwrap_or((
             fallback_name.clone().into(),
@@ -463,9 +476,23 @@ pub(crate) fn build_notification_row_view(
         _ => None,
     };
 
+    let mut profile_dependencies = ProfileDependencies {
+        clans: [clan_id, None],
+        global: false,
+    };
     let for_you_line = if notification.category == InboxCategory::ForYou {
-        let (display_name, _, avatar, subject_suffix) =
-            resolve_for_you_profile(notification, sender_id, cx);
+        let (display_name, avatar, subject_suffix, dependencies) = resolve_for_you_profile(
+            notification,
+            sender_id,
+            profile_clan_id,
+            profiles,
+            |clan, uid| {
+                ClanMembersStore::try_global(cx)
+                    .and_then(|store| store.read(cx).member(clan, uid))
+                    .map(|member| UserProfileView::from_clan_member(member, false))
+            },
+        );
+        profile_dependencies = dependencies;
         if avatar.is_some() {
             avatar_url = avatar;
         }
@@ -497,6 +524,7 @@ pub(crate) fn build_notification_row_view(
     });
 
     NotificationRowView {
+        profile_dependencies,
         sender_name,
         avatar_url,
         time_label,
@@ -522,16 +550,26 @@ pub(crate) fn build_notification_row_view(
     }
 }
 
+pub(crate) fn notification_sender_id(notification: &InboxNotification) -> &str {
+    notification
+        .message
+        .as_ref()
+        .map(|message| message.sender_id.as_str())
+        .filter(|id| !id.is_empty() && *id != "0")
+        .unwrap_or(notification.sender_id.as_str())
+}
+
 pub(crate) fn build_topic_row_view(topic: &TopicDiscussion, cx: &App) -> TopicRowView {
-    let clan_id = topic.clan_id.parse::<ClanId>().ok();
-    let sender_id = if topic.last_sender_id.is_empty() {
-        topic.creator_id.as_str()
-    } else {
-        topic.last_sender_id.as_str()
-    };
-    let (avatar_name, avatar_url, _) = clan_id
-        .map(|clan| resolve_sender(clan, sender_id, "", "", cx))
-        .unwrap_or((SharedString::default(), None, false));
+    let (avatar_name, avatar_url) = TopicsStore::global(cx)
+        .read(cx)
+        .inbox_avatar(topic, cx)
+        .map(|(name, avatar)| {
+            let avatar = AppConfig::try_global(cx)
+                .map(|cfg| cfg.avatar_proxy(avatar))
+                .unwrap_or_else(|| avatar.to_string());
+            (SharedString::from(name.to_string()), avatar_from(&avatar))
+        })
+        .unwrap_or_default();
     TopicRowView {
         avatar_name,
         avatar_url,
@@ -1872,12 +1910,18 @@ pub fn render_topic_body(
         .items_start()
         .p_1()
         .pt_1()
-        .child(render_avatar(
-            &view.avatar_name,
-            view.avatar_url.as_ref(),
-            Size::Medium,
-            avatar_cache,
-        ))
+        .child(
+            Avatar::new()
+                .name(view.avatar_name.clone())
+                .src(
+                    view.avatar_url
+                        .clone()
+                        .unwrap_or_else(|| TOPIC_DEFAULT_AVATAR.into()),
+                )
+                .fallback_src(TOPIC_DEFAULT_AVATAR)
+                .with_size(Size::Medium)
+                .image_cache(avatar_cache),
+        )
         .child(
             v_flex()
                 .flex_1()
@@ -1917,6 +1961,190 @@ pub fn notification_copy_text(notification: &InboxNotification) -> Option<String
 #[cfg(test)]
 mod tests {
     use super::*;
+    fn notification() -> InboxNotification {
+        InboxNotification {
+            id: "notification".into(),
+            category: InboxCategory::ForYou,
+            subject: "sender sent a coffee".into(),
+            sender_id: "7".into(),
+            clan_id: "1".into(),
+            channel_id: String::new(),
+            topic_id: None,
+            channel_type: 0,
+            avatar_url: String::new(),
+            create_time_seconds: 0,
+            code: 0,
+            message: None,
+        }
+    }
+
+    fn profile(name: &str, avatar: &str) -> UserProfileView {
+        UserProfileView {
+            user_id: UserId(7),
+            username: "sender".into(),
+            display_name: name.into(),
+            avatar_url: avatar.into(),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn for_you_resolves_clan_fallbacks_and_tracks_late_updates() {
+        let item = notification();
+        let profiles = CachedUserProfiles::from_iter([profile("Global", "global.png")]);
+        for (original, panel, expected_name, expected_avatar, expected_clans) in [
+            (
+                Some(profile("Original", "original.png")),
+                Some(profile("Panel", "panel.png")),
+                "Original",
+                "original.png",
+                [Some(ClanId(1)), None],
+            ),
+            (
+                None,
+                Some(profile("Panel", "panel.png")),
+                "Panel",
+                "panel.png",
+                [Some(ClanId(1)), Some(ClanId(2))],
+            ),
+            (
+                Some(profile("Empty", "")),
+                Some(profile("Panel", "panel.png")),
+                "Panel",
+                "panel.png",
+                [Some(ClanId(1)), Some(ClanId(2))],
+            ),
+            (
+                None,
+                None,
+                "Global",
+                "global.png",
+                [Some(ClanId(1)), Some(ClanId(2))],
+            ),
+        ] {
+            let (name, avatar, suffix, deps) =
+                resolve_for_you_profile(&item, "7", Some(ClanId(2)), &profiles, |clan, uid| {
+                    assert_eq!(uid, UserId(7));
+                    match clan {
+                        ClanId(1) => original.clone(),
+                        ClanId(2) => panel.clone(),
+                        _ => panic!("unexpected clan"),
+                    }
+                });
+            assert_eq!(name, expected_name);
+            assert_eq!(avatar.as_deref(), Some(expected_avatar));
+            assert_eq!(suffix, " sent a coffee");
+            assert_eq!(deps.clans, expected_clans);
+            assert_eq!(deps.global, expected_name == "Global");
+        }
+    }
+
+    #[test]
+    fn for_you_preserves_payload_avatar_across_panel_contexts() {
+        let mut item = notification();
+        item.avatar_url = "notification.png".into();
+        let profiles = CachedUserProfiles::from_iter([profile("Global", "global.png")]);
+        for clan in [None, Some(ClanId(1)), Some(ClanId(2))] {
+            let (name, avatar, _, deps) =
+                resolve_for_you_profile(&item, "7", clan, &profiles, |_, _| {
+                    panic!("payload must not resolve clan")
+                });
+            assert_eq!(name, "Global");
+            assert_eq!(avatar.as_deref(), Some("notification.png"));
+            assert_eq!(deps.clans, [None, None]);
+        }
+    }
+
+    #[test]
+    fn for_you_deduplicates_clan_and_rejects_invalid_sender() {
+        let item = notification();
+        let profiles = CachedUserProfiles::default();
+        let mut lookups = 0;
+        let (_, avatar, _, _) =
+            resolve_for_you_profile(&item, "7", Some(ClanId(1)), &profiles, |_, _| {
+                lookups += 1;
+                None
+            });
+        assert_eq!(lookups, 1);
+        assert!(avatar.is_none());
+        for sender in ["", "0", "invalid"] {
+            let (name, avatar, suffix, _) =
+                resolve_for_you_profile(&item, sender, Some(ClanId(2)), &profiles, |_, _| {
+                    panic!("invalid sender lookup")
+                });
+            assert!(name.is_empty());
+            assert!(avatar.is_none());
+            assert_eq!(suffix, item.subject);
+        }
+    }
+
+    #[test]
+    fn for_you_global_updates_preserve_nonempty_fallback_fields() {
+        let item = notification();
+        let mut sources = Vec::new();
+        for (incoming, expected_name, expected_avatar) in [
+            (profile("DM", "dm.png"), "DM", "dm.png"),
+            (profile("Friend", "friend.png"), "Friend", "friend.png"),
+            (profile("User", ""), "User", "friend.png"),
+            (profile("User", "user.png"), "User", "user.png"),
+        ] {
+            sources.push(incoming);
+            let profiles = CachedUserProfiles::from_iter(sources.clone());
+            let (name, avatar, _, deps) =
+                resolve_for_you_profile(&item, "7", None, &profiles, |_, _| None);
+            assert_eq!(name, expected_name);
+            assert_eq!(avatar.as_deref(), Some(expected_avatar));
+            assert!(deps.global);
+        }
+        let profiles = CachedUserProfiles::from_iter(sources);
+        let (_, avatar, _, _) = resolve_for_you_profile(&item, "8", None, &profiles, |_, _| None);
+        assert!(avatar.is_none());
+    }
+
+    #[gpui::test]
+    fn notification_builder_preserves_message_identity_in_all_tabs(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            let mut item = notification();
+            item.clan_id.clear();
+            item.avatar_url = "notification.png".into();
+            item.message = Some(mezon_store::InboxMessagePreview {
+                message_id: String::new(),
+                channel_id: String::new(),
+                clan_id: String::new(),
+                sender_id: "7".into(),
+                content: String::new(),
+                raw_content: String::new(),
+                avatar: "message.png".into(),
+                display_name: "Payload".into(),
+                username: "sender".into(),
+                create_time_seconds: 0,
+                attachment_link: String::new(),
+                attachment_type: String::new(),
+                attachment_filename: String::new(),
+                attachment_size: 0,
+                attachment_thumbnail: String::new(),
+                has_more_attachment: false,
+                mention_spans: Vec::new(),
+                topic_id: None,
+            });
+            for category in [
+                InboxCategory::ForYou,
+                InboxCategory::Messages,
+                InboxCategory::Mentions,
+            ] {
+                item.category = category;
+                let view = build_notification_row_view(
+                    &item,
+                    &"en".into(),
+                    Some(ClanId(2)),
+                    &CachedUserProfiles::default(),
+                    cx,
+                );
+                assert_eq!(view.avatar_url.as_deref(), Some("message.png"));
+                assert_eq!(view.sender_name.as_ref(), "Payload");
+            }
+        });
+    }
 
     #[test]
     fn mention_byte_range_handles_vietnamese_utf16_offsets() {

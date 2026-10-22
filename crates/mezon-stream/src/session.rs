@@ -14,8 +14,8 @@ use libwebrtc::peer_connection_factory::{
 use libwebrtc::rtp_transceiver::RtpTransceiverDirection;
 use libwebrtc::session_description::{SdpType, SessionDescription};
 use mezon_voice::{
-    AudioFormat, SfuCloseAction, StreamAudioOutput, sfu_close_action, sfu_reconnect_delay,
-    stabilize_inactive_video_sections,
+    AudioFormat, MEDIA_POOL_VERSION, SfuCloseAction, StreamAudioOutput, sfu_close_action,
+    sfu_reconnect_delay, stabilize_inactive_video_sections,
 };
 use parking_lot::Mutex;
 use serde_json::Value;
@@ -329,7 +329,8 @@ async fn run_session_once(
             "type": "join",
             "room": config.room,
             "token": token,
-            "role": "audience"
+            "role": "audience",
+            "media_pool_version": MEDIA_POOL_VERSION
         }),
     )
     .await

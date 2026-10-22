@@ -22,13 +22,14 @@ PKGS=(
     -p mezon-theme
     -p mezon-widgets
     -p mezon-canvas
--p mezon-video
+    -p mezon-video
     -p mezon-updater
     -p mezon-audio
     -p mezon-voice
     -p mezon-stream
     -p mezon-record
     -p mezon-active-windows
+    -p mezon-grammar
     -p mmn-client
 )
 

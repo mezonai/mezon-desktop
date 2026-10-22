@@ -9,7 +9,7 @@ use gpui::{
 };
 use mezon_store::{may_be_transcoded, open_media_url_external, transcoded_hls_playlist};
 #[cfg(any(windows, target_os = "macos"))]
-use mezon_video::{PreparedWebm, is_webm_url};
+use mezon_video::{PreparedVideo, needs_prepared_open};
 use mezon_video::{VideoFrame, VideoPlayer};
 
 use crate::app::shell::Shell;
@@ -268,14 +268,14 @@ impl VideoPlayerView {
                 this.playing_playlist = playing_playlist;
             });
             #[cfg(any(windows, target_os = "macos"))]
-            if is_webm_url(url.as_ref()) {
+            if needs_prepared_open(url.as_ref()) {
                 let open_url = url.clone();
                 let prepared = cx
                     .background_executor()
-                    .spawn(async move { PreparedWebm::open(open_url.as_ref(), decode_max_size) })
+                    .spawn(async move { PreparedVideo::open(open_url.as_ref(), decode_max_size) })
                     .await;
                 let _ = this.update(cx, |this, cx| {
-                    this.finish_open(prepared.map(VideoPlayer::from_prepared_webm), cx);
+                    this.finish_open(prepared.and_then(VideoPlayer::from_prepared), cx);
                 });
                 return;
             }

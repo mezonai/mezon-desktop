@@ -1,8 +1,8 @@
 use crate::app::shell::Shell;
 use crate::components::compositions::channel_row::channel_type_icon;
 use crate::components::primitives::{
-    Button, ButtonVariants, Icon, IconName, Input, InputEvent, InputState, Radio, Switch, h_flex,
-    v_flex,
+    Button, ButtonVariants, Icon, IconName, Input, InputEvent, InputState, Radio, Switch, Tooltip,
+    h_flex, v_flex,
 };
 use crate::router::{Route, navigate};
 use crate::theme::{ActiveTheme, Theme};
@@ -325,6 +325,8 @@ impl Render for CreateChannelModal {
                     .items_start()
                     .child(
                         h_flex()
+                            .flex_1()
+                            .min_w_0()
                             .gap_2()
                             .items_center()
                             .child(
@@ -336,9 +338,13 @@ impl Render for CreateChannelModal {
                             )
                             .child(
                                 div()
+                                    .id("create-channel-category-name")
+                                    .min_w_0()
+                                    .truncate()
                                     .text_sm()
                                     .font_weight(FontWeight::BOLD)
                                     .text_color(theme.text_link)
+                                    .tooltip(Tooltip::text(self.category_name.clone()))
                                     .child(self.category_name.clone()),
                             ),
                     )

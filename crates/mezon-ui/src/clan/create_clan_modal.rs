@@ -320,6 +320,18 @@ impl CreateClanModal {
                 let label: SharedString = mezon_i18n::t(locale, entry.key).to_string().into();
                 let template_id = entry.id;
                 let icon = entry.icon;
+                let template_icon = match template_id {
+                    TemplateId::Gaming | TemplateId::Friends | TemplateId::LocalCommunity => {
+                        img(icon.path())
+                            .size(px(20.))
+                            .flex_none()
+                            .into_any_element()
+                    }
+                    _ => Icon::new(icon)
+                        .size(px(20.))
+                        .text_color(theme.tokens.text_theme_primary)
+                        .into_any_element(),
+                };
                 div()
                     .id(SharedString::from(format!("template-{}", entry.key)))
                     .w_full()
@@ -337,11 +349,7 @@ impl CreateClanModal {
                     .on_click(cx.listener(move |this, _, _window, cx| {
                         this.go_to_details(Some(template_id), cx)
                     }))
-                    .child(
-                        Icon::new(icon)
-                            .size(px(20.))
-                            .text_color(theme.tokens.text_theme_primary),
-                    )
+                    .child(template_icon)
                     .child(
                         div()
                             .font_weight(gpui::FontWeight::SEMIBOLD)

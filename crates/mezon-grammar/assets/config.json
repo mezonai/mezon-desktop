@@ -1,0 +1,15 @@
+{
+  "vocab_size": 511,
+  "d_model": 64,
+  "n_layers": 2,
+  "n_heads": 2,
+  "d_ff": 128,
+  "max_seq_len": 128,
+  "dropout": 0.1,
+  "num_intents": 12,
+  "pad_token_id": 0,
+  "unk_token_id": 1,
+  "bos_token_id": 2,
+  "eos_token_id": 3,
+  "mask_token_id": 4
+}

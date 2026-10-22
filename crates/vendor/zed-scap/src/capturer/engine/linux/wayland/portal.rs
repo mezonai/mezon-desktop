@@ -14,7 +14,7 @@ use dbus::{
 // {
 use dbus::blocking;
 
-use crate::capturer::engine::linux::error::LinCapError;
+use crate::capturer::{engine::linux::error::LinCapError, Area, Point, Size};
 
 #[allow(unused)]
 trait OrgFreedesktopPortalScreenCast {
@@ -163,7 +163,7 @@ impl<'a, T: blocking::BlockingSender, C: ::std::ops::Deref<Target = T>> OrgFreed
 
 type Response = Option<OrgFreedesktopPortalRequestResponse>;
 
-#[derive(Debug)]
+#[derive(Debug, Default)]
 #[allow(dead_code)]
 pub struct StreamVardict {
     id: Option<String>,
@@ -182,23 +182,65 @@ impl Stream {
         self.0
     }
 
-    pub fn from_dbus(stream: &Variant<Box<dyn RefArg>>) -> Option<Self> {
-        let mut stream = stream.as_iter()?.next()?.as_iter()?;
-        let pipewire_node_id = stream.next()?.as_iter()?.next()?.as_u64()?;
-
-        // TODO: Get the rest of the properties
-
-        Some(Self(
-            pipewire_node_id as u32,
-            StreamVardict {
-                id: None,
-                position: None,
-                size: None,
-                source_type: None,
-                mapping_id: None,
+    pub fn monitor_area(&self) -> Option<Area> {
+        let props = &self.1;
+        let is_monitor = match props.source_type {
+            Some(source_type) => source_type == MONITOR_SOURCE_TYPE,
+            None => props.position.is_some(),
+        };
+        if !is_monitor {
+            return None;
+        }
+        let (x, y) = props.position?;
+        let (width, height) = props.size?;
+        Some(Area {
+            origin: Point {
+                x: x as f64,
+                y: y as f64,
             },
-        ))
+            size: Size {
+                width: width as f64,
+                height: height as f64,
+            },
+        })
     }
+
+    pub fn from_dbus(stream: &Variant<Box<dyn RefArg>>) -> Option<Self> {
+        let mut streams = stream.as_iter()?.next()?.as_iter()?;
+        let mut stream = streams.next()?.as_iter()?;
+        let pipewire_node_id = stream.next()?.as_u64()?;
+        let props = stream.next().map(stream_vardict).unwrap_or_default();
+
+        Some(Self(pipewire_node_id as u32, props))
+    }
+}
+
+const MONITOR_SOURCE_TYPE: u32 = 1;
+
+fn stream_vardict(dict: &dyn RefArg) -> StreamVardict {
+    let mut props = StreamVardict::default();
+    let Some(mut entries) = dict.as_iter() else {
+        return props;
+    };
+    while let (Some(key), Some(value)) = (entries.next(), entries.next()) {
+        let Some(value) = value.as_iter().and_then(|mut inner| inner.next()) else {
+            continue;
+        };
+        match key.as_str() {
+            Some("position") => props.position = int_pair(value),
+            Some("size") => props.size = int_pair(value),
+            Some("source_type") => props.source_type = value.as_u64().map(|v| v as u32),
+            _ => {}
+        }
+    }
+    props
+}
+
+fn int_pair(value: &dyn RefArg) -> Option<(i32, i32)> {
+    let mut items = value.as_iter()?;
+    let first = items.next()?.as_i64()?;
+    let second = items.next()?.as_i64()?;
+    Some((first as i32, second as i32))
 }
 
 macro_rules! match_response {

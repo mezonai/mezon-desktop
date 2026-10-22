@@ -1,3 +1,4 @@
+mod annotation;
 mod audio;
 mod camera;
 pub mod compose;
@@ -44,6 +45,9 @@ use parking_lot::{Condvar, Mutex};
 
 use sfu::{SfuConfig, SfuEngine, SfuEvent, SfuPeer};
 
+pub use annotation::{
+    AnnotationItem, AnnotationPoint, AnnotationScene, ScreenAnnotations, arrow_head,
+};
 pub use audio::{
     AudioFormat, AudioIo, DeviceResetKind, MicResampler, PlaybackMixer, SpeakingLevels,
 };
@@ -60,6 +64,7 @@ pub use permission::{
 pub use record::{
     RECORD_FPS, RECORD_HEIGHT, RECORD_WIDTH, RecordSession, RecordStarter, RecordTaps,
 };
+pub use sfu::messages::MEDIA_POOL_VERSION;
 pub use sfu::sdp::stabilize_inactive_video_sections;
 pub use sfu::{MediaRefusal, RemovalCause, SfuRole};
 pub use stream_playback::StreamAudioOutput;
@@ -86,7 +91,8 @@ pub use screen_targets::{
 #[cfg(target_os = "macos")]
 pub use video::VideoSurface;
 pub use video::{
-    VideoFrameData, VideoFrameStore, i420_to_bgra_into, local_camera_key, rotate_bgra_into,
+    SharedMonitor, VideoFrameData, VideoFrameStore, i420_to_bgra_into, local_camera_key,
+    rotate_bgra_into,
 };
 
 use crate::screen::ScreenStopper;

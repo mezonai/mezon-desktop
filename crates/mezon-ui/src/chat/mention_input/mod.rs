@@ -17,6 +17,7 @@ use gpui::{
     actions, canvas, deferred, div, img, prelude::*, px, uniform_list,
 };
 use mezon_client::transport::QUICK_MENU_TYPE_FLASH;
+use mezon_grammar::client::{MAX_CORRECTION_CHAR_COUNT, MezonGrammarClient};
 use mezon_store::{
     AccountEvent, AccountStore, AppConfig, AudioStore, AuthState, BadgeService, Channel,
     ChannelEvent, ChannelId, ChannelList, ChannelMembersEvent, ChannelMembersStore, ChannelType,
@@ -70,11 +71,14 @@ const RECORDING_COLOR: Rgba = Rgba {
 };
 const MAX_SUGGESTIONS: usize = 10;
 const SLOW_SEARCH_HINT: Duration = Duration::from_secs(1);
+const GRAMMAR_CORRECTION_DEBOUNCE: Duration = Duration::from_millis(200);
 const MAX_EMOJI_CANDIDATES: usize = 20;
 const MENTION_HERE_DISPLAY: &str = "@here";
 const MENTION_HERE_NORM: &str = "@HERE";
 const CONVERT_TO_FILE_THRESHOLD: usize = 3700;
 const CONVERT_PREFIX_LEN: usize = 8;
+const COMMITTED_MASK_START: char = '\u{E010}';
+const COMMITTED_MASK_END: char = '\u{E011}';
 const PASTE_SAFETY_CAP_UTF16: usize = 100_000;
 const STREAM_MODE_DM: i32 = 4;
 const MENTION_ROW_PX: f32 = 40.;
@@ -114,6 +118,54 @@ pub fn init(cx: &mut App) {
             });
         });
     });
+}
+
+pub(crate) fn grammar_correction_bar(
+    theme: &Theme,
+    text: SharedString,
+    cap_top: bool,
+    on_apply: impl Fn(&gpui::ClickEvent, &mut Window, &mut App) + 'static,
+    on_dismiss: impl Fn(&gpui::ClickEvent, &mut Window, &mut App) + 'static,
+) -> impl IntoElement {
+    div()
+        .id("grammar-correction-bar")
+        .flex()
+        .flex_row()
+        .items_center()
+        .justify_between()
+        .w_full()
+        .gap_2()
+        .p_2()
+        .when(cap_top, |bar| bar.rounded_tl_lg().rounded_tr_lg())
+        .bg(theme.tokens.theme_setting_nav)
+        .text_size(px(14.))
+        .child(
+            div()
+                .id("grammar-correction-apply")
+                .flex_1()
+                .min_w_0()
+                .cursor_pointer()
+                .text_color(theme.tokens.text_theme_primary)
+                .child(text)
+                .on_click(on_apply),
+        )
+        .child(
+            div()
+                .id("grammar-correction-close")
+                .flex()
+                .items_center()
+                .justify_center()
+                .flex_none()
+                .size_5()
+                .cursor_pointer()
+                .hover(|style| style.opacity(0.7))
+                .on_click(on_dismiss)
+                .child(
+                    Icon::new(IconName::Close)
+                        .size_4()
+                        .text_color(theme.tokens.text_theme_primary),
+                ),
+        )
 }
 
 pub(crate) fn toggle_anonymous_shortcut(in_topic: bool, cx: &mut App) {
@@ -263,6 +315,52 @@ impl CommittedToken {
             end: token.end,
         }
     }
+}
+
+fn committed_mask_placeholder(index: usize) -> String {
+    format!("{COMMITTED_MASK_START}{index}.{COMMITTED_MASK_END}")
+}
+
+fn mask_committed_for_grammar(text: &str, committed: &[CommittedToken]) -> (String, Vec<String>) {
+    let mut tokens: Vec<&CommittedToken> = committed
+        .iter()
+        .filter(|token| {
+            matches!(
+                token.kind,
+                TokenKind::Mention { .. } | TokenKind::Emoji { .. }
+            )
+        })
+        .collect();
+    tokens.sort_by_key(|token| token.start);
+    let mut out = String::with_capacity(text.len());
+    let mut originals = Vec::with_capacity(tokens.len());
+    let mut cursor = 0usize;
+    for token in tokens {
+        if token.start < cursor || token.end > text.len() || token.start >= token.end {
+            continue;
+        }
+        if !text.is_char_boundary(token.start) || !text.is_char_boundary(token.end) {
+            continue;
+        }
+        if text.get(token.start..token.end) != Some(token.display.as_str()) {
+            continue;
+        }
+        out.push_str(&text[cursor..token.start]);
+        out.push_str(&committed_mask_placeholder(originals.len()));
+        originals.push(token.display.clone());
+        cursor = token.end;
+    }
+    out.push_str(&text[cursor..]);
+    (out, originals)
+}
+
+fn unmask_committed_for_grammar(text: &str, originals: &[String]) -> String {
+    let mut current = text.to_string();
+    for (index, original) in originals.iter().enumerate() {
+        let placeholder = committed_mask_placeholder(index);
+        current = current.replacen(&placeholder, original, 1);
+    }
+    current
 }
 
 #[derive(Clone)]
@@ -797,6 +895,10 @@ pub struct MentionInput {
     ogp_url: Option<String>,
     ogp_generation: u64,
     _ogp_task: Option<Task<()>>,
+    grammar_suggestion: Option<SharedString>,
+    grammar_correction_open: bool,
+    grammar_generation: u64,
+    _grammar_task: Option<Task<()>>,
     _input_sub: Subscription,
     _store_subs: Vec<Subscription>,
 }
@@ -1022,6 +1124,15 @@ impl MentionInput {
                 }),
             );
         }
+        store_subs.push(cx.observe(&settings, |this, _, cx| {
+            if !this.settings.read(cx).grammar_correction_enabled {
+                this.clear_grammar_correction(cx);
+            } else {
+                let content = this.input.read(cx).value_shared();
+                this.schedule_grammar_correction(content.as_ref(), cx);
+            }
+            cx.notify();
+        }));
         let avatar_cache = crate::image_cache::shared_avatar_cache(cx);
         let emoji_cache = crate::image_cache::shared_emoji_cache(cx);
         let preview_cache = cx.new(|cx| {
@@ -1095,6 +1206,10 @@ impl MentionInput {
             ogp_url: None,
             ogp_generation: 0,
             _ogp_task: None,
+            grammar_suggestion: None,
+            grammar_correction_open: false,
+            grammar_generation: 0,
+            _grammar_task: None,
             _input_sub: input_sub,
             _store_subs: store_subs,
         }
@@ -1964,6 +2079,10 @@ impl MentionInput {
 
     fn on_enter(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.enter_pending = false;
+        if self.grammar_correction_open && self.grammar_suggestion.is_some() {
+            self.apply_grammar_correction(window, cx);
+            return;
+        }
         let waiting = self.active_at.is_some() && self.remote_searching();
         if self.popup_visible() || waiting {
             if self.active_sigil == Sigil::At && self.active_query.contains(' ') {
@@ -2087,6 +2206,7 @@ impl MentionInput {
             }
         };
         self.update_ogp_preview(&content, cx);
+        self.schedule_grammar_correction(&content, cx);
         self.last_content = content;
         if std::mem::take(&mut self.suppress_typing) {
             return;
@@ -3303,13 +3423,190 @@ impl MentionInput {
         toggle_anonymous_shortcut(true, cx);
     }
 
-    fn on_accept(&mut self, _: &MentionAccept, window: &mut Window, cx: &mut Context<Self>) {
-        if self.popup_visible() && !self.accept_best(window, cx) {
+    fn clear_grammar_correction(&mut self, _cx: &mut Context<Self>) {
+        self.grammar_suggestion = None;
+        self.grammar_correction_open = false;
+        self._grammar_task = None;
+        self.grammar_generation += 1;
+    }
+
+    fn schedule_grammar_correction(&mut self, content: &str, cx: &mut Context<Self>) {
+        if !self.settings.read(cx).grammar_correction_enabled {
+            self.clear_grammar_correction(cx);
+            return;
+        }
+        if content.trim().is_empty() {
+            self.clear_grammar_correction(cx);
+            return;
+        }
+        if content.chars().count() > MAX_CORRECTION_CHAR_COUNT {
+            self.clear_grammar_correction(cx);
+            return;
+        }
+        if self.grammar_suggestion.is_some() || self.grammar_correction_open {
+            self.grammar_suggestion = None;
+            self.grammar_correction_open = false;
             cx.notify();
+        }
+        self.grammar_generation += 1;
+        let generation = self.grammar_generation;
+        let draft_snapshot = content.to_string();
+        let (masked_draft, committed_masks) = mask_committed_for_grammar(content, &self.committed);
+        self._grammar_task = Some(cx.spawn(async move |this, cx| {
+            cx.background_executor()
+                .timer(GRAMMAR_CORRECTION_DEBOUNCE)
+                .await;
+            let original_draft = draft_snapshot.clone();
+            let suggestion = cx
+                .background_executor()
+                .spawn(async move {
+                    let client = MezonGrammarClient::shared();
+                    let result = client.correct_within_limit(&masked_draft)?;
+                    let corrected =
+                        unmask_committed_for_grammar(&result.corrected, &committed_masks);
+                    if corrected.contains('\u{E010}') {
+                        return None;
+                    }
+                    if corrected == original_draft.trim() {
+                        None
+                    } else {
+                        Some(corrected)
+                    }
+                })
+                .await;
+            let _ = this.update(cx, |this, cx| {
+                if this.grammar_generation != generation {
+                    return;
+                }
+                if this.input.read(cx).value_shared().as_ref() != draft_snapshot.as_str() {
+                    this.grammar_suggestion = None;
+                    this.grammar_correction_open = false;
+                    cx.notify();
+                    return;
+                }
+                this._grammar_task = None;
+                this.grammar_suggestion = suggestion.map(SharedString::from);
+                if this.grammar_suggestion.is_none() {
+                    this.grammar_correction_open = false;
+                }
+                cx.notify();
+            });
+        }));
+    }
+
+    pub(crate) fn dismiss_grammar_popup(&mut self, cx: &mut Context<Self>) {
+        if !self.grammar_correction_open {
+            return;
+        }
+        self.grammar_correction_open = false;
+        cx.notify();
+    }
+
+    pub(crate) fn grammar_correction_text(&self) -> Option<SharedString> {
+        if self.grammar_correction_open {
+            self.grammar_suggestion.clone()
+        } else {
+            None
         }
     }
 
+    pub(crate) fn apply_grammar_correction(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(text) = self.grammar_suggestion.clone() else {
+            return;
+        };
+        self.clear_grammar_correction(cx);
+        let corrected = text.to_string();
+        let end = self.input.read(cx).value_shared().len();
+        self.retarget_committed(&corrected);
+        self.input.update(cx, |input, cx| {
+            input.replace_range(0..end, &corrected, window, cx);
+        });
+        self.sync_ranges(cx);
+        self.sync_history_payload(cx);
+    }
+
+    fn retarget_committed(&mut self, text: &str) {
+        let mut search_from = 0usize;
+        let mut tokens = std::mem::take(&mut self.committed);
+        tokens.sort_by_key(|token| token.start);
+        let mut kept = Vec::with_capacity(tokens.len());
+        for mut token in tokens {
+            let display = token.display.as_str();
+            if display.is_empty() {
+                continue;
+            }
+            let Some(relative) = text[search_from..].find(display) else {
+                continue;
+            };
+            let start = search_from + relative;
+            let end = start + display.len();
+            token.start = start;
+            token.end = end;
+            search_from = end;
+            kept.push(token);
+        }
+        self.committed = kept;
+    }
+
+    pub(crate) fn fill_quick_reply(
+        &mut self,
+        text: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let end = self.input.read(cx).value_shared().len();
+        self.input.update(cx, |input, cx| {
+            input.replace_range(0..end, text, window, cx);
+        });
+        self.focus_input(window, cx);
+    }
+
+    fn build_grammar_correction_popup(&self, cx: &mut Context<Self>) -> AnyElement {
+        let theme = cx.theme().clone();
+        let text = self.grammar_suggestion.clone().unwrap_or_default();
+        grammar_correction_bar(
+            &theme,
+            text,
+            true,
+            cx.listener(|this, _, window, cx| {
+                this.apply_grammar_correction(window, cx);
+            }),
+            cx.listener(|this, _, _, cx| {
+                this.dismiss_grammar_popup(cx);
+            }),
+        )
+        .into_any_element()
+    }
+
+    fn on_accept(&mut self, _: &MentionAccept, window: &mut Window, cx: &mut Context<Self>) {
+        if self.popup_visible() {
+            if !self.accept_best(window, cx) {
+                cx.notify();
+            }
+            return;
+        }
+        if self.popup.is_some() {
+            cx.propagate();
+            return;
+        }
+        if self.grammar_correction_open {
+            self.apply_grammar_correction(window, cx);
+            return;
+        }
+        if self.grammar_suggestion.is_some() {
+            self.grammar_correction_open = true;
+            cx.notify();
+            return;
+        }
+        cx.propagate();
+    }
+
     fn on_dismiss(&mut self, _: &MentionDismiss, window: &mut Window, cx: &mut Context<Self>) {
+        if self.grammar_correction_open {
+            self.grammar_correction_open = false;
+            cx.notify();
+            return;
+        }
         if self.popup_visible() || (self.active_at.is_some() && self.remote_searching()) {
             self.hide(cx);
         } else if self.file_menu_open {
@@ -3634,6 +3931,9 @@ impl MentionInput {
     fn render_compact(&self, cx: &mut Context<Self>) -> AnyElement {
         let open = self.popup_visible();
         let popup = open.then(|| self.build_suggestion_popup(cx));
+        let grammar_popup = self
+            .grammar_correction_open
+            .then(|| self.build_grammar_correction_popup(cx));
         let previews =
             (!self.pending_attachments.is_empty()).then(|| self.render_attachment_previews(cx));
         div()
@@ -3644,6 +3944,7 @@ impl MentionInput {
             .on_action(cx.listener(Self::on_dismiss))
             .on_action(cx.listener(Self::on_toggle_anonymous))
             .when_some(previews, |this, previews| this.child(previews))
+            .when_some(grammar_popup, |this, popup| this.child(popup))
             .child(MentionInputField::new(&self.input))
             .when_some(popup, |this, popup| this.child(popup))
             .into_any_element()
@@ -3958,10 +4259,10 @@ impl Render for MentionInput {
             .relative()
             .w_full()
             .key_context(KEY_CONTEXT)
+            .on_action(cx.listener(Self::on_accept))
             .on_action(cx.listener(Self::on_dismiss))
             .on_action(cx.listener(Self::on_open_buzz))
             .on_action(cx.listener(Self::on_toggle_anonymous))
-            .when(open, |this| this.on_action(cx.listener(Self::on_accept)))
             .child(MentionInputField::new(&self.input))
             .child(
                 div()
@@ -4808,5 +5109,34 @@ mod mention_trigger_tests {
     #[test]
     fn a_trailing_separator_is_not_highlighted_as_a_space() {
         assert_eq!(highlight_word_ranges("Timeriel", "timer_"), vec![0..5]);
+    }
+}
+
+#[cfg(test)]
+mod grammar_committed_mask_tests {
+    use super::{
+        CommittedToken, TokenKind, mask_committed_for_grammar, unmask_committed_for_grammar,
+    };
+
+    #[test]
+    fn masks_mention_display_and_restores_it() {
+        let display = "@huy.lexuan";
+        let text = format!("hoi {display} di");
+        let start = text.find(display).expect("mention");
+        let token = CommittedToken {
+            kind: TokenKind::Mention {
+                user_id: "1".into(),
+                role_id: String::new(),
+            },
+            display: display.into(),
+            start,
+            end: start + display.len(),
+        };
+        let (masked, originals) = mask_committed_for_grammar(&text, &[token]);
+        assert!(!masked.contains(display), "{masked}");
+        assert_eq!(originals, vec![display.to_string()]);
+        let restored = unmask_committed_for_grammar(&masked.replace("hoi", "Hoi"), &originals);
+        assert!(restored.contains(display), "{restored}");
+        assert!(!restored.contains("@huy. Lexuan"), "{restored}");
     }
 }

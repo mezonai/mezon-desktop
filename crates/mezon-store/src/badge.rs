@@ -73,6 +73,16 @@ fn is_content_mutation(m: &ChannelMessage) -> bool {
     )
 }
 
+fn is_own_group_update(m: &ChannelMessage, user_id: Option<i64>) -> bool {
+    MessageCode::from_raw(m.code) == MessageCode::AuditLog
+        && m.sender_id == 0
+        && user_id.is_some_and(|uid| {
+            mezon_client::transport::parse_message_mentions(&m.mentions)
+                .first()
+                .is_some_and(|actor| actor.s == 0 && actor.user_id == uid)
+        })
+}
+
 fn is_chat_remove(m: &ChannelMessage) -> bool {
     matches!(MessageCode::from_raw(m.code), MessageCode::ChatRemove)
 }
@@ -121,11 +131,10 @@ fn is_clan_message_seen(cx: &App, m: &ChannelMessage, from_me: bool) -> bool {
         return false;
     };
     let badge_id = badge_channel_id(m);
-    let parent_id = ChannelId(m.channel_id);
-    if active == badge_id && badge_id == parent_id {
+    if active == badge_id {
         return messages.is_reading_live_tail(active);
     }
-    active == badge_id || active == parent_id
+    false
 }
 
 fn mention_check_policy(
@@ -156,8 +165,15 @@ fn is_message_already_seen(
     cx: &App,
     clan_id: ClanId,
     channel_id: ChannelId,
+    message_id: MessageId,
     msg_time: i64,
 ) -> bool {
+    if MessagesStore::global(cx)
+        .read(cx)
+        .has_read_message(channel_id, message_id)
+    {
+        return true;
+    }
     if msg_time <= 0 {
         return false;
     }
@@ -201,6 +217,10 @@ impl BadgeService {
         self.dm_push_channels.clear();
         self.dm_gotify_counted.clear();
         cx.notify();
+    }
+
+    pub fn forget_dm_push_channels(&mut self) {
+        self.dm_push_channels.clear();
     }
 
     pub fn current_user_id(&self, cx: &App) -> Option<UserId> {
@@ -329,6 +349,7 @@ impl BadgeService {
 
                 if is_dm_message(m) {
                     if !is_content_mutation(m) {
+                        let own_action = from_me || is_own_group_update(m, user_id);
                         self.dm_push_channels.insert(channel_id);
                         let gotify_counted = self
                             .dm_gotify_counted
@@ -342,9 +363,9 @@ impl BadgeService {
                             );
                         let increment_unread = fresh
                             && !gotify_counted
-                            && should_increment_dm_unread(cx, channel_id, from_me);
+                            && should_increment_dm_unread(cx, channel_id, own_action);
                         DirectMessageStore::global(cx).update(cx, |dm, cx| {
-                            if !dm.note_message(channel_id, ts, from_me, increment_unread, cx) {
+                            if !dm.note_message(channel_id, ts, own_action, increment_unread, cx) {
                                 let inserted = dm.insert_from_message(m, from_me, increment_unread, cx);
                                 tracing::info!(
                                     "dm message for unknown channel {}: synthesized entry inserted={inserted}",
@@ -356,7 +377,7 @@ impl BadgeService {
                             cl.note_user_channel_dm_message(
                                 channel_id,
                                 ts,
-                                from_me,
+                                own_action,
                                 increment_unread,
                                 message_id,
                                 cx,
@@ -367,7 +388,8 @@ impl BadgeService {
                     let clan_id = ClanId(m.clan_id);
                     let is_new_message = !is_content_mutation(m);
                     let seen = is_clan_message_seen(cx, m, from_me);
-                    let already_seen = is_message_already_seen(cx, clan_id, channel_id, ts);
+                    let already_seen =
+                        is_message_already_seen(cx, clan_id, channel_id, message_id, ts);
                     let removed_by_other = is_chat_remove(m) && !from_me;
                     let code = MessageCode::from_raw(m.code);
                     let skip_unread_activity = matches!(
@@ -441,7 +463,7 @@ impl BadgeService {
                             });
                         }
                     }
-                    if !from_me && is_new_message && !skip_unread_activity {
+                    if !from_me && is_new_message && !seen && !skip_unread_activity {
                         ClanList::global(cx).update(cx, |cls, cx| {
                             cls.set_has_unread_message(clan_id, cx);
                         });
@@ -494,7 +516,14 @@ impl BadgeService {
                         let message_ts = deleted_message_timestamp(m);
                         let deleted_channel = ChannelId(m.channel_id);
                         let decremented = ChannelList::global(cx).update(cx, |cl, cx| {
-                            cl.decrement_channel_on_delete(clan_id, deleted_channel, message_ts, cx)
+                            cl.decrement_channel_on_delete(
+                                clan_id,
+                                deleted_channel,
+                                ChannelId(m.topic_id),
+                                MessageId(m.message_id),
+                                message_ts,
+                                cx,
+                            )
                         });
                         if decremented {
                             ClanList::global(cx).update(cx, |cls, cx| {
@@ -514,7 +543,7 @@ impl BadgeService {
                 } else if e.channel_id != 0 {
                     let channel_id = ChannelId(e.channel_id);
                     ChannelList::global(cx).update(cx, |cl, cx| {
-                        cl.apply_read(clan_id, channel_id, cx);
+                        cl.apply_mark_as_read_channel(clan_id, channel_id, cx);
                         cl.apply_topic_read(channel_id, cx);
                     });
                 } else if e.category_id != 0 {
@@ -643,7 +672,7 @@ impl BadgeService {
         } else {
             channel_id
         };
-        if is_message_already_seen(cx, clan_id, badge_channel, msg_time) {
+        if is_message_already_seen(cx, clan_id, badge_channel, message_id, msg_time) {
             tracing::debug!(
                 channel_id = badge_channel.get(),
                 msg_time,
@@ -669,17 +698,19 @@ impl BadgeService {
             message_id = message_id.get(),
             "badge: apply notification increment"
         );
-        ChannelList::global(cx).update(cx, |cl, cx| {
-            cl.note_channel_message(
-                clan_id,
-                badge_channel,
-                true,
-                false,
-                msg_time,
-                message_id,
-                cx,
-            );
-        });
+        if badge_channel == channel_id {
+            ChannelList::global(cx).update(cx, |cl, cx| {
+                cl.note_channel_message(
+                    clan_id,
+                    badge_channel,
+                    true,
+                    false,
+                    msg_time,
+                    message_id,
+                    cx,
+                );
+            });
+        }
         ClanList::global(cx).update(cx, |cls, cx| {
             cls.increment_clan_badge(clan_id, cx);
         });
@@ -759,5 +790,83 @@ mod tests {
 
         assert!(!needs_badge_check);
         assert!(needs_inbox_check);
+    }
+
+    fn audit_log_push(sender_id: i64, actor: i64, s: i32) -> ChannelMessage {
+        use prost::Message as _;
+        let mentions = mezon_proto::api::MessageMentionList {
+            mentions: vec![mezon_proto::api::MessageMention {
+                user_id: actor,
+                s,
+                e: s + 5,
+                ..Default::default()
+            }],
+        };
+        ChannelMessage {
+            code: 10,
+            sender_id,
+            mentions: mentions.encode_to_vec(),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn own_group_update_is_recognised_from_the_leading_mention() {
+        assert!(is_own_group_update(&audit_log_push(0, 42, 0), Some(42)));
+        assert!(!is_own_group_update(&audit_log_push(0, 7, 0), Some(42)));
+        assert!(!is_own_group_update(&audit_log_push(0, 42, 3), Some(42)));
+        assert!(!is_own_group_update(&audit_log_push(9, 42, 0), Some(42)));
+        assert!(!is_own_group_update(&audit_log_push(0, 42, 0), None));
+        let mut chat = audit_log_push(0, 42, 0);
+        chat.code = 0;
+        assert!(!is_own_group_update(&chat, Some(42)));
+    }
+
+    #[gpui::test]
+    fn a_new_socket_lets_the_notification_stream_count_a_dm_again(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            let api = std::sync::Arc::new(mezon_client::AppApi::new(
+                std::sync::Arc::new(mezon_client::TransportClient::new(String::new())),
+                String::new(),
+            ));
+            RealtimeDispatch::init(api.clone(), cx);
+            let auth_state = cx.new(|_| {
+                AuthState::Authenticated(mezon_client::Session {
+                    user_id: "7".to_string(),
+                    ..Default::default()
+                })
+            });
+            let badge = BadgeService::init(auth_state, cx);
+            ClanList::init(api.clone(), cx);
+            let dms = DirectMessageStore::init(api.clone(), cx);
+            ChannelList::init(api.clone(), cx);
+            MessagesStore::init(api, cx);
+            let dm = ChannelId(900);
+            dms.update(cx, |dms, cx| {
+                let message = ChannelMessage {
+                    channel_id: dm.get(),
+                    mode: STREAM_MODE_DM,
+                    sender_id: 5,
+                    display_name: "peer".to_string(),
+                    create_time_seconds: 100,
+                    ..Default::default()
+                };
+                dms.insert_from_message(&message, false, false, cx);
+            });
+            let unread = |cx: &App| dms.read(cx).find(dm).map(|channel| channel.unread_count);
+            assert_eq!(unread(cx), Some(0));
+
+            badge.update(cx, |badge, cx| {
+                badge.dm_push_channels.insert(dm);
+                badge.note_dm_notification(dm, 200, cx);
+            });
+            assert_eq!(unread(cx), Some(0));
+
+            badge.update(cx, |badge, cx| {
+                badge.forget_dm_push_channels();
+                badge.note_dm_notification(dm, 300, cx);
+            });
+            assert_eq!(unread(cx), Some(1));
+        });
     }
 }

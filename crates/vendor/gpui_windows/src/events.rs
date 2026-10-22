@@ -1027,6 +1027,7 @@ impl WindowsWindowInner {
         }
 
         if drag_area.is_none()
+            && !self.is_popup
             && let Some(code) = hit_test_custom_titlebar_controls(
                 cursor_point,
                 scale_factor,

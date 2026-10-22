@@ -697,12 +697,11 @@ fn try_show_toast(
     };
     let toast = ToastNotification::CreateToastNotification(&doc)?;
     if let Some(tag) = tag {
-        let tag: String = tag.chars().take(64).collect();
-        toast.SetTag(&HSTRING::from(tag.as_str()))?;
-        toast.SetGroup(&HSTRING::from("mezon"))?;
+        toast.SetTag(&HSTRING::from(windows_toast_tag(tag).as_str()))?;
+        toast.SetGroup(&HSTRING::from(WINDOWS_TOAST_GROUP))?;
     }
 
-    let activation_target = tag.and_then(|t| build_target(&t));
+    let activation_target = tag.and_then(build_target);
     toast.Activated(&windows::Foundation::TypedEventHandler::<
         ToastNotification,
         windows::core::IInspectable,
@@ -727,63 +726,516 @@ fn escape_xml(s: &str) -> String {
 }
 
 // ─── Linux ────────────────────────────────────────────────────────────────────
-//
-// Uses the `notify-rust` crate which wraps D-Bus `org.freedesktop.Notifications`.
 
 #[cfg(not(any(target_os = "macos", target_os = "windows")))]
 const LINUX_DESKTOP_ENTRY: &str = "mezon";
 
 #[cfg(not(any(target_os = "macos", target_os = "windows")))]
-fn linux_replace_id(key: &str) -> u32 {
-    use std::hash::{Hash, Hasher};
-    let mut hasher = std::collections::hash_map::DefaultHasher::new();
-    key.hash(&mut hasher);
-    (hasher.finish() as u32).max(1)
+const LINUX_COMMAND_CAPACITY: usize = 256;
+
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
+const FDO_NOTIFICATIONS: &str = "org.freedesktop.Notifications";
+
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
+struct LinuxToast {
+    title: String,
+    body: String,
+    icon: String,
+    channel: Option<String>,
+    target: Option<NotificationTarget>,
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
+enum LinuxCommand {
+    Show(Box<LinuxToast>),
+    CloseChannel(String),
+    CloseAll,
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
+struct LiveToast {
+    channel: Option<String>,
+    target: Option<NotificationTarget>,
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
+#[derive(Default)]
+struct LinuxToastBook {
+    by_channel: std::collections::HashMap<String, u32>,
+    by_id: std::collections::HashMap<u32, LiveToast>,
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
+impl LinuxToastBook {
+    fn replaces_id(&self, channel: Option<&str>) -> u32 {
+        channel
+            .and_then(|channel| self.by_channel.get(channel).copied())
+            .unwrap_or(0)
+    }
+
+    fn shown(
+        &mut self,
+        channel: Option<String>,
+        id: u32,
+        target: Option<NotificationTarget>,
+    ) -> Option<u32> {
+        let superseded = channel
+            .as_ref()
+            .and_then(|channel| self.by_channel.insert(channel.clone(), id))
+            .filter(|previous| *previous != id);
+        if let Some(previous) = superseded {
+            self.by_id.remove(&previous);
+        }
+        self.by_id.insert(id, LiveToast { channel, target });
+        superseded
+    }
+
+    fn take(&mut self, id: u32) -> Option<LiveToast> {
+        let toast = self.by_id.remove(&id)?;
+        if let Some(channel) = toast.channel.as_deref()
+            && self.by_channel.get(channel) == Some(&id)
+        {
+            self.by_channel.remove(channel);
+        }
+        Some(toast)
+    }
+
+    fn take_channel(&mut self, channel: &str) -> Option<u32> {
+        let id = self.by_channel.remove(channel)?;
+        self.by_id.remove(&id);
+        Some(id)
+    }
+
+    fn take_all(&mut self) -> Vec<u32> {
+        self.by_channel.clear();
+        self.by_id.drain().map(|(id, _)| id).collect()
+    }
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
+fn linux_channel_key(channel_id: &str) -> Option<String> {
+    let id = channel_id.trim();
+    if id.is_empty() || id == "0" {
+        None
+    } else {
+        Some(id.to_owned())
+    }
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
+fn notification_clicked_action(action: &str) -> bool {
+    action.is_empty() || action == "default"
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
+static LINUX_WORKER: std::sync::OnceLock<flume::Sender<LinuxCommand>> = std::sync::OnceLock::new();
+
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
+fn linux_worker() -> &'static flume::Sender<LinuxCommand> {
+    LINUX_WORKER.get_or_init(|| {
+        let (commands, inbox) = flume::bounded(LINUX_COMMAND_CAPACITY);
+        let spawned = std::thread::Builder::new()
+            .name("mezon-notifications".into())
+            .spawn(move || zbus::block_on(run_linux_worker(inbox)));
+        if let Err(e) = spawned {
+            tracing::warn!("Linux notifications: worker thread failed to start: {e}");
+        }
+        commands
+    })
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
+fn send_linux(worker: &flume::Sender<LinuxCommand>, command: LinuxCommand) {
+    if let Err(e) = worker.try_send(command) {
+        tracing::warn!("Linux notifications: command dropped: {e}");
+    }
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
+struct LinuxBus {
+    connection: zbus::Connection,
+    signals: zbus::MessageStream,
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
+async fn open_linux_bus() -> Option<LinuxBus> {
+    let connection = match zbus::Connection::session().await {
+        Ok(connection) => connection,
+        Err(e) => {
+            tracing::warn!("Linux notifications: no D-Bus session: {e}");
+            return None;
+        }
+    };
+    let proxy = zbus::fdo::DBusProxy::new(&connection).await.ok()?;
+    for member in ["ActionInvoked", "NotificationClosed"] {
+        let rule = zbus::MatchRule::builder()
+            .msg_type(zbus::message::Type::Signal)
+            .interface(FDO_NOTIFICATIONS)
+            .ok()?
+            .member(member)
+            .ok()?
+            .build();
+        if let Err(e) = proxy.add_match_rule(rule).await {
+            tracing::warn!("Linux notifications: cannot watch {member}: {e}");
+            return None;
+        }
+    }
+    let signals = zbus::MessageStream::from(&connection);
+    Some(LinuxBus {
+        connection,
+        signals,
+    })
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
+enum LinuxEvent {
+    Command(LinuxCommand),
+    Signal(zbus::Message),
+    SignalError,
+    BusClosed,
+    WorkerClosed,
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
+async fn next_linux_event(
+    inbox: &flume::Receiver<LinuxCommand>,
+    bus: Option<&mut LinuxBus>,
+) -> LinuxEvent {
+    use futures_lite::StreamExt as _;
+    let command = async {
+        inbox
+            .recv_async()
+            .await
+            .map_or(LinuxEvent::WorkerClosed, LinuxEvent::Command)
+    };
+    let Some(bus) = bus else {
+        return command.await;
+    };
+    let signal = async {
+        match bus.signals.next().await {
+            Some(Ok(message)) => LinuxEvent::Signal(message),
+            Some(Err(_)) => LinuxEvent::SignalError,
+            None => LinuxEvent::BusClosed,
+        }
+    };
+    futures_lite::future::or(command, signal).await
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
+async fn run_linux_worker(inbox: flume::Receiver<LinuxCommand>) {
+    let mut book = LinuxToastBook::default();
+    let mut bus: Option<LinuxBus> = None;
+    loop {
+        match next_linux_event(&inbox, bus.as_mut()).await {
+            LinuxEvent::Command(command) => {
+                if bus.is_none() && matches!(command, LinuxCommand::Show(_)) {
+                    bus = open_linux_bus().await;
+                }
+                if let Some(bus) = bus.as_ref() {
+                    run_linux_command(&bus.connection, &mut book, command).await;
+                }
+            }
+            LinuxEvent::Signal(message) => {
+                if let Some(clicked) = handle_linux_signal(&mut book, &message)
+                    && let Some(bus) = bus.as_ref()
+                {
+                    dbus_close_id(&bus.connection, clicked).await;
+                }
+            }
+            LinuxEvent::SignalError => {}
+            LinuxEvent::BusClosed => {
+                bus = None;
+                book = LinuxToastBook::default();
+            }
+            LinuxEvent::WorkerClosed => return,
+        }
+    }
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
+async fn run_linux_command(
+    connection: &zbus::Connection,
+    book: &mut LinuxToastBook,
+    command: LinuxCommand,
+) {
+    match command {
+        LinuxCommand::Show(toast) => {
+            let replaces_id = book.replaces_id(toast.channel.as_deref());
+            match dbus_notify(connection, &toast, replaces_id).await {
+                Ok(id) if id > 0 => {
+                    if let Some(superseded) = book.shown(toast.channel, id, toast.target) {
+                        dbus_close_id(connection, superseded).await;
+                    }
+                }
+                Ok(_) => tracing::warn!("Linux notification: daemon returned id=0"),
+                Err(e) => tracing::warn!("Linux notification failed: {e}"),
+            }
+        }
+        LinuxCommand::CloseChannel(channel) => {
+            if let Some(id) = book.take_channel(&channel) {
+                dbus_close_id(connection, id).await;
+            }
+        }
+        LinuxCommand::CloseAll => {
+            for id in book.take_all() {
+                dbus_close_id(connection, id).await;
+            }
+        }
+    }
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
+fn handle_linux_signal(book: &mut LinuxToastBook, message: &zbus::Message) -> Option<u32> {
+    let header = message.header();
+    if header.message_type() != zbus::message::Type::Signal
+        || header
+            .interface()
+            .is_none_or(|interface| interface != FDO_NOTIFICATIONS)
+    {
+        return None;
+    }
+    match header.member().map(|member| member.as_str()) {
+        Some("ActionInvoked") => {
+            let (id, action) = message.body().deserialize::<(u32, String)>().ok()?;
+            let toast = book.take(id)?;
+            if notification_clicked_action(&action)
+                && let Some(target) = toast.target
+            {
+                dispatch_click(target);
+            }
+            Some(id)
+        }
+        Some("NotificationClosed") => {
+            if let Ok((id, _reason)) = message.body().deserialize::<(u32, u32)>() {
+                book.take(id);
+            }
+            None
+        }
+        _ => None,
+    }
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
+async fn dbus_notify(
+    connection: &zbus::Connection,
+    toast: &LinuxToast,
+    replaces_id: u32,
+) -> Result<u32, zbus::Error> {
+    let actions: &[&str] = if toast.target.is_some() {
+        &["default", "Open"]
+    } else {
+        &[]
+    };
+    let mut hints = std::collections::HashMap::<&str, zbus::zvariant::Value<'_>>::new();
+    hints.insert(
+        "desktop-entry",
+        zbus::zvariant::Value::Str(LINUX_DESKTOP_ENTRY.into()),
+    );
+    if replaces_id == 0 {
+        hints.insert(
+            "sound-name",
+            zbus::zvariant::Value::Str("message-new-instant".into()),
+        );
+    }
+    connection
+        .call_method(
+            Some(FDO_NOTIFICATIONS),
+            "/org/freedesktop/Notifications",
+            Some(FDO_NOTIFICATIONS),
+            "Notify",
+            &(
+                "Mezon",
+                replaces_id,
+                toast.icon.as_str(),
+                toast.title.as_str(),
+                toast.body.as_str(),
+                actions,
+                &hints,
+                -1i32,
+            ),
+        )
+        .await?
+        .body()
+        .deserialize()
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
+async fn dbus_close_id(connection: &zbus::Connection, id: u32) {
+    if let Err(e) = connection
+        .call_method(
+            Some(FDO_NOTIFICATIONS),
+            "/org/freedesktop/Notifications",
+            Some(FDO_NOTIFICATIONS),
+            "CloseNotification",
+            &(id,),
+        )
+        .await
+    {
+        tracing::debug!("Linux notification close failed: {e}");
+    }
 }
 
 #[cfg(not(any(target_os = "macos", target_os = "windows")))]
 fn show_linux(n: &Notification) {
-    let title = n.title.clone();
-    let body = n.body.clone();
-    let key = replacement_key(n);
-    let replace_id = key.as_deref().map(linux_replace_id);
-    let activation_target = key.as_deref().and_then(build_target);
-    // Prefer the downloaded sender avatar; fall back to the installed app icon.
-    let icon = n
-        .icon_path
-        .clone()
-        .unwrap_or_else(|| LINUX_DESKTOP_ENTRY.to_owned());
+    let toast = LinuxToast {
+        title: n.title.clone(),
+        body: n.body.clone(),
+        icon: n
+            .icon_path
+            .clone()
+            .unwrap_or_else(|| LINUX_DESKTOP_ENTRY.to_owned()),
+        channel: n.channel_id.as_deref().and_then(linux_channel_key),
+        target: replacement_key(n).as_deref().and_then(build_target),
+    };
+    send_linux(linux_worker(), LinuxCommand::Show(Box::new(toast)));
+}
 
-    std::thread::spawn(move || {
-        let mut notification = notify_rust::Notification::new();
-        notification
-            .appname("Mezon")
-            .summary(&title)
-            .body(&body)
-            .icon(&icon)
-            .sound_name("message-new-instant")
-            .hint(notify_rust::Hint::DesktopEntry(
-                LINUX_DESKTOP_ENTRY.to_owned(),
-            ));
-        if let Some(id) = replace_id {
-            notification.id(id);
+#[cfg(any(target_os = "macos", target_os = "windows", test))]
+fn channel_identifiers(clan_id: Option<&str>, channel_id: &str) -> Vec<String> {
+    let channel = channel_id.trim();
+    if channel.is_empty() || channel == "0" {
+        return Vec::new();
+    }
+    let mut identifiers = vec![encode_identifier(None, channel)];
+    if let Some(clan) = clan_id
+        .map(str::trim)
+        .filter(|clan| !clan.is_empty() && *clan != "0")
+    {
+        identifiers.push(encode_identifier(Some(&clan.to_owned()), channel));
+    }
+    identifiers
+}
+
+pub fn close_channel(clan_id: Option<&str>, channel_id: &str) {
+    #[cfg(target_os = "macos")]
+    remove_delivered_macos(Some(&channel_identifiers(clan_id, channel_id)));
+
+    #[cfg(target_os = "windows")]
+    send_windows_close(WindowsClose::Tags(
+        channel_identifiers(clan_id, channel_id)
+            .iter()
+            .map(|identifier| windows_toast_tag(identifier))
+            .collect(),
+    ));
+
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    {
+        let _ = clan_id;
+        if let (Some(worker), Some(channel)) = (LINUX_WORKER.get(), linux_channel_key(channel_id)) {
+            send_linux(worker, LinuxCommand::CloseChannel(channel));
         }
-        if activation_target.is_some() {
-            notification.action("default", "Open");
+    }
+}
+
+pub fn close_all() {
+    #[cfg(target_os = "macos")]
+    remove_delivered_macos(None);
+
+    #[cfg(target_os = "windows")]
+    send_windows_close(WindowsClose::All);
+
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    if let Some(worker) = LINUX_WORKER.get() {
+        send_linux(worker, LinuxCommand::CloseAll);
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn remove_delivered_macos(identifiers: Option<&[String]>) {
+    use objc::runtime::Object;
+    use objc::{class, msg_send, sel, sel_impl};
+
+    if identifiers.is_some_and(<[String]>::is_empty) || !has_bundle_identifier() {
+        return;
+    }
+    unsafe {
+        let center: *mut Object =
+            msg_send![class!(UNUserNotificationCenter), currentNotificationCenter];
+        let Some(identifiers) = identifiers else {
+            let _: () = msg_send![center, removeAllDeliveredNotifications];
+            return;
+        };
+        let strings: Vec<*mut Object> = identifiers.iter().map(|id| nsstring(id)).collect();
+        let array: *mut Object = msg_send![
+            class!(NSArray),
+            arrayWithObjects: strings.as_ptr()
+            count: strings.len()
+        ];
+        let _: () = msg_send![center, removeDeliveredNotificationsWithIdentifiers: array];
+        for string in strings {
+            let _: () = msg_send![string, release];
         }
-        match notification.show() {
-            Ok(handle) => {
-                if let Some(target) = activation_target {
-                    handle.wait_for_action(|action| {
-                        if action == "default" {
-                            dispatch_click(target);
-                        }
-                    });
+    }
+}
+
+#[cfg(target_os = "windows")]
+const WINDOWS_TOAST_GROUP: &str = "mezon";
+
+#[cfg(target_os = "windows")]
+fn windows_toast_tag(identifier: &str) -> String {
+    identifier.chars().take(64).collect()
+}
+
+#[cfg(target_os = "windows")]
+enum WindowsClose {
+    Tags(Vec<String>),
+    All,
+}
+
+#[cfg(target_os = "windows")]
+fn send_windows_close(close: WindowsClose) {
+    static CLOSER: std::sync::OnceLock<flume::Sender<WindowsClose>> = std::sync::OnceLock::new();
+    let closer = CLOSER.get_or_init(|| {
+        let (closer, inbox) = flume::bounded::<WindowsClose>(256);
+        let spawned = std::thread::Builder::new()
+            .name("mezon-toast-close".into())
+            .spawn(move || {
+                ensure_toast_apartment();
+                for close in inbox.iter() {
+                    if let Err(e) = remove_windows_toasts(&close) {
+                        tracing::debug!("Windows toast removal failed: {e}");
+                    }
+                }
+            });
+        if let Err(e) = spawned {
+            tracing::warn!("Windows toast closer failed to start: {e}");
+        }
+        closer
+    });
+    if let Err(e) = closer.try_send(close) {
+        tracing::warn!("Windows toast removal dropped: {e}");
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn remove_windows_toasts(close: &WindowsClose) -> windows::core::Result<()> {
+    use windows::UI::Notifications::ToastNotificationManager;
+    use windows::core::HSTRING;
+
+    let history = ToastNotificationManager::History()?;
+    let group = HSTRING::from(WINDOWS_TOAST_GROUP);
+    let app = HSTRING::from(APP_USER_MODEL_ID);
+    let packaged = running_packaged();
+    match close {
+        WindowsClose::Tags(tags) => {
+            for tag in tags {
+                let tag = HSTRING::from(tag.as_str());
+                if packaged {
+                    history.RemoveGroupedTag(&tag, &group)?;
+                } else {
+                    history.RemoveGroupedTagWithId(&tag, &group, &app)?;
                 }
             }
-            Err(e) => tracing::warn!("Linux notification failed: {e}"),
         }
-    });
+        WindowsClose::All => {
+            if packaged {
+                history.RemoveGroup(&group)?;
+            } else {
+                history.RemoveGroupWithId(&group, &app)?;
+            }
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -800,6 +1252,104 @@ mod tests {
             topic_reply: None,
             icon_path: None,
         }
+    }
+
+    #[test]
+    fn closing_a_channel_covers_the_clan_resolved_at_show_time_or_not() {
+        assert_eq!(
+            channel_identifiers(Some("77"), "12345"),
+            vec![
+                "mezon-notify-0-12345".to_owned(),
+                "mezon-notify-77-12345".to_owned()
+            ]
+        );
+        assert_eq!(
+            channel_identifiers(None, " 12345 "),
+            vec!["mezon-notify-0-12345".to_owned()]
+        );
+        assert_eq!(
+            channel_identifiers(Some("0"), "12345"),
+            vec!["mezon-notify-0-12345".to_owned()]
+        );
+        assert!(channel_identifiers(Some("77"), "0").is_empty());
+        assert!(channel_identifiers(Some("77"), "  ").is_empty());
+        for shown in [
+            replacement_key(&notification(Some("12345"), Some("77"))),
+            replacement_key(&notification(Some("12345"), None)),
+        ] {
+            assert!(channel_identifiers(Some("77"), "12345").contains(&shown.unwrap()));
+        }
+    }
+
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    fn target(channel_id: &str) -> Option<NotificationTarget> {
+        Some(NotificationTarget {
+            clan_id: Some("77".into()),
+            channel_id: channel_id.into(),
+            link: None,
+            topic_reply: None,
+        })
+    }
+
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    #[test]
+    fn linux_channel_key_ignores_the_clan_and_rejects_blank_ids() {
+        assert_eq!(linux_channel_key(" 12345 ").as_deref(), Some("12345"));
+        assert_eq!(linux_channel_key("0"), None);
+        assert_eq!(linux_channel_key(""), None);
+    }
+
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    #[test]
+    fn a_channel_replaces_its_live_toast_in_place() {
+        let mut book = LinuxToastBook::default();
+        assert_eq!(book.replaces_id(Some("a")), 0);
+        assert_eq!(book.shown(Some("a".into()), 41, target("a")), None);
+        assert_eq!(book.replaces_id(Some("a")), 41);
+        assert_eq!(book.shown(Some("a".into()), 41, target("a")), None);
+        assert_eq!(book.shown(Some("b".into()), 77, target("b")), None);
+        assert_eq!(book.replaces_id(Some("a")), 41);
+        assert_eq!(book.replaces_id(Some("b")), 77);
+        assert_eq!(book.replaces_id(None), 0);
+    }
+
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    #[test]
+    fn a_toast_shown_under_a_new_id_supersedes_the_old_one_and_its_click() {
+        let mut book = LinuxToastBook::default();
+        book.shown(Some("a".into()), 41, target("a"));
+        assert_eq!(book.shown(Some("a".into()), 42, target("a")), Some(41));
+        assert!(book.take(41).is_none());
+        assert_eq!(book.replaces_id(Some("a")), 42);
+        assert!(book.take(42).is_some_and(|toast| toast.target.is_some()));
+        assert_eq!(book.replaces_id(Some("a")), 0);
+    }
+
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    #[test]
+    fn closing_a_channel_takes_only_its_toast() {
+        let mut book = LinuxToastBook::default();
+        book.shown(Some("a".into()), 41, target("a"));
+        book.shown(Some("b".into()), 77, target("b"));
+        book.shown(None, 90, None);
+        assert_eq!(book.take_channel("a"), Some(41));
+        assert_eq!(book.take_channel("a"), None);
+        assert_eq!(book.replaces_id(Some("b")), 77);
+        let mut rest = book.take_all();
+        rest.sort_unstable();
+        assert_eq!(rest, vec![77, 90]);
+        assert_eq!(book.replaces_id(Some("b")), 0);
+        assert!(book.take_all().is_empty());
+    }
+
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    #[test]
+    fn a_dismissed_toast_lets_the_next_one_in_its_channel_play_a_sound() {
+        let mut book = LinuxToastBook::default();
+        book.shown(Some("a".into()), 41, target("a"));
+        assert!(book.take(41).is_some());
+        assert_eq!(book.replaces_id(Some("a")), 0);
+        assert!(book.take(41).is_none());
     }
 
     #[test]
@@ -870,19 +1420,5 @@ mod tests {
         assert_eq!(decode_identifier("mezon-notify-77"), None);
         assert_eq!(decode_identifier("mezon-notify-77-"), None);
         assert_eq!(decode_identifier(""), None);
-    }
-
-    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
-    #[test]
-    fn linux_replace_id_is_stable_and_never_zero() {
-        assert_eq!(
-            linux_replace_id("mezon-channel-1"),
-            linux_replace_id("mezon-channel-1")
-        );
-        assert_ne!(
-            linux_replace_id("mezon-channel-1"),
-            linux_replace_id("mezon-channel-2")
-        );
-        assert!(linux_replace_id("mezon-channel-1") > 0);
     }
 }

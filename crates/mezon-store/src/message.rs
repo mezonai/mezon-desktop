@@ -38,21 +38,32 @@ pub struct MessageAttachment {
 
 pub const STICKER_FILETYPE: &str = "sticker";
 
-const TRANSCODED_CONTAINERS: [&str; 4] = ["avi", "flv", "mkv", "wmv"];
+const TRANSCODED_CONTAINERS: [&str; 3] = ["avi", "flv", "wmv"];
+const MATROSKA_CONTAINERS: [&str; 1] = ["mkv"];
 
-fn has_transcoded_container_extension(url: &str) -> bool {
+fn has_container_extension(url: &str, containers: &[&str]) -> bool {
     let path = url.split(['?', '#']).next().unwrap_or(url);
     let name = path.rsplit('/').next().unwrap_or(path);
     name.rsplit_once('.').is_some_and(|(_, ext)| {
-        TRANSCODED_CONTAINERS
+        containers
             .iter()
             .any(|container| ext.eq_ignore_ascii_case(container))
     })
 }
 
 fn is_transcoded_container(filename: &str, url: &str) -> bool {
-    (has_transcoded_container_extension(filename) || has_transcoded_container_extension(url))
+    (has_container_extension(filename, &TRANSCODED_CONTAINERS)
+        || has_container_extension(url, &TRANSCODED_CONTAINERS))
         && crate::platform::may_be_transcoded(url)
+}
+
+fn is_matroska_container(filename: &str, url: &str) -> bool {
+    has_container_extension(filename, &MATROSKA_CONTAINERS)
+        || has_container_extension(url, &MATROSKA_CONTAINERS)
+}
+
+fn plays_in_app(filename: &str, url: &str) -> bool {
+    is_matroska_container(filename, url) || is_transcoded_container(filename, url)
 }
 
 pub fn url_extension(url: &str) -> Option<String> {
@@ -114,7 +125,7 @@ impl MessageAttachment {
     }
 
     pub fn plays_as_video(filetype: &str, filename: &str, url: &str) -> bool {
-        Self::media_is_video(filetype, url) || is_transcoded_container(filename, url)
+        Self::media_is_video(filetype, url) || plays_in_app(filename, url)
     }
 
     pub fn is_video(&self) -> bool {
@@ -122,7 +133,7 @@ impl MessageAttachment {
     }
 
     pub fn is_unsupported_media(&self) -> bool {
-        if is_transcoded_container(&self.filename, &self.url) {
+        if plays_in_app(&self.filename, &self.url) {
             return false;
         }
         if matches!(
@@ -131,7 +142,6 @@ impl MessageAttachment {
                 | "video/wmv"
                 | "video/avi"
                 | "video/flv"
-                | "video/mkv"
                 | "video/rmvb"
                 | "audio/wma"
                 | "audio/ra"
@@ -145,19 +155,7 @@ impl MessageAttachment {
         let ext = url_extension(&self.filename).or_else(|| url_extension(&self.url));
         matches!(
             ext.as_deref(),
-            Some(
-                "wmv"
-                    | "avi"
-                    | "flv"
-                    | "mkv"
-                    | "rmvb"
-                    | "wma"
-                    | "ra"
-                    | "tiff"
-                    | "tif"
-                    | "bmp"
-                    | "psd"
-            )
+            Some("wmv" | "avi" | "flv" | "rmvb" | "wma" | "ra" | "tiff" | "tif" | "bmp" | "psd")
         )
     }
 }
@@ -250,6 +248,22 @@ impl MessageCode {
                 | MessageCode::DeleteEphemeralMsg
         ) && !self.is_system()
     }
+}
+
+const GROUP_NAME_CHANGED: &str = " changed the group name to ";
+const GROUP_AVATAR_CHANGED: &str = " changed the group avatar.";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GroupChange<'a> {
+    Name(&'a str),
+    Avatar,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct GroupUpdate<'a> {
+    pub actor: &'a str,
+    pub actor_id: Option<&'a str>,
+    pub change: GroupChange<'a>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -2073,6 +2087,29 @@ impl Message {
         (tx.title, tx.detail)
     }
 
+    pub fn group_update(&self) -> Option<GroupUpdate<'_>> {
+        if self.code != MessageCode::AuditLog {
+            return None;
+        }
+        let Some(MessageSpan::Mention {
+            display, user_id, ..
+        }) = self.spans.first()
+        else {
+            return None;
+        };
+        let action = self.content.strip_prefix(display.as_ref())?;
+        let change = if action == GROUP_AVATAR_CHANGED {
+            GroupChange::Avatar
+        } else {
+            GroupChange::Name(action.strip_prefix(GROUP_NAME_CHANGED)?.strip_suffix('.')?)
+        };
+        Some(GroupUpdate {
+            actor: display,
+            actor_id: user_id.as_deref(),
+            change,
+        })
+    }
+
     pub fn with_attachments(mut self, attachments: Vec<MessageAttachment>) -> Self {
         self.attachments = attachments;
         self
@@ -3123,6 +3160,59 @@ mod tests {
         assert!(!message_combined_with_prev(Some(&prev), &sys));
     }
 
+    fn audit_log_message(text: &str, actor: &str) -> Message {
+        let content = ApiMessageContent {
+            t: text.into(),
+            mentions: vec![ContentToken {
+                user_id: Some("42".into()),
+                username: Some("huy".into()),
+                ..token(0, actor.encode_utf16().count() as i64)
+            }],
+            ..Default::default()
+        };
+        let mut msg = Message::new(MessageId(1), text, "0", "System", 100);
+        msg.code = MessageCode::AuditLog;
+        msg.spans = parse_spans(&content);
+        msg
+    }
+
+    #[test]
+    fn group_update_reads_a_group_name_change() {
+        let msg = audit_log_message("@Huy Lê changed the group name to Team v2.", "@Huy Lê");
+        assert_eq!(
+            msg.group_update(),
+            Some(GroupUpdate {
+                actor: "@Huy Lê",
+                actor_id: Some("42"),
+                change: GroupChange::Name("Team v2"),
+            })
+        );
+    }
+
+    #[test]
+    fn group_update_reads_a_group_avatar_change() {
+        let msg = audit_log_message("@Huy 🙂 changed the group avatar.", "@Huy 🙂");
+        assert_eq!(
+            msg.group_update()
+                .map(|update| (update.actor, update.change)),
+            Some(("@Huy 🙂", GroupChange::Avatar))
+        );
+    }
+
+    #[test]
+    fn group_update_ignores_clan_audit_logs_and_other_codes() {
+        let audit = audit_log_message("@huy update channel: general", "@huy");
+        assert_eq!(audit.group_update(), None);
+
+        let mut welcome = audit_log_message("@Huy changed the group avatar.", "@Huy");
+        welcome.code = MessageCode::Welcome;
+        assert_eq!(welcome.group_update(), None);
+
+        let mut no_mention = audit_log_message("@Huy changed the group avatar.", "@Huy");
+        no_mention.spans = vec![MessageSpan::Text(no_mention.content.as_str().into())];
+        assert_eq!(no_mention.group_update(), None);
+    }
+
     #[test]
     fn same_sender_matches_via_sender_user_id_when_ack_sender_id_is_zero() {
         let mut ack = Message::new(MessageId(1), "a", "0", "U1", 100);
@@ -3462,12 +3552,31 @@ mod tests {
                 "image/bmp",
                 "https://cdn.mezon.ai/1cf93b197d401000/2081_pic.bmp",
             ),
-            (
-                "application/octet-stream",
-                "https://cdn.komu.vn/1cf93b197d401000/2081_movie.mkv",
-            ),
         ] {
             assert!(attachment(filetype, url).is_unsupported_media(), "{url}");
+        }
+    }
+
+    #[test]
+    fn matroska_files_play_from_any_origin() {
+        for (filetype, filename, url) in [
+            (
+                "application/octet-stream",
+                "movie.mkv",
+                "https://cdn.komu.vn/1cf93b197d401000/2081_movie.mkv",
+            ),
+            (
+                "doc",
+                "Mkv.mkv",
+                "https://cdn-dev.nccsoft.vn/1d4bd2a126c01000/2113199456017977344_Mkv.mkv",
+            ),
+            ("video/mkv", "clip.MKV", "https://cdn.example/clip.MKV"),
+        ] {
+            let mut att = attachment(filetype, url);
+            att.filename = filename.to_string();
+            assert!(!att.is_unsupported_media(), "{url}");
+            assert!(att.is_video(), "{url}");
+            assert!(att.is_visual_media(), "{url}");
         }
     }
 

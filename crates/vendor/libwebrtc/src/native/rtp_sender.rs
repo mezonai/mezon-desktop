@@ -35,9 +35,11 @@ impl RtpSender {
                 return;
             }
 
-            // Unwrap because it should not happens
-            let vec = serde_json::from_str(&stats).unwrap();
-            let _ = tx.send(Ok(vec));
+            let parsed = serde_json::from_str(&stats).map_err(|e| RtcError {
+                error_type: RtcErrorType::Internal,
+                message: format!("failed to parse stats: {e}"),
+            });
+            let _ = tx.send(parsed);
         });
 
         rx.await.map_err(|_| RtcError {

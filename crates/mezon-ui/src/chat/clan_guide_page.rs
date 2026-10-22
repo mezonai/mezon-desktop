@@ -191,6 +191,7 @@ impl ClanGuidePage {
                         element.child(
                             img(proxied(cx, &logo, 224, 224, "fill"))
                                 .size_full()
+                                .rounded(px(24.))
                                 .object_fit(ObjectFit::Cover),
                         )
                     }),
@@ -276,12 +277,21 @@ impl ClanGuidePage {
             .map(|onboarding| onboarding.questions.as_slice())
             .unwrap_or_default();
         let section = v_flex()
+            .w_full()
+            .min_w_0()
+            .flex_none()
             .gap_2()
             .child(section_title(mezon_i18n::t(locale, "guide.questions")));
         if questions.is_empty() {
             return None;
         }
-        let mut list = v_flex().gap_2().rounded(px(8.)).relative();
+        let mut list = v_flex()
+            .w_full()
+            .min_w_0()
+            .flex_none()
+            .gap_2()
+            .rounded(px(8.))
+            .relative();
         for question in questions {
             list = list.child(self.render_question(question, theme, cx));
         }
@@ -325,7 +335,13 @@ impl ClanGuidePage {
         let store = store.read(cx);
         let clan_id = self.clan_id;
         let question_id = question.id;
-        let mut answers = div().flex().flex_wrap().gap_2().flex_1();
+        let mut answers = div()
+            .flex()
+            .flex_wrap()
+            .items_start()
+            .w_full()
+            .flex_none()
+            .gap_2();
         for (index, answer) in question.answers.iter().enumerate() {
             let selected = store.answer_selected(clan_id, question_id, index);
             let mut content = v_flex().min_w_0().justify_center();
@@ -344,6 +360,8 @@ impl ClanGuidePage {
                 .id(SharedString::from(format!(
                     "clan-guide-answer-{question_id}-{index}"
                 )))
+                .max_w(px(640.))
+                .flex_none()
                 .gap_2()
                 .items_center()
                 .justify_center()
@@ -386,6 +404,8 @@ impl ClanGuidePage {
         }
         div()
             .w_full()
+            .min_w_0()
+            .flex_none()
             .p_4()
             .flex()
             .flex_col()
@@ -561,30 +581,6 @@ impl ClanGuidePage {
             )
             .into_any_element()
     }
-
-    fn render_about(theme: &Theme, locale: &str) -> AnyElement {
-        v_flex()
-            .mt_8()
-            .gap_2()
-            .h(px(80.))
-            .p_4()
-            .w(px(300.))
-            .flex_none()
-            .justify_between()
-            .rounded(px(8.))
-            .bg(theme.tokens.bg_active_member_channel)
-            .child(
-                div()
-                    .font_weight(FontWeight::BOLD)
-                    .child(mezon_i18n::t(locale, "guide.about")),
-            )
-            .child(
-                div()
-                    .text_size(px(12.))
-                    .child(mezon_i18n::t(locale, "guide.membersOnline")),
-            )
-            .into_any_element()
-    }
 }
 
 fn section_title(title: &'static str) -> AnyElement {
@@ -710,6 +706,7 @@ impl Render for ClanGuidePage {
             .flex_col()
             .flex_1()
             .min_h_0()
+            .w_full()
             .items_center()
             .p_8()
             .overflow_x_hidden()
@@ -718,34 +715,31 @@ impl Render for ClanGuidePage {
             .child(self.render_banner(theme, cx))
             .child(self.render_header(theme, &locale, cx))
             .child(
-                div().pt_8().w_full().flex_none().child(
-                    h_flex()
-                        .w_full()
-                        .items_start()
-                        .gap_6()
-                        .child(v_flex().flex_1().min_w_0().gap_2().map(|column| {
-                            match self.content_state(cx) {
-                                ContentState::Failed => {
-                                    column.child(self.render_load_failure(theme, &locale))
-                                }
-                                ContentState::Loading => column,
-                                ContentState::Ready => column
-                                    .when_some(
-                                        self.render_questions(theme, &locale, cx),
-                                        |column, section| column.child(section),
-                                    )
-                                    .when_some(
-                                        self.render_resources(theme, &locale, cx),
-                                        |column, section| column.child(section),
-                                    )
-                                    .when_some(
-                                        self.render_missions(theme, &locale, cx),
-                                        |column, section| column.child(section),
-                                    ),
-                            }
-                        }))
-                        .child(Self::render_about(theme, &locale)),
-                ),
+                v_flex()
+                    .pt_8()
+                    .w_full()
+                    .min_w_0()
+                    .flex_none()
+                    .gap_2()
+                    .map(|column| match self.content_state(cx) {
+                        ContentState::Failed => {
+                            column.child(self.render_load_failure(theme, &locale))
+                        }
+                        ContentState::Loading => column,
+                        ContentState::Ready => column
+                            .when_some(
+                                self.render_questions(theme, &locale, cx),
+                                |column, section| column.child(section),
+                            )
+                            .when_some(
+                                self.render_resources(theme, &locale, cx),
+                                |column, section| column.child(section),
+                            )
+                            .when_some(
+                                self.render_missions(theme, &locale, cx),
+                                |column, section| column.child(section),
+                            ),
+                    }),
             )
             .into_any_element();
         management_page(

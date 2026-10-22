@@ -10,10 +10,14 @@ mod image_scale_windows;
 mod linux;
 #[cfg(target_os = "macos")]
 mod macos;
+#[cfg(target_os = "macos")]
+mod matroska_remux;
 #[cfg(not(target_os = "macos"))]
 mod poster;
 #[cfg(target_os = "linux")]
 mod poster_fallback;
+#[cfg(target_os = "macos")]
+mod remux_cache;
 #[cfg(not(target_os = "macos"))]
 mod render_frame;
 #[cfg(not(any(target_os = "macos", target_os = "linux", windows)))]
@@ -118,8 +122,12 @@ pub fn scaled_image_decode_path(_path: &std::path::Path, _max_px: u32) -> Option
     None
 }
 
-pub fn is_webm_url(url: &str) -> bool {
-    #[cfg(any(windows, target_os = "macos"))]
+pub fn needs_prepared_open(url: &str) -> bool {
+    #[cfg(target_os = "macos")]
+    {
+        remux_cache::is_matroska_source(url)
+    }
+    #[cfg(windows)]
     {
         webm_player::is_webm_source(url)
     }
@@ -131,12 +139,38 @@ pub fn is_webm_url(url: &str) -> bool {
 }
 
 #[cfg(any(windows, target_os = "macos"))]
-pub struct PreparedWebm(webm_player::WebmPlayerImpl);
+pub struct PreparedVideo {
+    inner: PreparedInner,
+    max_size: Option<(u32, u32)>,
+}
 
 #[cfg(any(windows, target_os = "macos"))]
-impl PreparedWebm {
+enum PreparedInner {
+    Webm(Box<webm_player::WebmPlayerImpl>),
+    #[cfg(target_os = "macos")]
+    Remuxed(std::path::PathBuf),
+    #[cfg(windows)]
+    MediaFoundation(platform::MediaFoundationSource),
+}
+
+#[cfg(any(windows, target_os = "macos"))]
+impl PreparedVideo {
     pub fn open(url: &str, max_size: Option<(u32, u32)>) -> Result<Self, PlayerError> {
-        Ok(Self(webm_player::WebmPlayerImpl::open(url, max_size)?))
+        #[cfg(target_os = "macos")]
+        let inner = match remux_cache::prepare(url)? {
+            remux_cache::PreparedSource::Remuxed(path) => PreparedInner::Remuxed(path),
+            remux_cache::PreparedSource::Vp8(bytes) => PreparedInner::Webm(Box::new(
+                webm_player::WebmPlayerImpl::open_bytes(bytes, max_size)?,
+            )),
+        };
+        #[cfg(windows)]
+        let inner = match platform::prepare_media_foundation(url) {
+            Some(source) => PreparedInner::MediaFoundation(source),
+            None => {
+                PreparedInner::Webm(Box::new(webm_player::WebmPlayerImpl::open(url, max_size)?))
+            }
+        };
+        Ok(Self { inner, max_size })
     }
 }
 
@@ -151,10 +185,19 @@ impl VideoPlayer {
     }
 
     #[cfg(any(windows, target_os = "macos"))]
-    pub fn from_prepared_webm(prepared: PreparedWebm) -> Self {
-        Self {
-            inner: platform::PlayerImpl::from_webm(prepared.0),
-        }
+    pub fn from_prepared(prepared: PreparedVideo) -> Result<Self, PlayerError> {
+        let inner = match prepared.inner {
+            PreparedInner::Webm(player) => platform::PlayerImpl::from_webm(*player),
+            #[cfg(target_os = "macos")]
+            PreparedInner::Remuxed(path) => {
+                platform::PlayerImpl::open_file(&path, prepared.max_size)?
+            }
+            #[cfg(windows)]
+            PreparedInner::MediaFoundation(source) => {
+                platform::PlayerImpl::from_media_foundation(source, prepared.max_size)?
+            }
+        };
+        Ok(Self { inner })
     }
 
     #[cfg(any(windows, target_os = "macos"))]

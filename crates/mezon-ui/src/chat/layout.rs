@@ -3308,6 +3308,7 @@ impl ChatLayout {
             | Route::SettingsDevices
             | Route::SettingsAppearance
             | Route::SettingsActivity
+            | Route::SettingsChat
             | Route::SettingsNotifications
             | Route::SettingsLanguage
             | Route::SettingsVoice

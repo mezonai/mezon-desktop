@@ -145,6 +145,16 @@ impl PlayerImpl {
         })
     }
 
+    pub fn open_file(
+        path: &std::path::Path,
+        max_size: Option<(u32, u32)>,
+    ) -> Result<Self, PlayerError> {
+        let url = file_url(path).ok_or(PlayerError::InvalidUrl)?;
+        Ok(Self {
+            inner: PlayerBackend::AvFoundation(AvFoundationPlayer::open(&url, max_size)?),
+        })
+    }
+
     pub fn from_webm(player: crate::webm_player::WebmPlayerImpl) -> Self {
         Self {
             inner: PlayerBackend::Webm(Box::new(player)),
@@ -589,10 +599,39 @@ fn frame_format_is_renderable(format: u32) -> bool {
 
 const POSTER_TIME_SECONDS: f64 = 1.0;
 
-pub fn probe_video(path: &str, max_poster_edge: u32) -> Option<VideoProbe> {
-    if crate::webm_player::is_webm_source(path) {
-        return crate::webm_player::probe_webm(path, max_poster_edge);
+fn file_url(path: &std::path::Path) -> Option<String> {
+    let path = path.to_str()?;
+    let mut url = String::with_capacity(path.len() + 7);
+    url.push_str("file://");
+    for byte in path.bytes() {
+        if byte.is_ascii_alphanumeric() || matches!(byte, b'/' | b'-' | b'_' | b'.' | b'~') {
+            url.push(char::from(byte));
+        } else {
+            url.push_str(&format!("%{byte:02X}"));
+        }
     }
+    Some(url)
+}
+
+pub fn probe_video(path: &str, max_poster_edge: u32) -> Option<VideoProbe> {
+    if crate::remux_cache::is_matroska_source(path) {
+        return match crate::remux_cache::probe_source(path)? {
+            crate::remux_cache::ProbeSource::Remuxed(remuxed) => {
+                let probe = remuxed
+                    .to_str()
+                    .and_then(|remuxed| probe_asset(remuxed, max_poster_edge));
+                let _ = std::fs::remove_file(&remuxed);
+                probe
+            }
+            crate::remux_cache::ProbeSource::Vp8 => {
+                crate::webm_player::probe_webm(path, max_poster_edge)
+            }
+        };
+    }
+    probe_asset(path, max_poster_edge)
+}
+
+fn probe_asset(path: &str, max_poster_edge: u32) -> Option<VideoProbe> {
     let c_path = CString::new(path).ok()?;
     objc::rc::autoreleasepool(|| unsafe {
         let ns_string = class!(NSString);

@@ -117,6 +117,9 @@ pub struct AccountStore {
     account_freshness: Freshness,
     devices_freshness: Freshness,
     reset_generation: u64,
+    profile_refresh_pending: bool,
+    realtime_display_name: Option<String>,
+    last_profile_update: Option<crate::users_by_user::ProfileUpdate>,
     api: Arc<AppApi>,
     _conn_watch: Task<()>,
 }
@@ -150,6 +153,9 @@ impl AccountStore {
             account_freshness: Freshness::new(),
             devices_freshness: Freshness::new(),
             reset_generation: 0,
+            profile_refresh_pending: false,
+            realtime_display_name: None,
+            last_profile_update: None,
             api,
             _conn_watch: conn_watch,
         }
@@ -168,6 +174,9 @@ impl AccountStore {
                     was_connected = true;
                     if this
                         .update(cx, |this, cx| {
+                            this.last_profile_update = None;
+                            this.realtime_display_name = None;
+                            this.profile_refresh_pending = true;
                             this.account_freshness.mark_stale();
                             this.devices_freshness.mark_stale();
                             this.ensure_account(cx);
@@ -208,33 +217,28 @@ impl AccountStore {
 
     fn handle_event(&mut self, event: &RealtimeEvent, cx: &mut Context<Self>) {
         if let RealtimeEvent::UserProfileUpdated(e) = event {
-            tracing::debug!(
-                user_id = e.user_id,
-                "user profile realtime received; refreshing signed-in account"
-            );
-            let mut updated_current_account = false;
-            if let Some(account) = &mut self.account
-                && account.user_id == e.user_id
+            if self
+                .account
+                .as_ref()
+                .is_some_and(|account| account.user_id == e.user_id)
             {
-                // Match the React reducer: sparse empty display/avatar fields do
-                // not erase existing values, while about_me is authoritative.
-                if !e.display_name.is_empty() {
-                    account.display_name = e.display_name.clone();
+                let update = crate::users_by_user::ProfileUpdate::from(e);
+                if self.last_profile_update.as_ref() == Some(&update) {
+                    self.profile_refresh_pending = true;
+                    return;
                 }
-                if !e.avatar.is_empty() {
-                    account.avatar_url = Some(e.avatar.clone());
+                self.last_profile_update = Some(update);
+                self.realtime_display_name =
+                    (!e.display_name.is_empty()).then(|| e.display_name.clone());
+                if !e.display_name.is_empty()
+                    && let Some(account) = self.account.as_mut()
+                    && account.display_name != e.display_name
+                {
+                    account.display_name.clone_from(&e.display_name);
+                    cx.emit(AccountEvent::AccountLoaded);
+                    cx.notify();
                 }
-                account.about_me = Some(e.about_me.clone());
-                updated_current_account = true;
-            }
-            if updated_current_account {
-                if let Some(account) = &self.account {
-                    Self::spawn_persist_cache(account, cx);
-                }
-                cx.emit(AccountEvent::AccountLoaded);
-                cx.notify();
-                // The event has no `logo` field, so always refetch as well; this is
-                // what makes direct-message icon changes propagate across clients.
+                self.profile_refresh_pending = true;
                 self.account_freshness.mark_stale();
                 self.fetch_account(cx);
             }
@@ -267,6 +271,9 @@ impl AccountStore {
 
     pub fn reset(&mut self, cx: &mut Context<Self>) {
         self.reset_generation = self.reset_generation.wrapping_add(1);
+        self.profile_refresh_pending = false;
+        self.realtime_display_name = None;
+        self.last_profile_update = None;
         self.account = None;
         self.account_loading = false;
         self.account_error = false;
@@ -298,22 +305,56 @@ impl AccountStore {
         }
     }
 
+    fn reconcile_realtime_display_name(&mut self, account: &mut UserAccount) {
+        let Some(display_name) = self.realtime_display_name.as_ref() else {
+            return;
+        };
+        if account.display_name == *display_name {
+            self.realtime_display_name = None;
+        } else {
+            account.display_name.clone_from(display_name);
+        }
+    }
+
     pub fn fetch_account(&mut self, cx: &mut Context<Self>) {
         if self.account_loading {
             return;
         }
+        self.profile_refresh_pending = false;
         self.account_loading = true;
         self.account_error = false;
         cx.notify();
 
         let api = self.api.clone();
         let generation = self.reset_generation;
+
         cx.spawn(async move |this, cx| match api.get_account().await {
             Ok(acct) => {
-                let account = user_account_from_api(acct);
+                let mut account = user_account_from_api(acct);
                 let _ = this.update(cx, |this, cx| {
                     if this.reset_generation != generation {
                         return;
+                    }
+                    if this.profile_refresh_pending {
+                        this.account_loading = false;
+                        this.fetch_account(cx);
+                        return;
+                    }
+                    this.reconcile_realtime_display_name(&mut account);
+                    this.last_profile_update = None;
+                    let profile = crate::clan_members::User {
+                        id: crate::ids::UserId(account.user_id),
+                        username: account.username.clone(),
+                        display_name: account.display_name.clone(),
+                        avatar_url: account.avatar_url.clone().unwrap_or_default(),
+                        about_me: account.about_me.clone().unwrap_or_default(),
+                        create_time_seconds: account.create_time_seconds,
+                        ..Default::default()
+                    };
+                    if let Some(store) = crate::users_by_user::UsersByUserStore::try_global(cx) {
+                        store.update(cx, |store, cx| store.apply_user_profile(profile, cx));
+                    } else {
+                        crate::user_profile::apply_user_profile(&profile, cx);
                     }
                     Self::spawn_persist_cache(&account, cx);
                     this.account = Some(account);
@@ -331,6 +372,11 @@ impl AccountStore {
                         return;
                     }
                     this.account_loading = false;
+                    if this.profile_refresh_pending {
+                        this.fetch_account(cx);
+                        return;
+                    }
+                    this.last_profile_update = None;
                     this.account_error = true;
                     cx.emit(AccountEvent::AccountLoadFailed);
                     cx.notify();
@@ -1211,6 +1257,93 @@ mod tests {
             .and_utc()
             .timestamp() as u32;
         assert!(!is_adult_dob_on(future, today));
+    }
+
+    #[gpui::test]
+    fn profile_event_updates_name_during_account_request_without_erasing_bio(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (api, store) = cx.update(|cx| {
+            let api = Arc::new(AppApi::new(Arc::new(mezon_client::TransportClient::new(String::new())), String::new()));
+            RealtimeDispatch::init(api.clone(), cx);
+            let store = cx.new(|cx| AccountStore::new(api.clone(), cx));
+            store.update(cx, |store, _| {
+                let account: ApiAccount = serde_json::from_value(serde_json::json!({
+                    "user_id": 7, "username": "user", "display_name": "Old", "about_me": "Bio", "password_setted": false
+                })).unwrap();
+                store.account = Some(user_account_from_api(account));
+                store.account_loading = true;
+            });
+            (api, store)
+        });
+        cx.run_until_parked();
+        api.publish_event(RealtimeEvent::UserProfileUpdated(
+            mezon_proto::realtime::UserProfileUpdatedEvent {
+                user_id: 8,
+                ..Default::default()
+            },
+        ));
+        cx.run_until_parked();
+        cx.update(|cx| assert!(!store.read(cx).profile_refresh_pending));
+        api.publish_event(RealtimeEvent::UserProfileUpdated(
+            mezon_proto::realtime::UserProfileUpdatedEvent {
+                user_id: 7,
+                display_name: "New".into(),
+                ..Default::default()
+            },
+        ));
+        cx.run_until_parked();
+        cx.update(|cx| {
+            store.update(cx, |store, cx| {
+                assert!(store.profile_refresh_pending);
+                let account = store.account.as_ref().unwrap();
+                assert_eq!(account.display_name, "New");
+                assert_eq!(account.about_me.as_deref(), Some("Bio"));
+                let mut stale = account.clone();
+                stale.display_name = "Old".into();
+                store.reconcile_realtime_display_name(&mut stale);
+                assert_eq!(stale.display_name, "New");
+                assert_eq!(stale.about_me.as_deref(), Some("Bio"));
+                assert_eq!(store.realtime_display_name.as_deref(), Some("New"));
+                store.reconcile_realtime_display_name(&mut stale);
+                assert!(store.realtime_display_name.is_none());
+                store.reset(cx);
+                assert!(store.realtime_display_name.is_none());
+                assert!(!store.profile_refresh_pending);
+            });
+        });
+    }
+
+    #[gpui::test]
+    fn duplicate_profile_events_coalesce_and_empty_name_releases_pending_name(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        cx.update(|cx| {
+            let api = Arc::new(AppApi::new(Arc::new(mezon_client::TransportClient::new(String::new())), String::new()));
+            RealtimeDispatch::init(api.clone(), cx);
+            let store = cx.new(|cx| AccountStore::new(api, cx));
+            store.update(cx, |store, cx| {
+                let account: ApiAccount = serde_json::from_value(serde_json::json!({"user_id": 7, "username": "user", "display_name": "Old", "password_setted": false})).unwrap();
+                store.account = Some(user_account_from_api(account));
+                store.account_loading = true;
+                let mut event = mezon_proto::realtime::UserProfileUpdatedEvent { user_id: 7, clan_id: 1, display_name: "New".into(), ..Default::default() };
+                store.handle_event(&RealtimeEvent::UserProfileUpdated(event.clone()), cx);
+                assert_eq!(store.realtime_display_name.as_deref(), Some("New"));
+                store.profile_refresh_pending = false;
+                event.clan_id = 2;
+                store.handle_event(&RealtimeEvent::UserProfileUpdated(event.clone()), cx);
+                assert!(store.profile_refresh_pending);
+                assert!(store.account_loading);
+                event.display_name.clear();
+                store.handle_event(&RealtimeEvent::UserProfileUpdated(event), cx);
+                assert!(store.profile_refresh_pending);
+                assert!(store.realtime_display_name.is_none());
+                let mut snapshot = store.account.clone().unwrap();
+                snapshot.display_name = "user".into();
+                store.reconcile_realtime_display_name(&mut snapshot);
+                assert_eq!(snapshot.display_name, "user");
+            });
+        });
     }
 
     use super::*;

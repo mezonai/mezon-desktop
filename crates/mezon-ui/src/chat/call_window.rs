@@ -226,7 +226,10 @@ impl CallPanelView {
         cx.observe(&call, |this, call, cx| {
             let (active, two_tile) = {
                 let store = call.read(cx);
-                (!matches!(store.phase(), CallPhase::Idle), two_tile_layout(store))
+                (
+                    !matches!(store.phase(), CallPhase::Idle),
+                    two_tile_layout(store),
+                )
             };
             if !active || !two_tile {
                 this.enlarged = None;
@@ -860,10 +863,9 @@ fn frame_element(
     fit: ObjectFit,
 ) -> gpui::AnyElement {
     match frame {
-        Some(VoiceRenderFrame::Image(image)) => img(image)
-            .size_full()
-            .object_fit(fit)
-            .into_any_element(),
+        Some(VoiceRenderFrame::Image(image)) => {
+            img(image).size_full().object_fit(fit).into_any_element()
+        }
         #[cfg(target_os = "macos")]
         Some(VoiceRenderFrame::Surface(surface)) => gpui::surface(surface.into_inner())
             .size_full()
@@ -971,11 +973,7 @@ fn video_tile(
                     .bg(rgba(0x00000099))
                     .opacity(0.)
                     .group_hover(group, |s| s.opacity(1.))
-                    .child(
-                        Icon::new(hint_icon)
-                            .size(px(16.))
-                            .text_color(rgb(0xffffff)),
-                    ),
+                    .child(Icon::new(hint_icon).size(px(16.)).text_color(rgb(0xffffff))),
             )
         })
         .into_any_element()
@@ -1034,8 +1032,14 @@ mod tests {
 
     #[test]
     fn clicking_a_tile_enlarges_it_and_clicking_again_restores_the_grid() {
-        assert_eq!(toggle_enlarged(None, CallTile::Remote), Some(CallTile::Remote));
-        assert_eq!(toggle_enlarged(Some(CallTile::Remote), CallTile::Remote), None);
+        assert_eq!(
+            toggle_enlarged(None, CallTile::Remote),
+            Some(CallTile::Remote)
+        );
+        assert_eq!(
+            toggle_enlarged(Some(CallTile::Remote), CallTile::Remote),
+            None
+        );
     }
 
     #[test]
@@ -1049,7 +1053,13 @@ mod tests {
     #[test]
     fn tile_layout_follows_the_enlarged_tile() {
         assert_eq!(tile_layout(None, CallTile::Local), TileLayout::Grid);
-        assert_eq!(tile_layout(Some(CallTile::Local), CallTile::Local), TileLayout::Main);
-        assert_eq!(tile_layout(Some(CallTile::Local), CallTile::Remote), TileLayout::Pip);
+        assert_eq!(
+            tile_layout(Some(CallTile::Local), CallTile::Local),
+            TileLayout::Main
+        );
+        assert_eq!(
+            tile_layout(Some(CallTile::Local), CallTile::Remote),
+            TileLayout::Pip
+        );
     }
 }

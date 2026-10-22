@@ -1,15 +1,27 @@
+use crate::chat::mention_input::grammar_correction_bar as shared_grammar_correction_bar;
 use crate::chat::message::invite_card::member_count_label;
+use crate::chat::quick_replies::{
+    last_text_message_for_quick_replies, message_bucket, quick_reply_source_text,
+};
 use crate::chat::{MentionInput, ReplyTarget};
 use crate::components::primitives::{Icon, IconName};
 use crate::image_cache::LruImageCache;
 use crate::theme::{ActiveTheme, Theme};
 use gpui::{
-    Context, Entity, FontWeight, ObjectFit, Render, SharedString, Subscription, Window, div, img,
-    prelude::*, px, radians, rgb,
+    Context, Entity, FontWeight, ObjectFit, Render, SharedString, Subscription, Task, Window, div,
+    img, prelude::*, px, radians, rgb,
 };
-use mezon_store::{MessagesEvent, MessagesStore, OgpResult, Settings, TopicsStore};
+use mezon_grammar::client::MezonGrammarClient;
+use mezon_store::MessageId;
+use mezon_store::{
+    BadgeService, ChannelId, MessagesEvent, MessagesStore, OgpResult, Settings, TopicsStore,
+};
 
 const OGP_PREVIEW_MEMBER_DOT: u32 = 0x22_c5_5e;
+const QUICK_REPLY_PILL_BLUE: u32 = 0x3b_82_f6;
+const QUICK_REPLY_PILL_BLUE_BORDER: u32 = 0x60_66_f1;
+const QUICK_REPLY_PILL_TEXT: u32 = 0x93_c5_fd;
+const QUICK_REPLY_TOP_K: usize = 4;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ReplyClearSource {
@@ -20,6 +32,7 @@ pub enum ReplyClearSource {
 
 pub struct InputBar {
     mention_input: Entity<MentionInput>,
+    settings: Entity<Settings>,
     locale: SharedString,
     replying_to: Option<ReplyTarget>,
     reply_clear: ReplyClearSource,
@@ -28,6 +41,11 @@ pub struct InputBar {
     _messages_sub: Subscription,
     ogp_image_cache: Entity<LruImageCache>,
     for_topic: bool,
+    quick_reply_bucket: Option<ChannelId>,
+    quick_reply_source_id: Option<MessageId>,
+    quick_replies: Vec<SharedString>,
+    quick_reply_generation: u64,
+    _quick_reply_task: Option<Task<()>>,
 }
 
 impl InputBar {
@@ -38,18 +56,28 @@ impl InputBar {
         for_topic: bool,
         cx: &mut Context<Self>,
     ) -> Self {
-        let settings_observe = cx.observe(settings, |_, _, cx| cx.notify());
+        let settings_entity = settings.clone();
+        let settings_observe = cx.observe(settings, |this, _, cx| {
+            if this.sync_quick_replies(cx) {
+                cx.notify();
+            }
+        });
         let mention_observe = cx.observe(&mention_input, |_, _, cx| cx.notify());
         let messages_sub = cx.subscribe(
             &MessagesStore::global(cx),
-            |_, _, event: &MessagesEvent, cx| {
+            |this, _, event: &MessagesEvent, cx| {
                 if matches!(event, MessagesEvent::AnonymousModeChanged) {
+                    cx.notify();
+                    return;
+                }
+                if Self::quick_replies_need_refresh(event) && this.sync_quick_replies(cx) {
                     cx.notify();
                 }
             },
         );
-        Self {
+        let mut bar = Self {
             mention_input,
+            settings: settings_entity,
             locale,
             replying_to: None,
             reply_clear: ReplyClearSource::Messages,
@@ -58,7 +86,93 @@ impl InputBar {
             _messages_sub: messages_sub,
             ogp_image_cache: crate::image_cache::ogp_aux_cache("composer-ogp", cx),
             for_topic,
+            quick_reply_bucket: None,
+            quick_reply_source_id: None,
+            quick_replies: Vec::new(),
+            quick_reply_generation: 0,
+            _quick_reply_task: None,
+        };
+        bar.sync_quick_replies(cx);
+        bar
+    }
+
+    fn quick_replies_need_refresh(event: &MessagesEvent) -> bool {
+        matches!(
+            event,
+            MessagesEvent::Reset { .. }
+                | MessagesEvent::Resized { .. }
+                | MessagesEvent::Shifted { .. }
+                | MessagesEvent::Updated { .. }
+                | MessagesEvent::RemovedAt { .. }
+                | MessagesEvent::TopicUpdated { .. }
+        )
+    }
+
+    fn clear_quick_replies(&mut self) -> bool {
+        let changed = self.quick_reply_bucket.is_some()
+            || self.quick_reply_source_id.is_some()
+            || !self.quick_replies.is_empty()
+            || self._quick_reply_task.is_some();
+        self.quick_reply_bucket = None;
+        self.quick_reply_source_id = None;
+        self.quick_replies.clear();
+        self._quick_reply_task = None;
+        changed
+    }
+
+    fn sync_quick_replies(&mut self, cx: &mut Context<Self>) -> bool {
+        if !self.settings.read(cx).quick_replies_enabled {
+            return self.clear_quick_replies();
         }
+        let store = MessagesStore::global(cx).read(cx);
+        let bucket = message_bucket(store, self.for_topic);
+        let Some(bucket) = bucket else {
+            return self.clear_quick_replies();
+        };
+        let viewer_id = BadgeService::try_global(cx)
+            .and_then(|badge| badge.read(cx).current_user_id(cx))
+            .map(|id| id.0.to_string());
+        let Some(message) =
+            last_text_message_for_quick_replies(store, bucket, viewer_id.as_deref())
+        else {
+            return self.clear_quick_replies();
+        };
+        let Some(source_text) = quick_reply_source_text(message) else {
+            return self.clear_quick_replies();
+        };
+        if self.quick_reply_bucket == Some(bucket) && self.quick_reply_source_id == Some(message.id)
+        {
+            return false;
+        }
+        self.quick_reply_bucket = Some(bucket);
+        self.quick_reply_source_id = Some(message.id);
+        self.quick_replies.clear();
+        self.quick_reply_generation += 1;
+        let generation = self.quick_reply_generation;
+        let previous_message = source_text.to_string();
+        self._quick_reply_task = Some(cx.spawn(async move |this, cx| {
+            let replies = cx
+                .background_executor()
+                .spawn(async move {
+                    let client = MezonGrammarClient::shared();
+                    client.suggest_quick_replies_with_model(
+                        &previous_message,
+                        None,
+                        QUICK_REPLY_TOP_K,
+                    )
+                })
+                .await;
+            this.update(cx, |bar, cx| {
+                if bar.quick_reply_generation != generation {
+                    return;
+                }
+                bar._quick_reply_task = None;
+                bar.quick_replies = replies.into_iter().map(SharedString::from).collect();
+                cx.notify();
+            })
+            .ok();
+        }));
+        true
     }
 
     pub fn sync(
@@ -137,6 +251,46 @@ impl InputBar {
                             .text_color(theme.tokens.text_theme_primary),
                     ),
             )
+    }
+
+    fn quick_replies_row(
+        &self,
+        mention_input: Entity<MentionInput>,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        div()
+            .id("quick-replies-row")
+            .flex()
+            .flex_row()
+            .flex_wrap()
+            .justify_end()
+            .items_center()
+            .gap_2()
+            .w_full()
+            .mb_1()
+            .children(self.quick_replies.iter().enumerate().map(|(index, reply)| {
+                let text = reply.clone();
+                let mention_input = mention_input.clone();
+                div()
+                    .id(("quick-reply-pill", index))
+                    .flex_shrink_0()
+                    .px_3()
+                    .py_1()
+                    .rounded_full()
+                    .border_1()
+                    .border_color(rgb(QUICK_REPLY_PILL_BLUE_BORDER))
+                    .bg(gpui::rgba(0x3b_82_f6_33))
+                    .text_size(px(13.))
+                    .text_color(rgb(QUICK_REPLY_PILL_TEXT))
+                    .cursor_pointer()
+                    .hover(|s| s.bg(rgb(QUICK_REPLY_PILL_BLUE)))
+                    .child(text.clone())
+                    .on_click(cx.listener(move |_, _, window, cx| {
+                        mention_input.update(cx, |input, cx| {
+                            input.fill_quick_reply(text.as_ref(), window, cx);
+                        });
+                    }))
+            }))
     }
 
     fn ogp_preview_bar(
@@ -244,9 +398,34 @@ impl InputBar {
             )
     }
 
+    fn grammar_correction_bar(
+        &self,
+        theme: &Theme,
+        text: SharedString,
+        cap_top: bool,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        shared_grammar_correction_bar(
+            theme,
+            text,
+            cap_top,
+            cx.listener(|this, _, window, cx| {
+                this.mention_input.update(cx, |input, cx| {
+                    input.apply_grammar_correction(window, cx);
+                });
+            }),
+            cx.listener(|this, _, _, cx| {
+                this.mention_input
+                    .update(cx, |input, cx| input.dismiss_grammar_popup(cx));
+            }),
+        )
+    }
+
     fn render_bar(&self, theme: std::sync::Arc<Theme>, cx: &mut Context<Self>) -> impl IntoElement {
         let replying = self.replying_to.is_some();
         let reply_clear = self.reply_clear;
+        let grammar_correction = self.mention_input.read(cx).grammar_correction_text();
+        let composer_capped = replying || grammar_correction.is_some();
         let ogp_preview = self.mention_input.read(cx).ogp_preview().cloned();
         let store = MessagesStore::global(cx);
         let anonymous = if self.for_topic {
@@ -254,6 +433,10 @@ impl InputBar {
         } else {
             store.read(cx).is_anonymous_mode()
         };
+        let show_quick_replies = grammar_correction.is_none()
+            && self.settings.read(cx).quick_replies_enabled
+            && !self.quick_replies.is_empty();
+        let mention_input = self.mention_input.clone();
         div()
             .flex()
             .flex_col()
@@ -272,14 +455,20 @@ impl InputBar {
                     reply_clear,
                 ))
             })
+            .when(show_quick_replies, |d| {
+                d.child(self.quick_replies_row(mention_input, cx))
+            })
+            .when_some(grammar_correction, |d, text| {
+                d.child(self.grammar_correction_bar(&theme, text, !replying, cx))
+            })
             .child(
                 div()
                     .relative()
                     .flex()
                     .flex_row()
                     .items_center()
-                    .when(replying, |d| d.rounded_bl_lg().rounded_br_lg())
-                    .when(!replying, |d| d.rounded_lg())
+                    .when(composer_capped, |d| d.rounded_bl_lg().rounded_br_lg())
+                    .when(!composer_capped, |d| d.rounded_lg())
                     .border_1()
                     .border_color(theme.tokens.border_primary)
                     .bg(theme.surfaces.surface.fill())

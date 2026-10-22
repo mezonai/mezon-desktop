@@ -24,6 +24,7 @@ members = [
     "crates/mezon-canvas",
     "crates/mmn-client",
     "crates/mezon-active-windows",
+    "crates/mezon-grammar",
     # Vendored GPUI crates
     "crates/vendor/gpui",
     "crates/vendor/gpui_macros",
@@ -64,7 +65,7 @@ members = [
 resolver = "2"
 
 [workspace.package]
-version = "2.1.11"
+version = "2.1.12"
 edition = "2024"
 authors = ["Mezon Team"]
 license = "GPL-3.0-or-later"
@@ -141,6 +142,7 @@ mezon-widgets = { path = "crates/mezon-widgets" }
 mezon-canvas  = { path = "crates/mezon-canvas" }
 mmn-client    = { path = "crates/mmn-client" }
 mezon-active-windows = { path = "crates/mezon-active-windows" }
+mezon-grammar       = { path = "crates/mezon-grammar" }
 
 # ---------- Async runtime ----------
 tokio                = { version = "1", features = ["full"] }

@@ -1,11 +1,11 @@
 use std::collections::HashMap;
 
 use gpui::{
-    AnyElement, App, AppContext, Bounds, Context, Entity, FocusHandle, FontWeight, Global,
-    InteractiveElement, IntoElement, KeyDownEvent, KeyUpEvent, ListAlignment, ListState,
-    ParentElement, Pixels, Render, ScrollHandle, Size, StatefulInteractiveElement, Styled,
-    Subscription, Task, Window, WindowBounds, WindowHandle, WindowKind, WindowOptions, div, list,
-    prelude::FluentBuilder, px, size,
+    AnyElement, App, AppContext, Bounds, Context, DismissEvent, Entity, FocusHandle, FontWeight,
+    Global, InteractiveElement, IntoElement, KeyDownEvent, KeyUpEvent, ListAlignment, ListState,
+    MouseButton, ParentElement, Pixels, Render, ScrollHandle, Size, StatefulInteractiveElement,
+    Styled, Subscription, Task, Window, WindowBounds, WindowHandle, WindowKind, WindowOptions,
+    deferred, div, hsla, list, prelude::FluentBuilder, px, size,
 };
 use mezon_store::{
     AuthState, LoginStore, MeetingChatMessage, MeetingChatStatus, Settings, VoiceStore,
@@ -13,6 +13,7 @@ use mezon_store::{
 
 use crate::app::title_bar::TitleBar;
 use crate::app::window_controls;
+use crate::chat::screen_share_modal::ScreenShareModal;
 use crate::chat::voice::{
     CallLayoutHost, VoiceVisualState, guest_avatar_url, next_voice_grid_page,
     render_external_meeting, render_screen_fullscreen_overlay, spawn_voice_frame_pump,
@@ -155,6 +156,7 @@ pub struct MeetingView {
     chat_first_seq: Option<u64>,
     chat_count: usize,
     chat_input: Entity<InputState>,
+    share_modal: Option<(Entity<ScreenShareModal>, Subscription)>,
     _frame_pump: Option<Task<()>>,
     _subscriptions: Vec<Subscription>,
 }
@@ -250,6 +252,7 @@ impl MeetingView {
             chat_first_seq: None,
             chat_count: 0,
             chat_input,
+            share_modal: None,
             _frame_pump: None,
             _subscriptions: subscriptions,
         };
@@ -391,8 +394,29 @@ impl MeetingView {
         }
     }
 
+    pub(crate) fn show_share_modal(
+        &mut self,
+        modal: Entity<ScreenShareModal>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let subscription =
+            cx.subscribe_in(&modal, window, |this, _, _: &DismissEvent, window, cx| {
+                this.close_share_modal(window, cx);
+            });
+        self.share_modal = Some((modal, subscription));
+        cx.notify();
+    }
+
+    fn close_share_modal(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.share_modal.take().is_some() {
+            window.focus(&self.focus_handle, cx);
+            cx.notify();
+        }
+    }
+
     fn hold_to_talk(&self, active: bool, window: &mut Window, cx: &mut Context<Self>) {
-        if self.in_meeting(cx) {
+        if self.in_meeting(cx) && (!active || self.share_modal.is_none()) {
             crate::app::root::voice_hold_to_talk(active, window, cx);
         }
     }
@@ -546,6 +570,7 @@ impl Render for MeetingView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.voice
             .update(cx, |store, cx| store.flush_texture_drops(Some(window), cx));
+        crate::image_cache::flush_atlas_drops(window, cx);
         let theme = cx.theme().clone();
         let (locale, input_device_id, output_device_id, camera_device_id) = {
             let settings = self.settings.read(cx);
@@ -609,6 +634,7 @@ impl Render for MeetingView {
                 )
             })
             .flatten();
+        let share_modal = self.share_modal.as_ref().map(|(modal, _)| modal.clone());
 
         div()
             .id("meeting-window")
@@ -661,6 +687,25 @@ impl Render for MeetingView {
                     )
                     .children(chat_panel),
             )
+            .when_some(share_modal, |el, modal| {
+                el.child(deferred(
+                    div()
+                        .absolute()
+                        .top_0()
+                        .left_0()
+                        .size_full()
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .bg(hsla(0., 0., 0., 0.5))
+                        .occlude()
+                        .on_mouse_down(
+                            MouseButton::Left,
+                            cx.listener(|this, _, window, cx| this.close_share_modal(window, cx)),
+                        )
+                        .child(div().occlude().child(modal)),
+                ))
+            })
             .when(window_controls::is_edge_resizable(), |el| {
                 el.child(window_controls::render_resize_edges(window))
             })

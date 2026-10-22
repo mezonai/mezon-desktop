@@ -451,13 +451,16 @@ impl CommandPaletteModal {
                 let Some(channel_id) = item.channel_id else {
                     return;
                 };
-                let parent_id = ChannelList::global(cx)
+                let stored_parent = ChannelList::global(cx)
                     .read(cx)
                     .channel(clan_id, channel_id)
-                    .and_then(|ch| ch.parent_id);
+                    .map(|ch| ch.parent_id);
                 ClanList::global(cx).update(cx, |list, cx| list.select_clan(clan_id, cx));
                 ChannelList::global(cx).update(cx, |store, cx| {
-                    store.set_ctrlk_focus_channel(channel_id, parent_id, cx);
+                    if stored_parent.is_none() {
+                        store.allow_archived_thread(channel_id);
+                    }
+                    store.set_ctrlk_focus_channel(channel_id, stored_parent.flatten(), cx);
                     store.record_previous_channel(clan_id, channel_id, cx);
                     store.reset_user_channel_unread(channel_id, cx);
                 });
@@ -478,6 +481,15 @@ impl CommandPaletteModal {
                     .dm_channel_type
                     .map(|ty| ty.to_string())
                     .unwrap_or_else(|| DirectKind::Dm.channel_type().to_string());
+                if let Some(kind) = item.dm_kind {
+                    let label = item.label.to_string();
+                    let avatar = item.avatar_raw.to_string();
+                    DirectMessageStore::global(cx).update(cx, |store, cx| {
+                        store
+                            .reopen_conversation(direct_id, kind, label, avatar, cx)
+                            .detach();
+                    });
+                }
                 ChannelList::global(cx).update(cx, |store, cx| {
                     store.record_previous_channel(ClanId(0), direct_id, cx);
                 });

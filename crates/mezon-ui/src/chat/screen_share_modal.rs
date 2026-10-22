@@ -2,8 +2,8 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use gpui::{
-    App, Context, Entity, FocusHandle, Focusable, ObjectFit, RenderImage, SharedString, Task,
-    Window, div, img, prelude::*, px,
+    App, Context, DismissEvent, Entity, EventEmitter, FocusHandle, Focusable, ObjectFit,
+    RenderImage, SharedString, Task, Window, div, img, prelude::*, px,
 };
 use mezon_store::{
     PickedScreen, ScreenShareKind, ScreenShareListError, ScreenShareOption, ScreenSharePreview,
@@ -17,6 +17,7 @@ use crate::chat::voice::ACCENT_BLUE;
 use crate::components::primitives::{
     Button, ButtonVariants, Icon, IconName, Switch, h_flex, v_flex,
 };
+use crate::meeting::MeetingView;
 use crate::theme::ActiveTheme;
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
@@ -55,6 +56,8 @@ pub struct ScreenShareModal {
     preview_task: Option<Task<()>>,
     preview_loading: bool,
 }
+
+impl EventEmitter<DismissEvent> for ScreenShareModal {}
 
 impl Focusable for ScreenShareModal {
     fn focus_handle(&self, _cx: &App) -> FocusHandle {
@@ -213,7 +216,9 @@ impl ScreenShareModal {
     }
 
     fn close(&mut self, cx: &mut Context<Self>) {
-        Shell::global(cx).update(cx, |shell, cx| shell.close_modal(cx));
+        cx.emit(DismissEvent);
+        let id = cx.entity_id();
+        Shell::global(cx).update(cx, |shell, cx| shell.close_modal_view(id, cx));
     }
 
     fn set_tab(&mut self, tab: ShareTab, cx: &mut Context<Self>) {
@@ -825,5 +830,9 @@ pub fn start_screen_share_flow(
     }
     let portal = system_screen_share_pick();
     let modal = cx.new(|cx| ScreenShareModal::new(voice, settings, portal, window, cx));
+    if let Some(Some(meeting)) = window.root::<MeetingView>() {
+        meeting.update(cx, |view, cx| view.show_share_modal(modal, window, cx));
+        return;
+    }
     Shell::global(cx).update(cx, |shell, cx| shell.show_modal(modal.into(), cx));
 }

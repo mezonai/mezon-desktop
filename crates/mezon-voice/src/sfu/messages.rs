@@ -411,9 +411,7 @@ mod tests {
             ]}"#,
         );
         let ServerMessage::Joined {
-            room,
-            ice_servers,
-            ..
+            room, ice_servers, ..
         } = msg
         else {
             panic!("expected joined");

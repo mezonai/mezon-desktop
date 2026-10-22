@@ -320,14 +320,9 @@ impl ConnectionStore {
             let mut gateway_refusals = 0u32;
             let mut jwt_refusals = 0u32;
             let mut probed_this_outage = false;
-            let mut reminted_this_outage = false;
-            let mut last_remint_attempt_at: Option<Instant> = None;
-            let mut remint_retry_secs = HEALTHY_ENDPOINT_RETRY_SECS;
-            let mut remint_unsupported = false;
+            let mut pacing = GatewayPacing::new();
             let mut endpoint_refresh_rx = endpoint_refresh_rx;
             let mut pending_endpoint_refresh: Option<EndpointRefreshRequest> = None;
-            let mut last_endpoint_refresh_at: Option<Instant> = None;
-            let mut healthy_endpoint_retry_secs = HEALTHY_ENDPOINT_RETRY_SECS;
             let mut refresh_pacer = RefreshPacer::new();
 
             loop {
@@ -350,8 +345,7 @@ impl ConnectionStore {
                     api.set_http_fallback(None);
                     endpoint_health.lock().set_endpoint(None);
                     pending_endpoint_refresh = None;
-                    last_endpoint_refresh_at = None;
-                    healthy_endpoint_retry_secs = HEALTHY_ENDPOINT_RETRY_SECS;
+                    pacing.reset();
                     if connected_user_id.take().is_some() {
                         connection_generation.fetch_add(1, Ordering::AcqRel);
                         if let Err(e) = transport.close().await {
@@ -364,13 +358,13 @@ impl ConnectionStore {
                     gateway_refusals = 0;
                     jwt_refusals = 0;
                     probed_this_outage = false;
-                    reminted_this_outage = false;
-                    last_remint_attempt_at = None;
-                    remint_retry_secs = HEALTHY_ENDPOINT_RETRY_SECS;
-                    remint_unsupported = false;
                     wake.notified().await;
                     continue;
                 };
+
+                if pacing.confirmed_at.is_some() && !transport.is_open().await {
+                    pacing.on_connection_lost(Instant::now());
+                }
 
                 while let Ok(request) = endpoint_refresh_rx.try_recv() {
                     if request.generation != connection_generation.load(Ordering::Acquire) {
@@ -392,8 +386,8 @@ impl ConnectionStore {
                 }
 
                 let endpoint_refresh_wait = endpoint_refresh_retry_in(
-                    last_endpoint_refresh_at,
-                    healthy_endpoint_retry_secs,
+                    pacing.last_endpoint_refresh_at,
+                    pacing.healthy_endpoint_retry_secs,
                     Instant::now(),
                 );
                 if endpoint_refresh_wait.is_zero()
@@ -404,10 +398,10 @@ impl ConnectionStore {
                             "Dropping stale healthy endpoint request for {}",
                             request.endpoint.label()
                         );
-                        last_endpoint_refresh_at = None;
+                        pacing.last_endpoint_refresh_at = None;
                         continue;
                     }
-                    last_endpoint_refresh_at = Some(Instant::now());
+                    pacing.record_report(Instant::now());
                     tracing::info!(
                         "Asking the gateway for a node: current_endpoint_id={} reason_code={}",
                         request.reported_endpoint_id(),
@@ -436,8 +430,7 @@ impl ConnectionStore {
                             "Healthy endpoint request deferred — no credential the gateway would accept"
                         );
                         pending_endpoint_refresh = Some(request);
-                        healthy_endpoint_retry_secs =
-                            next_healthy_endpoint_retry_secs(healthy_endpoint_retry_secs);
+                        pacing.back_off_reports();
                         continue;
                     };
                     let mut response = fetch_healthy_endpoint_with_timeout(
@@ -504,8 +497,7 @@ impl ConnectionStore {
                                     "Healthy endpoint response did not match the authenticated session"
                                 );
                                 pending_endpoint_refresh = Some(request);
-                                healthy_endpoint_retry_secs =
-                                    next_healthy_endpoint_retry_secs(healthy_endpoint_retry_secs);
+                                pacing.back_off_reports();
                                 continue;
                             };
                             session = updated;
@@ -517,9 +509,7 @@ impl ConnectionStore {
                             };
                             endpoint_health.lock().set_endpoint(node_after);
                             if stayed_put {
-                                healthy_endpoint_retry_secs = next_healthy_endpoint_retry_secs(
-                                    healthy_endpoint_retry_secs,
-                                );
+                                pacing.back_off_reports();
                                 if request.reason == HealthyEndpointReason::HighLatency {
                                     endpoint_health.lock().disable_slow_reports();
                                     tracing::warn!(
@@ -544,7 +534,7 @@ impl ConnectionStore {
                                 "Gateway moved us off {} — reconnecting",
                                 request.endpoint.label()
                             );
-                            healthy_endpoint_retry_secs = HEALTHY_ENDPOINT_RETRY_SECS;
+                            pacing.back_off_reports();
                             retry_backoff_secs = 1;
                             consecutive_failures = 0;
                             gateway_refusals = 0;
@@ -563,8 +553,7 @@ impl ConnectionStore {
                         Err(e) => {
                             tracing::warn!("Healthy endpoint request failed: {e}");
                             pending_endpoint_refresh = Some(request);
-                            healthy_endpoint_retry_secs =
-                                next_healthy_endpoint_retry_secs(healthy_endpoint_retry_secs);
+                            pacing.back_off_reports();
                             // Same reasoning as the "stayed put" path above: the ask told us
                             // nothing, so the next connect deserves the backoff the last failure
                             // earned rather than a free immediate retry. This is the branch prod
@@ -587,8 +576,8 @@ impl ConnectionStore {
                     consecutive_failures = 0;
                     if pending_endpoint_refresh.is_some() {
                         let report_due_in = endpoint_refresh_retry_in(
-                            last_endpoint_refresh_at,
-                            healthy_endpoint_retry_secs,
+                            pacing.last_endpoint_refresh_at,
+                            pacing.healthy_endpoint_retry_secs,
                             Instant::now(),
                         );
                         tokio::select! {
@@ -615,15 +604,15 @@ impl ConnectionStore {
                 // gateway has no such route at all, so that one does latch until the next
                 // confirmed handshake.
                 let remint_due_in = endpoint_refresh_retry_in(
-                    last_remint_attempt_at,
-                    remint_retry_secs,
+                    pacing.last_remint_attempt_at,
+                    pacing.remint_retry_secs,
                     Instant::now(),
                 );
                 let needs_sid_recovery = should_attempt_sid_remint(
                     &session,
                     gateway_refusals,
-                    reminted_this_outage,
-                    !gw_base.is_empty() && !remint_unsupported,
+                    pacing.reminted_this_outage,
+                    !gw_base.is_empty() && !pacing.remint_unsupported,
                 );
                 if (needs_sid_recovery || should_lead_with_jwt(&session, gateway_refusals))
                     && !jwt_is_fresh(&session)
@@ -640,7 +629,7 @@ impl ConnectionStore {
                 let refresh_due_in = refresh_pacer.hold_left(Instant::now());
                 if needs_sid_recovery && remint_due_in.is_zero() {
                     if jwt_is_fresh(&session) {
-                        last_remint_attempt_at = Some(Instant::now());
+                        pacing.last_remint_attempt_at = Some(Instant::now());
                         match remint_session_via_healthy_endpoint(
                             &auth_client,
                             &api,
@@ -657,9 +646,7 @@ impl ConnectionStore {
                             Ok(renewed) => {
                                 session = renewed;
                                 gateway_refusals = 0;
-                                reminted_this_outage = true;
-                                last_remint_attempt_at = None;
-                                remint_retry_secs = HEALTHY_ENDPOINT_RETRY_SECS;
+                                pacing.on_remint_succeeded();
                                 tracing::info!(
                                     "Reminted session_id via GetHealthyEndpoint — retrying SID handshake"
                                 );
@@ -677,27 +664,28 @@ impl ConnectionStore {
                                 }
                             }
                             Err(e) => {
-                                remint_retry_secs =
-                                    next_healthy_endpoint_retry_secs(remint_retry_secs);
+                                pacing.remint_retry_secs =
+                                    next_healthy_endpoint_retry_secs(pacing.remint_retry_secs);
                                 if healthy_endpoint_route_missing(&e) {
-                                    remint_unsupported = true;
+                                    pacing.remint_unsupported = true;
                                     tracing::warn!(
                                         "The gateway has no healthy-endpoint route ({e}) — staying on the JWT handshake until the next confirmed connection"
                                     );
                                 } else {
                                     tracing::warn!(
-                                        "GetHealthyEndpoint could not remint session_id ({e}) — falling back to JWT handshake, next remint in {remint_retry_secs}s"
+                                        "GetHealthyEndpoint could not remint session_id ({e}) — falling back to JWT handshake, next remint in {}s",
+                                        pacing.remint_retry_secs
                                     );
                                 }
                                 if already_connected {
                                     retry_backoff_secs = 1;
                                     consecutive_failures = 0;
-                                    if remint_unsupported {
+                                    if pacing.remint_unsupported {
                                         wake.notified().await;
                                     } else {
                                         tokio::select! {
                                             _ = wake.notified() => {}
-                                            _ = exec.timer(Duration::from_secs(remint_retry_secs)) => {}
+                                            _ = exec.timer(Duration::from_secs(pacing.remint_retry_secs)) => {}
                                         }
                                     }
                                     continue;
@@ -777,10 +765,7 @@ impl ConnectionStore {
                                 consecutive_failures = 0;
                                 gateway_refusals = 0;
                                 jwt_refusals = 0;
-                                reminted_this_outage = false;
-                                last_remint_attempt_at = None;
-                                remint_retry_secs = HEALTHY_ENDPOINT_RETRY_SECS;
-                                remint_unsupported = false;
+                                pacing.reset();
                                 probed_this_outage = false;
                                 retry_backoff_secs = 1;
                                 continue;
@@ -821,6 +806,7 @@ impl ConnectionStore {
                     tracing::warn!("Failed to close stale transport: {e}");
                 }
 
+                pacing.on_connecting();
                 let generation = connection_generation.fetch_add(1, Ordering::AcqRel) + 1;
                 tracing::info!("Connecting shared abridged TCP transport to {endpoint_label}");
                 api.set_status(ConnectionStatus::Connecting);
@@ -936,25 +922,12 @@ impl ConnectionStore {
                     gateway_refusals = 0;
                     jwt_refusals = 0;
                     probed_this_outage = false;
-                    reminted_this_outage = false;
-                    last_remint_attempt_at = None;
-                    remint_retry_secs = HEALTHY_ENDPOINT_RETRY_SECS;
-                    remint_unsupported = false;
+                    pacing.on_confirmed(Instant::now());
                     pending_endpoint_refresh = None;
                     // A throttle belongs to the outage it happened in. Carrying its pacing past a
                     // confirmed handshake would make the next unrelated outage start out slower
                     // than it should, for no reason the server ever asked for.
                     refresh_pacer.release();
-                    if endpoint_refresh_retry_in(
-                        last_endpoint_refresh_at,
-                        HEALTHY_ENDPOINT_SETTLED_SECS,
-                        Instant::now(),
-                    )
-                    .is_zero()
-                    {
-                        last_endpoint_refresh_at = None;
-                        healthy_endpoint_retry_secs = HEALTHY_ENDPOINT_RETRY_SECS;
-                    }
                     api.set_status(ConnectionStatus::Connected);
                     tracing::info!("Connection confirmed — handshake accepted");
                     #[cfg(debug_assertions)]
@@ -1091,8 +1064,8 @@ impl ConnectionStore {
                 retry_backoff_secs = next_backoff_secs(retry_backoff_secs);
                 if pending_endpoint_refresh.is_some() {
                     let ask_due_in = endpoint_refresh_retry_in(
-                        last_endpoint_refresh_at,
-                        healthy_endpoint_retry_secs,
+                        pacing.last_endpoint_refresh_at,
+                        pacing.healthy_endpoint_retry_secs,
                         Instant::now(),
                     );
                     if ask_due_in.is_zero() {
@@ -1786,6 +1759,88 @@ fn endpoint_refresh_retry_in(
                 .saturating_sub(now.saturating_duration_since(attempted_at))
         })
         .unwrap_or(Duration::ZERO)
+}
+
+fn gateway_pacing_has_settled(last_gateway_call_at: Option<Instant>, now: Instant) -> bool {
+    endpoint_refresh_retry_in(last_gateway_call_at, HEALTHY_ENDPOINT_SETTLED_SECS, now).is_zero()
+}
+
+struct GatewayPacing {
+    last_endpoint_refresh_at: Option<Instant>,
+    healthy_endpoint_retry_secs: u64,
+    reminted_this_outage: bool,
+    last_remint_attempt_at: Option<Instant>,
+    remint_retry_secs: u64,
+    remint_unsupported: bool,
+    confirmed_at: Option<Instant>,
+}
+
+impl GatewayPacing {
+    fn new() -> Self {
+        Self {
+            last_endpoint_refresh_at: None,
+            healthy_endpoint_retry_secs: HEALTHY_ENDPOINT_RETRY_SECS,
+            reminted_this_outage: false,
+            last_remint_attempt_at: None,
+            remint_retry_secs: HEALTHY_ENDPOINT_RETRY_SECS,
+            remint_unsupported: false,
+            confirmed_at: None,
+        }
+    }
+
+    fn reset(&mut self) {
+        *self = Self::new();
+    }
+
+    fn back_off_reports(&mut self) {
+        self.healthy_endpoint_retry_secs =
+            next_healthy_endpoint_retry_secs(self.healthy_endpoint_retry_secs);
+    }
+
+    fn on_remint_succeeded(&mut self) {
+        self.reminted_this_outage = true;
+        self.remint_retry_secs = HEALTHY_ENDPOINT_RETRY_SECS;
+    }
+
+    fn on_confirmed(&mut self, now: Instant) {
+        self.confirmed_at = Some(now);
+        self.remint_unsupported = false;
+    }
+
+    fn on_connecting(&mut self) {
+        self.confirmed_at = None;
+    }
+
+    fn record_report(&mut self, now: Instant) {
+        if self.connection_held(now) {
+            self.rearm_reports();
+        }
+        self.last_endpoint_refresh_at = Some(now);
+    }
+
+    fn on_connection_lost(&mut self, now: Instant) {
+        if self.connection_held(now) {
+            self.rearm_remint();
+            self.rearm_reports();
+        }
+        self.confirmed_at = None;
+    }
+
+    fn connection_held(&self, now: Instant) -> bool {
+        self.confirmed_at
+            .is_some_and(|confirmed_at| gateway_pacing_has_settled(Some(confirmed_at), now))
+    }
+
+    fn rearm_remint(&mut self) {
+        self.reminted_this_outage = false;
+        self.last_remint_attempt_at = None;
+        self.remint_retry_secs = HEALTHY_ENDPOINT_RETRY_SECS;
+    }
+
+    fn rearm_reports(&mut self) {
+        self.last_endpoint_refresh_at = None;
+        self.healthy_endpoint_retry_secs = HEALTHY_ENDPOINT_RETRY_SECS;
+    }
 }
 
 async fn refresh_jwt_within(
@@ -2501,6 +2556,202 @@ mod tests {
         assert!(
             asks <= 5,
             "a two-minute outage asked the gateway {asks} times; the user holds ten session slots and each answer mints one"
+        );
+    }
+
+    #[test]
+    fn gateway_pacing_settles_a_minute_after_the_last_call() {
+        let called_at = Instant::now();
+        assert!(gateway_pacing_has_settled(None, called_at));
+        assert!(!gateway_pacing_has_settled(
+            Some(called_at),
+            called_at + Duration::from_secs(HEALTHY_ENDPOINT_SETTLED_SECS - 1)
+        ));
+        assert!(gateway_pacing_has_settled(
+            Some(called_at),
+            called_at + Duration::from_secs(HEALTHY_ENDPOINT_SETTLED_SECS)
+        ));
+    }
+
+    #[test]
+    fn a_flapping_link_cannot_spend_the_users_session_slots() {
+        let session = Session {
+            session_id: "sid".into(),
+            token: "jwt".into(),
+            expires_at: now_secs() + 600,
+            ..Default::default()
+        };
+        let start = Instant::now();
+        let mut now = start;
+        let mut pacing = GatewayPacing::new();
+        let mut remints = 0u32;
+        let mut reports = 0u32;
+
+        while now.duration_since(start) < Duration::from_secs(600) {
+            pacing.on_connection_lost(now);
+            if endpoint_refresh_retry_in(
+                pacing.last_endpoint_refresh_at,
+                pacing.healthy_endpoint_retry_secs,
+                now,
+            )
+            .is_zero()
+            {
+                reports += 1;
+                pacing.record_report(now);
+                pacing.back_off_reports();
+            }
+            if should_attempt_sid_remint(
+                &session,
+                SSID_REFUSALS_BEFORE_JWT,
+                pacing.reminted_this_outage,
+                true,
+            ) && endpoint_refresh_retry_in(
+                pacing.last_remint_attempt_at,
+                pacing.remint_retry_secs,
+                now,
+            )
+            .is_zero()
+            {
+                remints += 1;
+                pacing.last_remint_attempt_at = Some(now);
+                pacing.on_remint_succeeded();
+            }
+            pacing.on_connecting();
+            now += Duration::from_secs(1);
+            pacing.on_confirmed(now);
+            now += Duration::from_secs(5);
+        }
+
+        assert_eq!(
+            remints, 1,
+            "ten minutes of a link that drops every six seconds reminted {remints} session ids; the user holds ten slots and each mint evicts one"
+        );
+        assert!(
+            reports <= 13,
+            "ten minutes of a link that drops every six seconds asked the gateway {reports} times; each answer mints a session id"
+        );
+    }
+
+    #[test]
+    fn a_connection_that_held_ends_the_outage_for_both_gateway_paths() {
+        let start = Instant::now();
+        let mut pacing = GatewayPacing::new();
+        pacing.record_report(start);
+        pacing.back_off_reports();
+        pacing.back_off_reports();
+        pacing.last_remint_attempt_at = Some(start);
+        pacing.on_remint_succeeded();
+        pacing.on_connecting();
+        pacing.on_confirmed(start + Duration::from_secs(1));
+        assert!(
+            pacing.reminted_this_outage,
+            "the handshake right after a remint is still the same outage"
+        );
+
+        pacing.on_connection_lost(start + Duration::from_secs(3600));
+
+        assert!(
+            !pacing.reminted_this_outage,
+            "an hour on the node ended that outage; the next refused session id may remint again"
+        );
+        assert_eq!(pacing.last_remint_attempt_at, None);
+        assert_eq!(pacing.last_endpoint_refresh_at, None);
+        assert_eq!(
+            pacing.healthy_endpoint_retry_secs, HEALTHY_ENDPOINT_RETRY_SECS,
+            "a node move in a later incident starts from the short interval again"
+        );
+    }
+
+    #[test]
+    fn a_connection_that_drops_within_the_minute_keeps_the_outage_pacing() {
+        let start = Instant::now();
+        let mut pacing = GatewayPacing::new();
+        pacing.record_report(start);
+        pacing.back_off_reports();
+        pacing.back_off_reports();
+        pacing.last_remint_attempt_at = Some(start);
+        pacing.on_remint_succeeded();
+        pacing.on_connecting();
+        pacing.on_confirmed(start + Duration::from_secs(1));
+
+        pacing.on_connection_lost(start + Duration::from_secs(4));
+
+        assert!(pacing.reminted_this_outage);
+        assert_eq!(pacing.last_remint_attempt_at, Some(start));
+        assert_eq!(pacing.last_endpoint_refresh_at, Some(start));
+        assert_eq!(
+            pacing.healthy_endpoint_retry_secs,
+            HEALTHY_ENDPOINT_RETRY_SECS * 4
+        );
+        assert_eq!(pacing.confirmed_at, None);
+    }
+
+    #[test]
+    fn a_handshake_alone_never_ends_the_outage() {
+        let start = Instant::now();
+        let mut pacing = GatewayPacing::new();
+        pacing.last_remint_attempt_at = Some(start);
+        pacing.on_remint_succeeded();
+        pacing.on_connecting();
+
+        pacing.on_confirmed(start + Duration::from_secs(3600));
+
+        assert!(
+            pacing.reminted_this_outage,
+            "only losing a connection that held re-arms the remint, however long ago the last one was"
+        );
+    }
+
+    #[test]
+    fn a_remint_that_replaces_a_held_connection_keeps_its_latch() {
+        let start = Instant::now();
+        let mut pacing = GatewayPacing::new();
+        pacing.on_connecting();
+        pacing.on_confirmed(start);
+
+        let reminted_at = start + Duration::from_secs(120);
+        pacing.last_remint_attempt_at = Some(reminted_at);
+        pacing.on_remint_succeeded();
+        pacing.on_connecting();
+        pacing.on_connection_lost(reminted_at + Duration::from_secs(2));
+
+        assert!(
+            pacing.reminted_this_outage,
+            "the SID handshake after a remint failed; the JWT connection the remint closed must not re-arm a second mint"
+        );
+    }
+
+    #[test]
+    fn a_move_off_a_held_connection_starts_a_fresh_incident_and_waits_out_its_interval() {
+        let start = Instant::now();
+        let mut pacing = GatewayPacing::new();
+        for _ in 0..8 {
+            pacing.back_off_reports();
+        }
+        pacing.on_connecting();
+        pacing.on_confirmed(start);
+
+        let asked_at = start + Duration::from_secs(3600);
+        pacing.record_report(asked_at);
+        pacing.back_off_reports();
+        assert_eq!(
+            pacing.healthy_endpoint_retry_secs,
+            HEALTHY_ENDPOINT_RETRY_SECS * 2,
+            "a report from a connection that held starts from the short interval"
+        );
+
+        pacing.on_connecting();
+        let next_node_failed_at = asked_at + Duration::from_secs(2);
+        pacing.on_connection_lost(next_node_failed_at);
+
+        assert_eq!(
+            endpoint_refresh_retry_in(
+                pacing.last_endpoint_refresh_at,
+                pacing.healthy_endpoint_retry_secs,
+                next_node_failed_at
+            ),
+            Duration::from_secs(HEALTHY_ENDPOINT_RETRY_SECS * 2 - 2),
+            "the node the gateway moved us to failed; the next ask waits out the doubled interval"
         );
     }
 

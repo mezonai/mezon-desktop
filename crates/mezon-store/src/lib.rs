@@ -25,6 +25,7 @@ pub mod compose;
 pub mod config;
 pub mod connection;
 pub mod ctrlk_search;
+pub mod desktop_draw;
 pub mod dialog;
 pub mod direct;
 pub mod emoji;
@@ -59,6 +60,7 @@ pub mod quick_menu;
 pub mod realtime;
 pub mod realtime_server;
 pub mod roles;
+pub mod screen_draw;
 pub mod sprite_atlas;
 pub mod sticker;
 pub mod stream;
@@ -145,6 +147,7 @@ pub use ctrlk_search::{
     CtrlKChannel, CtrlKSearchEvent, CtrlKSearchState, CtrlKSearchStore, CtrlKSearchType, CtrlKUser,
     SEARCH_CTRL_K_MAX_TEXT_BYTES,
 };
+pub use desktop_draw::DesktopDraw;
 pub use direct::{
     DirectChannel, DirectEvent, DirectKind, DirectMessageBody, DirectMessageStore,
     dm_counts_toward_unread_badge,
@@ -257,6 +260,14 @@ pub use roles::{
     ClanRoleDetail, DEFAULT_ROLE_COLOR, MAX_ROLE_ICON_BYTES, Role, RoleDraft, RolePermission,
     RoleStyle, RoleUser, RolesEvent, RolesStore, everyone_slug, parse_role_color,
 };
+pub use screen_draw::{
+    AnnotationDrag, COLOR_BLACK, COLOR_BLUE, COLOR_GREEN, COLOR_ORANGE, COLOR_PURPLE, COLOR_RED,
+    COLOR_WHITE, COLOR_YELLOW, ContentViewport, DrawAnnotation, DrawTool, HitBox, NormalizedPoint,
+    PRESET_COLORS, PRESET_WIDTHS, PenStroke, STROKE_WIDTH_MEDIUM, STROKE_WIDTH_THICK,
+    STROKE_WIDTH_THIN, ScreenDrawState, ShapeAnnotation, ShapeKind, StrokeKind, TEXT_HANDLE_SIZE,
+    TEXT_LINE_HEIGHT, TEXT_PAD_X, TEXT_PAD_Y, TextAnnotation, TextResize, VanishingStroke,
+    scale_alpha, text_font_px,
+};
 pub use sprite_atlas::{SpriteAtlas, SpriteFrame, fetch_sprite_atlas, parse_sprite_atlas};
 pub use sticker::{ClanSound, Sticker, StickerEvent, StickerStore};
 pub use stream::{StreamMember, StreamPhase, StreamStore};
@@ -277,16 +288,16 @@ pub use voice::SimulatedCall;
 #[cfg(any(target_os = "linux", target_os = "freebsd"))]
 pub use voice::record_wayland_session;
 pub use voice::{
-    DeviceKind, DeviceMenuKind, DisplayedFlower, DisplayedReaction, ExternalMeeting,
-    MAX_SOUND_BYTES, MediaRefusal, MeetingChatMessage, MeetingChatStatus, NetworkQuality,
-    NoiseSuppressionStatus, PickedScreen, RecordingState, RecordingToast, RemovalCause,
-    SOUND_ALLOWED_EXTENSIONS, ScreenShareKind, ScreenShareListError, ScreenShareMode,
-    ScreenShareOption, ScreenSharePreview, SfuRole, VideoFrameData, VideoFrameStore,
-    VoiceCallStatus, VoiceConnection, VoiceModerationError, VoiceParticipant, VoiceRenderFrame,
-    VoiceStore, VoiceStoreEvent, camera_tile_id, capture_screen_share_preview,
-    list_screen_share_options, peek_screen_share_options, request_screen_capture_access,
-    screen_capture_permitted, screen_tile_id, system_screen_share_pick, upload_sound_file,
-    validate_sound_file,
+    BreakoutInvite, BreakoutNotice, BreakoutRule, DeviceKind, DeviceMenuKind, DisplayedFlower,
+    DisplayedReaction, ExternalMeeting, HostedBreakout, MAX_SOUND_BYTES, MediaRefusal,
+    MeetingChatMessage, MeetingChatStatus, NetworkQuality, NoiseSuppressionStatus, PickedScreen,
+    RecordingState, RecordingToast, RemovalCause, SOUND_ALLOWED_EXTENSIONS, ScreenShareKind,
+    ScreenShareListError, ScreenShareMode, ScreenShareOption, ScreenSharePreview, SfuRole,
+    VideoFrameData, VideoFrameStore, VoiceCallStatus, VoiceConnection, VoiceModerationError,
+    VoiceParticipant, VoiceRenderFrame, VoiceStore, VoiceStoreEvent, camera_tile_id,
+    capture_screen_share_preview, list_screen_share_options, peek_screen_share_options,
+    request_screen_capture_access, screen_capture_permitted, screen_tile_id,
+    system_screen_share_pick, upload_sound_bytes, upload_sound_file, validate_sound_file,
 };
 pub use wallet::{
     SendTokenRequest, TransactionCursor, WalletDetail, WalletEvent, WalletStore, WalletTransaction,
@@ -514,6 +525,10 @@ pub struct Settings {
     pub realtime_server: RealtimeServer,
     #[serde(default)]
     pub agent_hint_dismissed: bool,
+    #[serde(default)]
+    pub quick_replies_enabled: bool,
+    #[serde(default)]
+    pub grammar_correction_enabled: bool,
 }
 
 impl Default for Settings {
@@ -548,6 +563,8 @@ impl Default for Settings {
             activity_strip_dismissals: Vec::new(),
             realtime_server: RealtimeServer::Auto,
             agent_hint_dismissed: false,
+            quick_replies_enabled: false,
+            grammar_correction_enabled: false,
         }
     }
 }
@@ -861,5 +878,16 @@ mod settings_tests {
     fn clearing_an_untouched_tour_state_reports_no_change() {
         let mut settings = Settings::default();
         assert!(!settings.clear_tour_progress());
+    }
+
+    #[test]
+    fn grammar_chat_toggles_default_off_and_legacy_settings_parse() {
+        let defaults = Settings::default();
+        assert!(!defaults.quick_replies_enabled);
+        assert!(!defaults.grammar_correction_enabled);
+        let legacy = r#"{"language":"en"}"#;
+        let settings: Settings = serde_json::from_str(legacy).expect("legacy settings parse");
+        assert!(!settings.quick_replies_enabled);
+        assert!(!settings.grammar_correction_enabled);
     }
 }

@@ -1498,7 +1498,9 @@ fn default_input_id(host: &cpal::Host) -> Option<String> {
 }
 
 fn input_stream_device_id(host: &cpal::Host, requested: Option<&str>) -> Option<String> {
-    requested.map(str::to_string).or_else(|| default_input_id(host))
+    requested
+        .map(str::to_string)
+        .or_else(|| default_input_id(host))
 }
 
 fn input_stream_orphaned(host: &cpal::Host, device_id: Option<&str>) -> bool {
@@ -1506,9 +1508,8 @@ fn input_stream_orphaned(host: &cpal::Host, device_id: Option<&str>) -> bool {
         && device_id.is_some_and(|id| {
             default_input_id(host).as_deref() != Some(id)
                 && host.devices().is_ok_and(|mut devices| {
-                    !devices.any(|device| {
-                        matches!(device.id(), Ok(found) if found.to_string() == id)
-                    })
+                    !devices
+                        .any(|device| matches!(device.id(), Ok(found) if found.to_string() == id))
                 })
         })
 }

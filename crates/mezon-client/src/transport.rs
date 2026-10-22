@@ -283,6 +283,7 @@ pub enum RealtimeEvent {
     VoiceLeaved(realtime::VoiceLeavedEvent),
     VoiceReaction(realtime::VoiceReactionSend),
     VoiceInteractive(realtime::VoiceInteractiveEvent),
+    SfuBreakoutRoom(realtime::SfuBreakoutRoomEvent),
     ScreenShare(realtime::ScreenShareEvent),
     AiAgentEnabled(realtime::AiAgentEnabledEvent),
     UserChannelAdded(realtime::UserChannelAdded),
@@ -346,6 +347,7 @@ impl RealtimeEvent {
             Self::VoiceLeaved(_) => "VoiceLeaved",
             Self::VoiceReaction(_) => "VoiceReaction",
             Self::VoiceInteractive(_) => "VoiceInteractive",
+            Self::SfuBreakoutRoom(_) => "SfuBreakoutRoom",
             Self::ScreenShare(_) => "ScreenShare",
             Self::AiAgentEnabled(_) => "AiAgentEnabled",
             Self::UserChannelAdded(_) => "UserChannelAdded",
@@ -411,6 +413,7 @@ impl TryFrom<realtime::envelope::Message> for RealtimeEvent {
             realtime::envelope::Message::VoiceLeavedEvent(m) => Ok(Self::VoiceLeaved(m)),
             realtime::envelope::Message::VoiceReactionSend(m) => Ok(Self::VoiceReaction(m)),
             realtime::envelope::Message::VoiceInteractiveEvent(m) => Ok(Self::VoiceInteractive(m)),
+            realtime::envelope::Message::SfuBreakoutRoomEvent(m) => Ok(Self::SfuBreakoutRoom(m)),
             realtime::envelope::Message::ScreenShareEvent(m) => Ok(Self::ScreenShare(m)),
             realtime::envelope::Message::AiagentEnabledEvent(m) => Ok(Self::AiAgentEnabled(m)),
             realtime::envelope::Message::UserChannelAddedEvent(m) => Ok(Self::UserChannelAdded(m)),
@@ -1590,6 +1593,16 @@ pub fn prioritize_avatar(clan_avatar: &str, user_avatar: &str) -> String {
         clan_avatar.to_string()
     } else {
         user_avatar.to_string()
+    }
+}
+
+pub fn message_sender_name(message: &api::ChannelMessage) -> &str {
+    if !message.clan_nick.is_empty() {
+        &message.clan_nick
+    } else if !message.display_name.is_empty() {
+        &message.display_name
+    } else {
+        &message.username
     }
 }
 
@@ -3437,6 +3450,29 @@ pub fn is_link_markdown_kind(kind: &str) -> bool {
     )
 }
 
+fn url_body_len_without_unbalanced_close_parens(body: &[char]) -> usize {
+    let open = body.iter().filter(|&&c| c == '(').count();
+    let mut close = body.iter().filter(|&&c| c == ')').count();
+    let mut len = body.len();
+    while close > open {
+        let mut before_punctuation = len;
+        while before_punctuation > 0
+            && matches!(
+                body[before_punctuation - 1],
+                '.' | ',' | ';' | ':' | '!' | '?' | '\'' | '"'
+            )
+        {
+            before_punctuation -= 1;
+        }
+        if before_punctuation == 0 || body[before_punctuation - 1] != ')' {
+            break;
+        }
+        len = before_punctuation - 1;
+        close -= 1;
+    }
+    len
+}
+
 fn scan_markdown(chars: &[char]) -> Vec<MarkdownMatch> {
     let n = chars.len();
     let is_triple =
@@ -3477,6 +3513,8 @@ fn scan_markdown(chars: &[char]) -> Vec<MarkdownMatch> {
             while j < n && !matches!(chars[j], ' ' | '\n' | '\r' | '\t') {
                 j += 1;
             }
+            let j =
+                i + scheme + url_body_len_without_unbalanced_close_parens(&chars[i + scheme..j]);
             if j > i + scheme {
                 let url: String = chars[i..j].iter().collect();
                 out.push(MarkdownMatch {
@@ -4172,6 +4210,7 @@ impl MezonTransport {
                     api_index: api_index as i32,
                     api_name: api_name.to_string(),
                     body,
+                    region: 0,
                 },
             )),
         };
@@ -4663,13 +4702,7 @@ impl MezonTransport {
         enrich_content_tokens(&mut content_tokens, &entity_mentions);
         let content = content_tokens.t.clone();
 
-        let sender_name = if !message.clan_nick.is_empty() {
-            message.clan_nick.clone()
-        } else if !message.display_name.is_empty() {
-            message.display_name.clone()
-        } else {
-            message.username.clone()
-        };
+        let sender_name = message_sender_name(message).to_string();
 
         let attachments = parse_message_attachments(&message.attachments);
         let references = parse_message_references(&message.references);
@@ -4968,6 +5001,8 @@ impl MezonTransport {
             "SearchMentionUsers" => 211,
             "GenerateCDNSignature" => 212,
             "LinkCDNFile" => 214,
+            "SfuBreakoutRoom" => 215,
+            "SfuBreakoutMerge" => 216,
             _ => {
                 tracing::warn!("unknown API name: {api_name}");
                 return None;
@@ -7351,6 +7386,41 @@ impl MezonTransport {
             return Err(api_status_error(code));
         }
         Ok(api::GenerateCdnSignatureResponse::decode(response.as_slice())?.signature)
+    }
+
+    pub async fn sfu_breakout_room(
+        &self,
+        request: api::SfuBreakoutRoomRequest,
+    ) -> Result<api::SfuBreakoutRoomResponse> {
+        if request.parent_channel_id == 0 {
+            anyhow::bail!("SfuBreakoutRoom needs a parent channel id");
+        }
+        let cid = self.generate_cid();
+        let (code, response) = self
+            .send_api_request_with_http_fallback(cid, "SfuBreakoutRoom", request.encode_to_vec())
+            .await?;
+        if code != 0 {
+            return Err(api_status_error(code));
+        }
+        Ok(api::SfuBreakoutRoomResponse::decode(response.as_slice())?)
+    }
+
+    pub async fn sfu_breakout_merge(&self, breakout_id: i64) -> Result<()> {
+        if breakout_id == 0 {
+            anyhow::bail!("SfuBreakoutMerge needs a breakout id");
+        }
+        let cid = self.generate_cid();
+        let body = api::SfuBreakoutMergeRequest {
+            target_id: breakout_id,
+        }
+        .encode_to_vec();
+        let (code, _) = self
+            .send_api_request_with_http_fallback(cid, "SfuBreakoutMerge", body)
+            .await?;
+        if code != 0 {
+            return Err(api_status_error(code));
+        }
+        Ok(())
     }
 
     pub async fn link_cdn_file(&self, src: &str, dst: &str) -> Result<()> {
@@ -10584,16 +10654,48 @@ fn realtime_error_from_body(body: &[u8]) -> Option<realtime::Error> {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RealtimeControlError {
+    pub action: String,
+    pub code: i64,
+    pub message: Option<String>,
+}
+
+impl RealtimeControlError {
+    pub const FORBIDDEN: i64 = 403;
+
+    pub fn is_forbidden(&self) -> bool {
+        self.code == Self::FORBIDDEN
+    }
+}
+
+impl std::fmt::Display for RealtimeControlError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match &self.message {
+            Some(message) => write!(f, "{} error: code={} {}", self.action, self.code, message),
+            None => write!(f, "{} error: code={}", self.action, self.code),
+        }
+    }
+}
+
+impl std::error::Error for RealtimeControlError {}
+
 fn complete_realtime_control_request(action: &str, code: u32, response: &[u8]) -> Result<()> {
     if let Some(error) = realtime_error_from_body(response) {
-        anyhow::bail!(
-            "{action} error: code={} {}",
-            error.code,
-            error.message.trim()
-        );
+        return Err(RealtimeControlError {
+            action: action.to_owned(),
+            code: i64::from(error.code),
+            message: Some(error.message.trim().to_owned()),
+        }
+        .into());
     }
     if code != 0 {
-        anyhow::bail!("{action} error: code={code}");
+        return Err(RealtimeControlError {
+            action: action.to_owned(),
+            code: i64::from(code),
+            message: None,
+        }
+        .into());
     }
     Ok(())
 }
@@ -10849,6 +10951,7 @@ mod tests {
                     api_index: 1,
                     api_name: "X".to_string(),
                     body: vec![0x08, 0x00],
+                    region: 0,
                 },
             )),
         };
@@ -11751,6 +11854,45 @@ mod tests {
     #[test]
     fn detect_markdown_link_has_no_trailing_punctuation_trim() {
         assert_eq!(detect_markdown("see https://a.com."), vec![md("lk", 4, 18)]);
+    }
+
+    #[test]
+    fn detect_markdown_link_wrapped_in_parens_leaves_the_close_paren_out() {
+        assert_eq!(
+            detect_markdown("(https://www.youtube.com/)"),
+            vec![md("lk", 1, 25)]
+        );
+        assert_eq!(
+            detect_markdown("(see https://a.com))"),
+            vec![md("lk", 5, 18)]
+        );
+        assert_eq!(
+            detect_markdown("(https://www.youtube.com/)."),
+            vec![md("lk", 1, 25)]
+        );
+        assert_eq!(
+            detect_markdown("(see https://a.com)!)"),
+            vec![md("lk", 5, 18)]
+        );
+    }
+
+    #[test]
+    fn detect_markdown_link_keeps_a_close_paren_it_opened() {
+        let url = "https://en.wikipedia.org/wiki/Rust_(programming_language)";
+        assert_eq!(detect_markdown(url), vec![md("lk", 0, 57)]);
+        assert_eq!(detect_markdown(&format!("{url}.")), vec![md("lk", 0, 58)]);
+        assert_eq!(detect_markdown(&format!("({url})")), vec![md("lk", 1, 58)]);
+    }
+
+    #[test]
+    fn send_content_link_wrapped_in_parens_stops_before_the_close_paren() {
+        let sent = build_send_content(
+            "(https://www.youtube.com/)",
+            &[],
+            &OutgoingHashtags::default(),
+            &[],
+        );
+        assert_eq!(sent.markdowns, vec![md("lk", 1, 25)]);
     }
 
     #[test]
@@ -12734,6 +12876,8 @@ mod tests {
         assert_eq!(t.get_api_index("SearchMentionUsers"), Some(211));
         assert_eq!(t.get_api_index("GenerateCDNSignature"), Some(212));
         assert_eq!(t.get_api_index("LinkCDNFile"), Some(214));
+        assert_eq!(t.get_api_index("SfuBreakoutRoom"), Some(215));
+        assert_eq!(t.get_api_index("SfuBreakoutMerge"), Some(216));
         assert_eq!(t.get_api_index("DefinitelyNotAnApi"), None);
     }
 
@@ -13187,6 +13331,10 @@ mod tests {
         assert!(
             message.contains("join_clan_chat error: code=403 Not allowed"),
             "{message}"
+        );
+        assert!(
+            err.downcast_ref::<RealtimeControlError>()
+                .is_some_and(RealtimeControlError::is_forbidden)
         );
     }
 

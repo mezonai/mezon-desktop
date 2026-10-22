@@ -171,6 +171,10 @@ pub(super) fn page_slice<T>(items: &[T], page: usize, per_page: usize) -> &[T] {
     &items[start..end]
 }
 
+fn overrides_apply_to(private: bool, channel_type: ChannelType) -> bool {
+    private && channel_type != ChannelType::Voice
+}
+
 pub(super) fn role_row_from(role_id: RoleId, role: &mezon_store::ClanRoleDetail) -> RoleRow {
     RoleRow {
         role_id,
@@ -312,25 +316,32 @@ impl PermissionsTab {
     /// the override table: every override the server knows is a text
     /// permission (send message, manage threads, …) and would only invite
     /// toggles that do nothing in a voice room.
-    fn shows_overrides(&self, cx: &App) -> bool {
+    fn shows_overrides(&self, cx: &App) -> Option<bool> {
         // Unknown yet means wait: the channel-list observer calls
         // `sync_overrides` again once the channel arrives.
         ChannelList::global(cx)
             .read(cx)
             .channel(self.clan_id, self.channel_id)
-            .is_some_and(|channel| channel.channel_type != ChannelType::Voice)
+            .map(|channel| overrides_apply_to(channel.private, channel.channel_type))
     }
 
     fn sync_overrides(&mut self, cx: &mut Context<Self>) {
-        if self.overrides.is_some() || !self.shows_overrides(cx) {
-            return;
+        match self.shows_overrides(cx) {
+            Some(true) if self.overrides.is_none() => {
+                let clan_id = self.clan_id;
+                let channel_id = self.channel_id;
+                let settings = self.settings.clone();
+                let overrides =
+                    cx.new(|cx| PermissionOverrides::new(clan_id, channel_id, settings, cx));
+                self.overrides_sub = Some(cx.observe(&overrides, |_, _, cx| cx.notify()));
+                self.overrides = Some(overrides);
+            }
+            Some(false) => {
+                self.overrides_sub = None;
+                self.overrides = None;
+            }
+            _ => {}
         }
-        let clan_id = self.clan_id;
-        let channel_id = self.channel_id;
-        let settings = self.settings.clone();
-        let overrides = cx.new(|cx| PermissionOverrides::new(clan_id, channel_id, settings, cx));
-        self.overrides_sub = Some(cx.observe(&overrides, |_, _, cx| cx.notify()));
-        self.overrides = Some(overrides);
     }
 
     /// The settings shell paints this tab's save bar as a floating panel outside the
@@ -1489,6 +1500,14 @@ mod tests {
 
     fn ids(count: usize) -> Vec<UserId> {
         (0..count).map(|ix| UserId(ix as i64 + 1)).collect()
+    }
+
+    #[test]
+    fn overrides_apply_only_to_a_private_channel_that_is_not_voice() {
+        assert!(overrides_apply_to(true, ChannelType::Text));
+        assert!(!overrides_apply_to(false, ChannelType::Text));
+        assert!(!overrides_apply_to(true, ChannelType::Voice));
+        assert!(!overrides_apply_to(false, ChannelType::Voice));
     }
 
     #[test]

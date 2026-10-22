@@ -145,6 +145,7 @@ pub struct RowMemo {
     pub reaction_srcs: HashMap<SharedString, SharedString>,
     pub reaction_srcs_generation: u64,
     pub rich_text: HashMap<MessageId, RichTextRenderPlan>,
+    pub group_updates: HashMap<MessageId, super::system_row::GroupUpdateLayout>,
     pub selection_layouts: HashMap<MessageId, super::content::SelectableMessageLayoutCacheEntry>,
     pub selection_text_pieces:
         HashMap<SharedString, Rc<[super::content::CachedSelectableTextPiece]>>,

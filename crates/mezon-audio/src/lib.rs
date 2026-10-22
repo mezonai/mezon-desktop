@@ -1,6 +1,7 @@
 mod decode;
 mod encode;
 mod playback;
+mod process;
 mod stream;
 
 pub use decode::{
@@ -9,6 +10,9 @@ pub use decode::{
 };
 pub use encode::{VoiceEncoder, VoiceRecording};
 pub use playback::{AudioPlayer, set_output_device};
+pub use process::{
+    PROCESSED_SOUND_SAMPLE_RATE, estimated_mono_wav_bytes, process_pcm, process_pcm_to_wav,
+};
 pub use stream::{PcmStream, spawn_stream_decode};
 
 #[derive(Debug, thiserror::Error)]

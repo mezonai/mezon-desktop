@@ -23,6 +23,10 @@ use crate::chat::inbox::{InboxPopoverPanel, clan_has_inbox_badge};
 use crate::chat::media_permission_prompt::{
     media_access_missing, media_access_needed_label, media_permission_badge,
 };
+use crate::chat::screen_annotation::{
+    desktop_annotation_supported, draw_unavailable, toggle_desktop_annotation,
+};
+use crate::chat::screen_draw::{render_draw_toolbox, render_screen_draw_overlay};
 use crate::components::primitives::{
     Avatar, ContextMenu, Icon, IconName, Sizable, Size, Spinner, context_menu_at,
 };
@@ -2266,7 +2270,9 @@ pub(crate) fn render_screen_fullscreen_overlay(
     let exit_voice = voice.clone();
     let bg_voice = voice.clone();
 
-    let media = match store.render_frame(key) {
+    let frame_opt = store.render_frame(key);
+    let frame_dims = frame_opt.as_ref().map(|f| f.dimensions());
+    let media = match frame_opt {
         Some(frame) => render_voice_frame(frame, ObjectFit::Contain),
         None => Icon::new(IconName::VoiceScreenShareIcon)
             .size(px(64.))
@@ -2298,6 +2304,9 @@ pub(crate) fn render_screen_fullscreen_overlay(
             exit_voice.update(cx, |store, cx| store.clear_fullscreen_screen(cx));
         });
 
+    let screen_draw_active = store.screen_draw().is_active;
+    let has_annotations = !store.screen_draw().annotations.is_empty();
+
     Some(
         div()
             .absolute()
@@ -2318,9 +2327,16 @@ pub(crate) fn render_screen_fullscreen_overlay(
                     .justify_center()
                     .cursor_pointer()
                     .child(media)
+                    .children(
+                        (screen_draw_active || has_annotations)
+                            .then(|| render_screen_draw_overlay(voice, theme, frame_dims, cx)),
+                    )
+                    .children(screen_draw_active.then(|| render_draw_toolbox(voice, theme, cx)))
                     .child(exit_btn)
                     .on_click(move |_, _, cx| {
-                        bg_voice.update(cx, |store, cx| store.clear_fullscreen_screen(cx));
+                        if !bg_voice.read(cx).screen_draw().is_active {
+                            bg_voice.update(cx, |store, cx| store.clear_fullscreen_screen(cx));
+                        }
                     }),
             )
             .child(
@@ -2810,7 +2826,7 @@ fn render_focus_layout<H: CallLayoutHost>(
         let theme = cx.theme();
         let store = voice.read(cx);
         (
-            focus_main_tile(theme, locale, store, voice, focused),
+            focus_main_tile(theme, locale, store, voice, focused, cx),
             theme.bg_tertiary,
         )
     };
@@ -3157,9 +3173,20 @@ fn focus_main_tile(
     store: &VoiceStore,
     voice: &Entity<VoiceStore>,
     cell: &VideoCell,
+    cx: &App,
 ) -> AnyElement {
-    let voice = voice.clone();
+    let voice_click = voice.clone();
     let inner = tile_inner(theme, store, cell, px(80.));
+
+    let frame_dims = if cell.is_screen {
+        cell.key
+            .and_then(|k| store.render_frame(k))
+            .map(|f| f.dimensions())
+    } else {
+        None
+    };
+    let screen_draw_active = store.screen_draw().is_active;
+    let has_annotations = !store.screen_draw().annotations.is_empty();
 
     div()
         .id(SharedString::from(format!("focus-main-{}", cell.id)))
@@ -3175,15 +3202,24 @@ fn focus_main_tile(
         .bg(gpui::rgb(PARTICIPANT_TILE_BG))
         .cursor_pointer()
         .child(inner)
+        .children(
+            (cell.is_screen && (screen_draw_active || has_annotations))
+                .then(|| render_screen_draw_overlay(voice, theme, frame_dims, cx)),
+        )
+        .children(
+            (cell.is_screen && screen_draw_active).then(|| render_draw_toolbox(voice, theme, cx)),
+        )
         .child(tile_metadata(locale, cell))
         .children(tile_audience_badge(locale, cell))
         .children(tile_sound_overlay(store, cell))
         .on_mouse_down(
             MouseButton::Right,
-            participant_menu_trigger(&voice, cell.identity.clone()),
+            participant_menu_trigger(voice, cell.identity.clone()),
         )
         .on_click(move |_, _, cx| {
-            voice.update(cx, |store, cx| store.clear_focus(cx));
+            if !voice_click.read(cx).screen_draw().is_active {
+                voice_click.update(cx, |store, cx| store.clear_focus(cx));
+            }
         })
         .into_any_element()
 }
@@ -3756,6 +3792,57 @@ fn control_bar(
         .on_click(move |_, _, cx| voice.update(cx, |store, cx| store.send_raising_hand(cx)))
     };
 
+    let hosted_breakout = store
+        .connection()
+        .connected_channel()
+        .and_then(|(channel_id, _)| store.hosted_breakout(channel_id))
+        .is_some();
+    let breakout_button = (channel_tools
+        && crate::chat::voice_breakout::can_open_breakout_rooms(store, cx))
+    .then(|| {
+        let voice = voice.clone();
+        let (bg, hover, color): (Hsla, Hsla, Hsla) = if hosted_breakout {
+            (
+                gpui::rgb(ACCENT_BLUE).into(),
+                darken(gpui::rgb(ACCENT_BLUE), 0.1),
+                gpui::rgb(0xffffff).into(),
+            )
+        } else {
+            (neutral_bg.into(), neutral_hover, theme.text_primary.into())
+        };
+        let tooltip = mezon_i18n::t(
+            locale,
+            if hosted_breakout {
+                "channelVoice.breakout.close"
+            } else {
+                "channelVoice.breakout.title"
+            },
+        );
+        circle_button("voice-breakout-btn", bg, hover, IconName::People, color)
+            .tooltip(Tooltip::text(tooltip))
+            .on_click(move |_, window, cx| {
+                crate::chat::voice_breakout::BreakoutRoomsModal::show(voice.clone(), window, cx)
+            })
+    });
+    let return_to_main_button = store.breakout_room_id().is_some().then(|| {
+        let voice = voice.clone();
+        circle_button(
+            "voice-breakout-return-btn",
+            neutral_bg,
+            neutral_hover,
+            IconName::ArrowLeftCircle,
+            theme.text_primary,
+        )
+        .tooltip(Tooltip::text(mezon_i18n::t(
+            locale,
+            "channelVoice.breakout.returnToMain",
+        )))
+        .on_click(move |_, window, cx| {
+            let target = voice.update(cx, |store, cx| store.return_to_main_room(window, cx));
+            crate::chat::voice_breakout::open_voice_channel(target, cx);
+        })
+    });
+
     let agent_active = store.agent_active();
     let agent_clan_id = store
         .connection()
@@ -3818,6 +3905,47 @@ fn control_bar(
     if let Some(key) = store.primary_screen_key() {
         let pip_active = store.pip_key() == Some(key);
         let is_fullscreen = store.fullscreen_screen() == Some(key);
+        let desktop_draw = desktop_annotation_supported(store);
+        let draw_active = if desktop_draw {
+            store.desktop_draw().is_some()
+        } else {
+            store.screen_draw().is_active
+        };
+
+        let draw_color: Hsla = if draw_active {
+            gpui::rgb(ACCENT_BLUE).into()
+        } else {
+            theme.text_secondary.into()
+        };
+
+        let draw_button = {
+            let voice = voice.clone();
+            circle_button(
+                "voice-draw-btn",
+                if draw_active {
+                    gpui::rgba(0x5865f233).into()
+                } else {
+                    gpui::transparent_black()
+                },
+                theme.bg_secondary.into(),
+                IconName::PenEdit,
+                draw_color,
+            )
+            .tooltip(Tooltip::text(match (desktop_draw, draw_active) {
+                (true, true) => "Stop Annotating",
+                (true, false) => "Annotate Your Screen",
+                (false, true) => "Stop Drawing",
+                (false, false) => "Draw on Screen",
+            }))
+            .on_click(move |_, _, cx| {
+                if desktop_draw {
+                    toggle_desktop_annotation(&voice, cx);
+                } else {
+                    voice.update(cx, |store, cx| store.toggle_screen_draw(cx));
+                }
+            })
+        };
+
         let pip_color: Hsla = if pip_active {
             gpui::rgb(ACCENT_BLUE).into()
         } else {
@@ -3862,7 +3990,10 @@ fn control_bar(
             })
         };
 
-        tail = tail.child(pip_button).child(fs_button);
+        tail = tail
+            .children((!draw_unavailable(store)).then_some(draw_button))
+            .child(pip_button)
+            .child(fs_button);
     }
 
     let right = div()
@@ -3983,6 +4114,8 @@ fn control_bar(
         .children((!is_audience).then_some(camera_button))
         .children((!is_audience).then_some(screen_button))
         .children(agent_button)
+        .children(breakout_button)
+        .children(return_to_main_button)
         .when(channel_tools, |center| center.child(raise_hand_button))
         .child(leave_button);
 
@@ -4005,21 +4138,24 @@ fn control_bar(
 
 const PTT_HINT_WIDTH_PX: f32 = 320.;
 const PTT_HINT_CARET_PX: f32 = 12.;
+const NETWORK_WARNING_WIDTH_PX: f32 = 352.;
 const NETWORK_WARNING_BG: u32 = 0xfde8d7;
 const NETWORK_WARNING_TEXT: u32 = 0x202124;
+const NETWORK_WARNING_ICON: u32 = 0xb45309;
 
 fn render_network_warning_callout(locale: &str, voice: &Entity<VoiceStore>) -> AnyElement {
     let card_bg: Hsla = gpui::rgb(NETWORK_WARNING_BG).into();
     let text_color: Hsla = gpui::rgb(NETWORK_WARNING_TEXT).into();
-    let message = mezon_i18n::t(locale, "channelVoice.networkWarning");
+    let title = mezon_i18n::t(locale, "channelVoice.networkWarning.title");
+    let body = mezon_i18n::t(locale, "channelVoice.networkWarning.body");
     let dismiss = voice.clone();
-    div()
+    let callout = div()
         .id("voice-network-warning")
         .occlude()
         .absolute()
         .bottom(px(44. + PTT_HINT_CARET_PX / 2.))
         .left(px(-16.))
-        .w(px(PTT_HINT_WIDTH_PX))
+        .w(px(NETWORK_WARNING_WIDTH_PX))
         .flex()
         .flex_col()
         .child(
@@ -4028,20 +4164,48 @@ fn render_network_warning_callout(locale: &str, voice: &Entity<VoiceStore>) -> A
                 .rounded(px(16.))
                 .bg(card_bg)
                 .shadow_lg()
-                .p_4()
-                .pl_2()
+                .py_3()
+                .pl_4()
+                .pr_3()
                 .flex()
                 .flex_row()
-                .items_start()
+                .items_center()
                 .gap_3()
+                .child(
+                    div()
+                        .flex_none()
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .size(px(32.))
+                        .rounded_full()
+                        .bg(with_alpha(gpui::rgb(NETWORK_WARNING_ICON), 0.15))
+                        .child(
+                            Icon::new(IconName::TriangleAlert)
+                                .size(px(18.))
+                                .text_color(gpui::rgb(NETWORK_WARNING_ICON)),
+                        ),
+                )
                 .child(
                     div()
                         .flex_1()
                         .min_w_0()
-                        .text_sm()
+                        .flex()
+                        .flex_col()
                         .text_left()
-                        .text_color(text_color)
-                        .child(message),
+                        .child(
+                            div()
+                                .text_sm()
+                                .font_weight(FontWeight::SEMIBOLD)
+                                .text_color(text_color)
+                                .child(title),
+                        )
+                        .child(
+                            div()
+                                .text_xs()
+                                .text_color(with_alpha(text_color, 0.75))
+                                .child(body),
+                        ),
                 )
                 .child(
                     div()
@@ -4070,8 +4234,8 @@ fn render_network_warning_callout(locale: &str, voice: &Entity<VoiceStore>) -> A
                 .h(px(PTT_HINT_CARET_PX / 2.))
                 .path("icons/tour-caret-down.svg")
                 .text_color(card_bg),
-        )
-        .into_any_element()
+        );
+    deferred(callout).into_any_element()
 }
 
 fn network_weak_dot(theme: &Theme, network_weak: bool, cx: &App) -> Option<gpui::Div> {

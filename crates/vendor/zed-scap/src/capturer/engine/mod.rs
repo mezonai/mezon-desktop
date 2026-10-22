@@ -146,4 +146,9 @@ impl Engine {
     pub fn target(&self) -> Option<&Target> {
         self.target.as_ref()
     }
+
+    #[cfg(any(target_os = "linux", target_os = "freebsd"))]
+    pub fn monitor_area(&self) -> Option<crate::capturer::Area> {
+        self.linux.imp.monitor_area()
+    }
 }

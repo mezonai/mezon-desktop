@@ -45,6 +45,7 @@ fn canvas_popover_y_offset() -> Pixels {
 pub struct DmHeaderInfo {
     pub channel_id: ChannelId,
     pub is_group: bool,
+    pub is_self: bool,
     pub blocked_by_me: bool,
     /// Peer presence for a 1:1 DM; always `None` for a group.
     pub presence: DmAvatarPresence,
@@ -323,7 +324,7 @@ impl ChannelHeader {
             None
         };
         let add_members_button = dm_header.as_ref().and_then(|info| {
-            if info.blocked_by_me {
+            if info.blocked_by_me || info.is_self {
                 None
             } else if info.is_group {
                 Some(Self::render_add_members_button(info, icon_color, bg_hover))
@@ -1052,6 +1053,7 @@ enum DmHeaderState {
     Unresolved,
     OneToOne,
     OneToOneBlocked,
+    SelfChat,
     Group,
 }
 
@@ -1060,6 +1062,7 @@ impl DmHeaderState {
         match info {
             None => Self::Unresolved,
             Some(info) if info.is_group => Self::Group,
+            Some(info) if info.is_self => Self::SelfChat,
             Some(info) if info.blocked_by_me => Self::OneToOneBlocked,
             Some(_) => Self::OneToOne,
         }
@@ -1084,6 +1087,12 @@ fn dm_header_actions(state: DmHeaderState) -> &'static [(&'static str, IconName)
         ],
         DmHeaderState::OneToOneBlocked => &[
             ("hdr-pin", IconName::PinRight),
+            ("hdr-gallery", IconName::ImageThumbnail),
+            ("hdr-files", IconName::FileIcon),
+        ],
+        DmHeaderState::SelfChat => &[
+            ("hdr-pin", IconName::PinRight),
+            ("hdr-members", IconName::IconUserProfileDM),
             ("hdr-gallery", IconName::ImageThumbnail),
             ("hdr-files", IconName::FileIcon),
         ],
@@ -1288,6 +1297,12 @@ impl ChatHeader {
         let store = DirectMessageStore::try_global(cx)?;
         let dm = store.read(cx).find(direct_id)?;
         let is_group = dm.kind == DirectKind::Group;
+        let is_self = dm.peer_user_id.is_some_and(|peer| {
+            !is_group
+                && mezon_store::BadgeService::try_global(cx)
+                    .and_then(|service| service.read(cx).current_user_id(cx))
+                    == Some(peer)
+        });
         let blocked_by_me = dm.peer_user_id.is_some_and(|peer| {
             !is_group
                 && FriendStore::try_global(cx)
@@ -1317,6 +1332,7 @@ impl ChatHeader {
         Some(DmHeaderInfo {
             channel_id: dm.id,
             is_group,
+            is_self,
             blocked_by_me,
             presence,
             label: SharedString::from(dm.label.clone()),
@@ -2321,7 +2337,10 @@ impl IntoElement for NotificationSettingTrigger {
 
 #[cfg(test)]
 mod tests {
-    use super::{DmHeaderState, dm_header_actions};
+    use gpui::SharedString;
+    use mezon_store::{ChannelId, DmAvatarPresence};
+
+    use super::{DmHeaderInfo, DmHeaderState, dm_header_actions};
 
     fn action_ids(state: DmHeaderState) -> Vec<&'static str> {
         dm_header_actions(state).iter().map(|(id, _)| *id).collect()
@@ -2355,6 +2374,34 @@ mod tests {
             action_ids(DmHeaderState::OneToOneBlocked),
             ["hdr-pin", "hdr-gallery", "hdr-files"]
         );
+        assert_eq!(
+            action_ids(DmHeaderState::SelfChat),
+            ["hdr-pin", "hdr-members", "hdr-gallery", "hdr-files"]
+        );
+    }
+
+    #[test]
+    fn self_chat_hides_call_and_group_actions() {
+        let info = DmHeaderInfo {
+            channel_id: ChannelId(1),
+            is_group: false,
+            is_self: true,
+            blocked_by_me: false,
+            presence: DmAvatarPresence::None,
+            label: SharedString::default(),
+            avatar_src: SharedString::default(),
+            avatar_raw: SharedString::default(),
+            members_text: None,
+            edit_tooltip: SharedString::default(),
+            add_members_tooltip: SharedString::default(),
+            locale: SharedString::default(),
+        };
+        let state = DmHeaderState::from_info(Some(&info));
+        assert_eq!(state, DmHeaderState::SelfChat);
+        let actions = action_ids(state);
+        assert!(!actions.contains(&"hdr-call"));
+        assert!(!actions.contains(&"hdr-video-call"));
+        assert!(!actions.contains(&"hdr-add-members"));
     }
 
     #[test]

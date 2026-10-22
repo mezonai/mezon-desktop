@@ -1,0 +1,22 @@
+[package]
+name = "mezon-grammar"
+version.workspace = true
+license.workspace = true
+edition = "2024"
+
+[lib]
+name = "mezon_grammar"
+
+[dependencies]
+ort = { version = "=2.0.0-rc.10", default-features = false, features = [
+    "std",
+    "ndarray",
+    "download-binaries",
+    "copy-dylibs",
+] }
+regex.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+
+[target.'cfg(target_os = "linux")'.build-dependencies]
+openssl-sys = { version = "0.9", features = ["vendored"] }

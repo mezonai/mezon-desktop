@@ -152,6 +152,7 @@ pub(crate) fn render_pinned_message_preview(
 
 fn pinned_message_from_chat_message(msg: &Message) -> PinnedMessage {
     PinnedMessage {
+        avatar_from_source: true,
         id: msg.id.to_string(),
         message_id: msg.id.to_string(),
         sender_id: msg.sender_id.clone(),
@@ -1043,6 +1044,7 @@ fn resolve_pin_avatar_urls(
     let mut avatar_raw =
         resolve_pin_avatar_url(&pin.sender_id, &pin.avatar_url, clan_id, channel_id, cx);
     if avatar_raw.is_empty()
+        && !pin.has_authoritative_empty_avatar(cx)
         && let Ok(message_id) = pin.message_id.parse::<MessageId>()
     {
         let store = MessagesStore::global(cx).read(cx);
@@ -2402,4 +2404,42 @@ pub fn pin_popover_on_open() -> Rc<dyn Fn(&mut Window, &mut App)> {
             }
         });
     })
+}
+
+#[cfg(test)]
+mod avatar_tests {
+    use super::*;
+
+    #[gpui::test]
+    fn authoritative_anonymous_avatar_does_not_fall_back_to_message_cache(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        cx.update(|cx| {
+            mezon_store::AppConfig::init_global(
+                Arc::new(mezon_store::AppConfig {
+                    anonymous_user_id: "9876".into(),
+                    ..Default::default()
+                }),
+                cx,
+            );
+            for source in ["", "https://cdn.example/persona.webp"] {
+                let message =
+                    Message::new(MessageId(42), "hello", "9876", "persona", 1).with_avatar(source);
+                let pin = pinned_message_from_chat_message(&message);
+                let (image, fallback) = resolve_pin_avatar_urls(
+                    &pin,
+                    Some(mezon_store::ClanId(1)),
+                    Some(ChannelId(2)),
+                    cx,
+                );
+                if source.is_empty() {
+                    assert!(image.is_none());
+                    assert!(fallback.is_none());
+                } else {
+                    assert_eq!(image.as_deref(), Some(source));
+                    assert_eq!(fallback.as_deref(), Some(source));
+                }
+            }
+        });
+    }
 }

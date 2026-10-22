@@ -1,5 +1,5 @@
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 use anyhow::Result;
 
@@ -76,10 +76,34 @@ fn multipart_part_ranges(total: u64) -> Vec<(u64, usize)> {
 pub(crate) const CDN_MEZON_MINIO: &str = "https://cdn.mezon.ai";
 const CDN_R2_CLOUDFLARE: &str = "https://cdn.komu.vn";
 
+pub struct CdnReadBases {
+    pub mezon: String,
+    pub cloudflare: String,
+}
+
+static CDN_READ_BASES: OnceLock<CdnReadBases> = OnceLock::new();
+
+pub fn configure_cdn_read_bases(bases: CdnReadBases) {
+    let _ = CDN_READ_BASES.set(CdnReadBases {
+        mezon: bases.mezon.trim_end_matches('/').to_owned(),
+        cloudflare: bases.cloudflare.trim_end_matches('/').to_owned(),
+    });
+}
+
+fn mezon_cdn_base() -> &'static str {
+    read_base_url(CDN_READ_BASES.get(), 1, "")
+}
+
 pub fn cdn_read_base_url(type_cdn: i32, fallback: &str) -> &str {
-    match type_cdn {
-        1 => CDN_MEZON_MINIO,
-        2 => CDN_R2_CLOUDFLARE,
+    read_base_url(CDN_READ_BASES.get(), type_cdn, fallback)
+}
+
+fn read_base_url<'a>(bases: Option<&'a CdnReadBases>, type_cdn: i32, fallback: &'a str) -> &'a str {
+    match (type_cdn, bases) {
+        (1, Some(bases)) => &bases.mezon,
+        (1, None) => CDN_MEZON_MINIO,
+        (2, Some(bases)) => &bases.cloudflare,
+        (2, None) => CDN_R2_CLOUDFLARE,
         _ => fallback.trim_end_matches('/'),
     }
 }
@@ -111,7 +135,8 @@ pub(crate) fn cdn_file_link_into_channel(url: &str, channel_id: i64) -> Option<C
     if channel_id == 0 {
         return None;
     }
-    let src = url.strip_prefix(CDN_MEZON_MINIO)?.strip_prefix('/')?;
+    let cdn_base = mezon_cdn_base();
+    let src = url.strip_prefix(cdn_base)?.strip_prefix('/')?;
     let (folder, file) = src.split_once('/')?;
     if !is_cdn_channel_folder(folder) || !is_channel_upload_name(file) {
         return None;
@@ -122,7 +147,7 @@ pub(crate) fn cdn_file_link_into_channel(url: &str, channel_id: i64) -> Option<C
     }
     let dst = format!("{destination}/{file}");
     Some(CdnFileLink {
-        url: format!("{CDN_MEZON_MINIO}/{dst}"),
+        url: format!("{cdn_base}/{dst}"),
         src: src.to_string(),
         dst,
     })
@@ -680,6 +705,17 @@ impl AppApi {
 
     pub async fn generate_cdn_signature(&self, channel_id: i64) -> Result<String> {
         self.transport.generate_cdn_signature(channel_id).await
+    }
+
+    pub async fn sfu_breakout_room(
+        &self,
+        request: mezon_proto::api::SfuBreakoutRoomRequest,
+    ) -> Result<mezon_proto::api::SfuBreakoutRoomResponse> {
+        self.transport.sfu_breakout_room(request).await
+    }
+
+    pub async fn sfu_breakout_merge(&self, breakout_id: i64) -> Result<()> {
+        self.transport.sfu_breakout_merge(breakout_id).await
     }
 
     pub async fn link_attachments_into_channel(
@@ -3370,6 +3406,10 @@ impl AppApi {
         self.transport.close_dm_by_channel_id(channel_id).await
     }
 
+    pub async fn open_dm_by_channel_id(&self, channel_id: i64) -> Result<()> {
+        self.transport.open_dm_by_channel_id(channel_id).await
+    }
+
     pub async fn list_loged_device(&self) -> Result<Vec<mezon_proto::api::LogedDevice>> {
         self.transport.list_loged_device().await
     }
@@ -3422,10 +3462,10 @@ mod tests {
     use prost::Message as _;
 
     use super::{
-        AppApi, CdnFileLink, MULTIPART_PART_SIZE, PresignedAttachment, ResumableUpload, UploadPlan,
-        attachment_cdn_url_for_upload, cdn_file_link_into_channel, cdn_read_base_url,
-        emoticon_id_from_filename, multipart_part_ranges, sanitize_upload_filename,
-        upload_attachment_type,
+        AppApi, CdnFileLink, CdnReadBases, MULTIPART_PART_SIZE, PresignedAttachment,
+        ResumableUpload, UploadPlan, attachment_cdn_url_for_upload, cdn_file_link_into_channel,
+        cdn_read_base_url, emoticon_id_from_filename, multipart_part_ranges, read_base_url,
+        sanitize_upload_filename, upload_attachment_type,
     };
     use crate::TransportClient;
     use crate::transport::{ApiAttachment, HttpFallbackSession};
@@ -3626,6 +3666,26 @@ mod tests {
         );
         assert_eq!(
             cdn_read_base_url(0, "https://fallback/"),
+            "https://fallback"
+        );
+    }
+
+    #[test]
+    fn cdn_read_base_url_follows_the_configured_environment() {
+        let dev = CdnReadBases {
+            mezon: "https://cdn-dev.nccsoft.vn".into(),
+            cloudflare: "https://cdn-dev.tx8.vn".into(),
+        };
+        assert_eq!(
+            read_base_url(Some(&dev), 1, "https://fallback"),
+            "https://cdn-dev.nccsoft.vn"
+        );
+        assert_eq!(
+            read_base_url(Some(&dev), 2, "https://fallback"),
+            "https://cdn-dev.tx8.vn"
+        );
+        assert_eq!(
+            read_base_url(Some(&dev), 0, "https://fallback/"),
             "https://fallback"
         );
     }

@@ -10,6 +10,8 @@ use parking_lot::Mutex;
 use crate::{PlayerError, VideoFrame, VideoProbe};
 
 const MAX_WEBM_BYTES: usize = 64 * 1024 * 1024;
+#[cfg(target_os = "macos")]
+const MAX_REMUX_SOURCE_BYTES: u64 = 1024 * 1024 * 1024;
 const WEBM_HTTP_CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
 const WEBM_HTTP_RECV_BODY_TIMEOUT: Duration = Duration::from_secs(60);
 const MAX_DECODE_PIXELS: u64 = 4096 * 4096;
@@ -90,6 +92,7 @@ pub struct WebmPlayerImpl {
 }
 
 impl WebmPlayerImpl {
+    #[cfg(windows)]
     pub fn open(url: &str, max_size: Option<(u32, u32)>) -> Result<Self, PlayerError> {
         if url.is_empty() {
             return Err(PlayerError::InvalidUrl);
@@ -101,11 +104,10 @@ impl WebmPlayerImpl {
         let bytes: Arc<[u8]> = Arc::from(bytes.into_boxed_slice());
         let mut demuxer = open_demuxer(&bytes)?;
         if has_audio_track(&demuxer) {
-            tracing::warn!(
+            tracing::info!(
                 target: "mezon_video",
-                "webm with audio is not decoded inline; use download or open externally"
+                "vp8 webm audio is not decoded inline; playing the picture only"
             );
-            return Err(PlayerError::Open);
         }
         let video_track = demuxer
             .tracks()
@@ -380,6 +382,25 @@ fn reopen_at(
     Ok(())
 }
 
+#[cfg(windows)]
+pub(crate) fn matroska_duration_seconds(bytes: &[u8]) -> Option<f64> {
+    let bytes: Arc<[u8]> = Arc::from(bytes);
+    let mut demuxer = open_demuxer(&bytes).ok()?;
+    if let Some(duration) = header_duration_seconds(demuxer.info()) {
+        return Some(duration);
+    }
+    let video_track = demuxer
+        .tracks()
+        .iter()
+        .find(|track| track.track_type() == TrackType::Video)?
+        .track_number()
+        .get();
+    let timestamp_scale = demuxer.info().timestamp_scale().get();
+    video_duration_from_frames(&mut demuxer, video_track, timestamp_scale)
+        .ok()
+        .filter(|duration| *duration > 0.0)
+}
+
 fn header_duration_seconds(info: &matroska_demuxer::Info) -> Option<f64> {
     let ticks = info.duration()?;
     let scale = info.timestamp_scale().get() as f64;
@@ -406,14 +427,39 @@ fn video_duration_from_frames(
     })
 }
 
+fn http_agent() -> ureq::Agent {
+    ureq::Agent::config_builder()
+        .timeout_connect(Some(WEBM_HTTP_CONNECT_TIMEOUT))
+        .timeout_recv_body(Some(WEBM_HTTP_RECV_BODY_TIMEOUT))
+        .build()
+        .into()
+}
+
+#[cfg(target_os = "macos")]
+pub(crate) fn download_to_file(url: &str, target: &std::path::Path) -> Result<(), PlayerError> {
+    if !(url.starts_with("http://") || url.starts_with("https://")) {
+        return Err(PlayerError::InvalidUrl);
+    }
+    let mut response = http_agent().get(url).call().map_err(|error| {
+        tracing::warn!(target: "mezon_video", ?error, "video download failed");
+        PlayerError::Open
+    })?;
+    let mut reader = response
+        .body_mut()
+        .with_config()
+        .limit(MAX_REMUX_SOURCE_BYTES)
+        .reader();
+    let mut file = std::fs::File::create(target).map_err(|_| PlayerError::Open)?;
+    std::io::copy(&mut reader, &mut file).map_err(|error| {
+        tracing::warn!(target: "mezon_video", ?error, "video download interrupted");
+        PlayerError::Open
+    })?;
+    Ok(())
+}
+
 fn load_bytes(url: &str) -> Result<Vec<u8>, PlayerError> {
     if url.starts_with("http://") || url.starts_with("https://") {
-        let agent: ureq::Agent = ureq::Agent::config_builder()
-            .timeout_connect(Some(WEBM_HTTP_CONNECT_TIMEOUT))
-            .timeout_recv_body(Some(WEBM_HTTP_RECV_BODY_TIMEOUT))
-            .build()
-            .into();
-        let mut response = agent.get(url).call().map_err(|error| {
+        let mut response = http_agent().get(url).call().map_err(|error| {
             tracing::warn!(target: "mezon_video", ?error, "webm download failed");
             PlayerError::Open
         })?;
@@ -431,7 +477,7 @@ fn load_bytes(url: &str) -> Result<Vec<u8>, PlayerError> {
     }
 }
 
-fn local_file_path(url: &str) -> Option<&str> {
+pub(crate) fn local_file_path(url: &str) -> Option<&str> {
     let path = if let Some(path) = url.strip_prefix("file://") {
         path
     } else if !url.contains("://") {
@@ -455,7 +501,13 @@ fn local_file_path(url: &str) -> Option<&str> {
     Some(path)
 }
 
-fn read_local_capped(path: &str) -> Result<Vec<u8>, PlayerError> {
+#[cfg(target_os = "macos")]
+pub(crate) fn read_source_capped(path: &std::path::Path) -> Result<Vec<u8>, PlayerError> {
+    read_local_capped(path)
+}
+
+fn read_local_capped(path: impl AsRef<std::path::Path>) -> Result<Vec<u8>, PlayerError> {
+    let path = path.as_ref();
     let meta = std::fs::metadata(path).map_err(|_| PlayerError::Open)?;
     if !meta.is_file() || meta.len() > MAX_WEBM_BYTES as u64 {
         return Err(PlayerError::Open);

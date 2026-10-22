@@ -1,3 +1,5 @@
+use std::collections::{HashMap, HashSet};
+
 use gpui::App;
 use mezon_client::transport::prioritize_avatar;
 
@@ -11,6 +13,26 @@ use crate::group_members::{GroupMember, GroupMembersStore};
 use crate::ids::{ChannelId, ClanId, RoleId, UserId};
 use crate::presence::PresenceStore;
 use crate::users_by_user::UsersByUserStore;
+
+pub(crate) fn apply_user_profile(user: &User, cx: &mut App) {
+    if let Some(store) = ClanMembersStore::try_global(cx) {
+        store.update(cx, |store, cx| store.apply_user_profile(user, cx));
+    }
+    if let Some(store) = GroupMembersStore::try_global(cx) {
+        store.update(cx, |store, cx| store.apply_user_profile(user, cx));
+    }
+    if let Some(store) = DirectMessageStore::try_global(cx) {
+        store.update(cx, |store, cx| store.apply_user_profile(user, cx));
+    }
+}
+
+pub(crate) fn reconcile_user_profile(user: &mut User, cx: &App) {
+    if let Some(store) = UsersByUserStore::try_global(cx)
+        && let Some(profile) = store.read(cx).confirmed_profile(user.id)
+    {
+        user.update_profile(profile);
+    }
+}
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct UserProfileView {
@@ -30,6 +52,90 @@ pub struct UserProfileView {
 pub enum ProfileContext {
     Clan(ClanId),
     Direct(ChannelId),
+}
+
+#[derive(Default)]
+pub struct CachedUserProfiles(HashMap<UserId, UserProfileView>);
+
+impl CachedUserProfiles {
+    pub fn new(user_ids: impl IntoIterator<Item = UserId>, cx: &App) -> Self {
+        let ids: HashSet<_> = user_ids.into_iter().filter(|id| !id.is_zero()).collect();
+        let mut profiles = Self::default();
+        if let Some(store) = DirectMessageStore::try_global(cx) {
+            for channel in store.read(cx).channels().iter().rev() {
+                if channel.kind == DirectKind::Dm
+                    && let Some(id) = channel.peer_user_id.filter(|id| ids.contains(id))
+                {
+                    let mut profile = UserProfileView::from_direct_peer(channel, false);
+                    profile.user_id = id;
+                    profiles.merge(profile);
+                }
+            }
+        }
+        if let Some(store) = FriendStore::try_global(cx) {
+            for friend in store
+                .read(cx)
+                .friends()
+                .iter()
+                .filter(|friend| ids.contains(&friend.id))
+            {
+                profiles.merge(UserProfileView {
+                    user_id: friend.id,
+                    username: friend.username.clone(),
+                    display_name: friend.label().to_string(),
+                    avatar_url: friend.avatar_url.clone(),
+                    ..Default::default()
+                });
+            }
+        }
+        if let Some(store) = UsersByUserStore::try_global(cx) {
+            for id in ids {
+                if let Some(user) = store.read(cx).user(id) {
+                    profiles.merge(UserProfileView::from_user(user, false));
+                }
+            }
+        }
+        profiles
+    }
+
+    fn merge(&mut self, profile: UserProfileView) {
+        let entry = self
+            .0
+            .entry(profile.user_id)
+            .or_insert_with(|| UserProfileView {
+                user_id: profile.user_id,
+                ..Default::default()
+            });
+        if !profile.username.is_empty() {
+            entry.username = profile.username;
+        }
+        if !profile.display_name.is_empty() {
+            entry.display_name = profile.display_name;
+        }
+        if !profile.avatar_url.is_empty() {
+            entry.avatar_url = profile.avatar_url;
+        }
+    }
+
+    pub fn cached_avatar_url(&self, user_id: UserId) -> Option<&str> {
+        self.profile(user_id)
+            .map(|profile| profile.avatar_url.as_str())
+            .filter(|url| !url.is_empty())
+    }
+
+    pub fn profile(&self, user_id: UserId) -> Option<&UserProfileView> {
+        self.0.get(&user_id)
+    }
+}
+
+impl FromIterator<UserProfileView> for CachedUserProfiles {
+    fn from_iter<T: IntoIterator<Item = UserProfileView>>(profiles: T) -> Self {
+        let mut cached = Self::default();
+        for profile in profiles {
+            cached.merge(profile);
+        }
+        cached
+    }
 }
 
 impl UserProfileView {
@@ -178,20 +284,15 @@ pub fn resolve_avatar_url(user_id: UserId, context: ProfileContext, cx: &App) ->
                     .member(channel_id, user_id)
                     .map(|member| member.avatar().to_string()),
                 DirectKind::Dm => {
+                    if is_current_user(user_id, cx)
+                        && let Some(account) = AccountStore::global(cx).read(cx).account.as_ref()
+                    {
+                        return Some(account.avatar_url.clone().unwrap_or_default());
+                    }
                     if let Some(url) = UsersByUserStore::global(cx)
                         .read(cx)
                         .user(user_id)
                         .map(|user| user.avatar_url.clone())
-                    {
-                        return Some(url);
-                    }
-                    if is_current_user(user_id, cx)
-                        && let Some(url) = AccountStore::global(cx)
-                            .read(cx)
-                            .account
-                            .as_ref()
-                            .and_then(|acct| acct.avatar_url.clone())
-                            .filter(|url| !url.is_empty())
                     {
                         return Some(url);
                     }
@@ -281,20 +382,7 @@ fn resolve_direct(
             if is_current_user(user_id, cx)
                 && let Some(account) = AccountStore::global(cx).read(cx).account.as_ref()
             {
-                let mut view = cached
-                    .unwrap_or_else(|| UserProfileView::from_account(user_id, account, online));
-                if !account.display_name.is_empty() {
-                    view.display_name = account.display_name.clone();
-                }
-                if !account.username.is_empty() {
-                    view.username = account.username.clone();
-                }
-                if let Some(avatar) = account.avatar_url.as_ref().filter(|url| !url.is_empty()) {
-                    view.avatar_url = avatar.clone();
-                }
-                if let Some(about_me) = account.about_me.as_ref() {
-                    view.about_me = about_me.clone();
-                }
+                let mut view = UserProfileView::from_account(user_id, account, online);
                 view.conversation_create_time_seconds = conversation_create_time_seconds;
                 return Some(view);
             }

@@ -152,6 +152,8 @@ const MAX_RECONNECT_ATTEMPTS: u32 = 4;
 const MAX_INITIAL_CONNECT_ATTEMPTS: u32 = 3;
 const RECONNECTING_HEARTBEAT_TICKS: u32 = 10;
 const OFFER_REISSUE_DEADLINE: Duration = Duration::from_secs(8);
+const SCREEN_STOP_RETRIES: u32 = 3;
+const SCREEN_STOP_RETRY_BASE: Duration = Duration::from_millis(500);
 const TOKEN_EXPIRY_MARGIN: Duration = Duration::from_secs(60);
 const SIGNALING_OPERATION_TIMEOUT: Duration = Duration::from_secs(10);
 const NEGOTIATION_TIMEOUT: Duration = Duration::from_secs(15);
@@ -1354,6 +1356,8 @@ async fn session_loop(
     let mut pending_offer: Option<(u64, String)> = None;
     let mut offer_reissue_deadline: Option<tokio::time::Instant> = None;
     let mut mute_sync = MuteSync::default();
+    let mut screen_stop_attempts: u32 = 0;
+    let mut screen_stop_retry_at: Option<tokio::time::Instant> = None;
     let mut tiers = PublishTiers::default();
     let mut camera_tier_pending: Option<(usize, tokio::time::Instant)> = None;
     let mut screen_adaptation = ScreenAdaptation::default();
@@ -1582,6 +1586,10 @@ async fn session_loop(
                         if let Some(peer) = peer {
                             if joined && peer.peer_id == membership.self_peer_id {
                                 mute_sync.observe_self(peer.is_mute, local.muted, Instant::now());
+                                if !peer.is_sharing_screen() {
+                                    screen_stop_attempts = 0;
+                                    screen_stop_retry_at = None;
+                                }
                             }
                             membership.apply(peer);
                             if membership.fixed_pool && let Some(pc) = pc.as_ref() { sync_remote_media(pc, &mut membership, evt_tx, None); }
@@ -1710,6 +1718,20 @@ async fn session_loop(
                             _ => None,
                         };
                         if let Some(refusal) = refusal {
+                            if matches!(refusal, MediaRefusal::ScreenShareUpdateFailed)
+                                && local.screen.is_none()
+                                && screen_stop_attempts < SCREEN_STOP_RETRIES
+                            {
+                                let delay = SCREEN_STOP_RETRY_BASE * 2u32.pow(screen_stop_attempts);
+                                screen_stop_attempts += 1;
+                                screen_stop_retry_at = Some(tokio::time::Instant::now() + delay);
+                                tracing::warn!(
+                                    %message,
+                                    attempt = screen_stop_attempts,
+                                    "sfu refused to stop the screen share; retrying"
+                                );
+                                continue;
+                            }
                             tracing::warn!(%message, "sfu refused the media request");
                             let _ = evt_tx.send(SfuEvent::MediaRefused(refusal));
                             continue;
@@ -1817,6 +1839,8 @@ async fn session_loop(
                         }
                     }
                     EngineCommand::SetScreenActive(active) => {
+                        screen_stop_attempts = 0;
+                        screen_stop_retry_at = None;
                         if joined && send(&mut ws_tx, &ClientMessage::ShareScreen { active }).await.is_err() {
                             return SessionOutcome::Dropped { joined, reason: "share_screen send failed".into() };
                         }
@@ -2112,6 +2136,15 @@ async fn session_loop(
                     joined,
                     reason: "sfu never reissued the rejected offer".into(),
                 };
+            }
+            () = tokio::time::sleep_until(screen_stop_retry_at.unwrap_or_else(tokio::time::Instant::now)), if screen_stop_retry_at.is_some() => {
+                screen_stop_retry_at = None;
+                if joined
+                    && local.screen.is_none()
+                    && send(&mut ws_tx, &ClientMessage::ShareScreen { active: false }).await.is_err()
+                {
+                    return SessionOutcome::Dropped { joined, reason: "share_screen send failed".into() };
+                }
             }
             () = tokio::time::sleep_until(mute_sync.deadline().map(tokio::time::Instant::from_std).unwrap_or_else(tokio::time::Instant::now)), if mute_sync.deadline().is_some() => {
                 if mute_sync.take_forced_mute(Instant::now()) && !local.muted {
@@ -2794,7 +2827,16 @@ fn attach_local_tracks(pc: Option<&PeerConnection>, local: &LocalTracks, role: S
             _ => continue,
         };
 
-        let Some(track) = wanted else { continue };
+        let Some(track) = wanted else {
+            let sender = transceiver.sender();
+            if mid == MID_SCREEN
+                && sender.track().is_some()
+                && let Err(e) = sender.set_track(None)
+            {
+                tracing::warn!("failed to detach the screen track on mid {mid}: {e}");
+            }
+            continue;
+        };
         if let Err(e) = transceiver.sender().set_track(Some(track)) {
             tracing::warn!("failed to attach local track on mid {mid}: {e}");
         }

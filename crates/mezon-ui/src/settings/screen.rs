@@ -15,6 +15,7 @@ use super::account_page::AccountPage;
 use super::activity_page::ActivityPage;
 use super::advanced_page::AdvancedPage;
 use super::appearance_page::AppearancePage;
+use super::chat_page::ChatPage;
 use super::device_page::DevicePage;
 use super::language_page::LanguagePage;
 use super::notifications_page::NotificationsPage;
@@ -30,6 +31,7 @@ pub enum SettingsPage {
     Device,
     Appearance,
     Activity,
+    Chat,
     Notifications,
     Language,
     Voice,
@@ -45,6 +47,7 @@ impl SettingsPage {
             Self::Device => "setting.accountSettings.device",
             Self::Appearance => "setting.appSettings.appearance",
             Self::Activity => "setting.appSettings.activity",
+            Self::Chat => "setting.appSettings.chat",
             Self::Notifications => "setting.appSettings.notifications",
             Self::Language => "setting.language.title",
             Self::Voice => "setting.appSettings.voice",
@@ -64,6 +67,7 @@ pub struct SettingsScreen {
     device_page: Option<Entity<DevicePage>>,
     appearance_page: Option<Entity<AppearancePage>>,
     activity_page: Option<Entity<ActivityPage>>,
+    chat_page: Option<Entity<ChatPage>>,
     notifications_page: Option<Entity<NotificationsPage>>,
     language_page: Option<Entity<LanguagePage>>,
     voice_page: Option<Entity<VoicePage>>,
@@ -99,6 +103,7 @@ impl SettingsScreen {
             device_page: None,
             appearance_page: None,
             activity_page: None,
+            chat_page: None,
             notifications_page: None,
             language_page: None,
             voice_page: None,
@@ -196,6 +201,12 @@ impl SettingsScreen {
                     self.activity_page = Some(cx.new(|cx| ActivityPage::new(s, cx)));
                 }
             }
+            SettingsPage::Chat => {
+                if self.chat_page.is_none() {
+                    let s = self.settings.clone();
+                    self.chat_page = Some(cx.new(|cx| ChatPage::new(s, cx)));
+                }
+            }
             SettingsPage::Notifications => {
                 if self.notifications_page.is_none() {
                     let s = self.settings.clone();
@@ -249,6 +260,10 @@ impl SettingsScreen {
                 .map(|p| p.clone().into_any_element()),
             SettingsPage::Activity => self
                 .activity_page
+                .as_ref()
+                .map(|p| p.clone().into_any_element()),
+            SettingsPage::Chat => self
+                .chat_page
                 .as_ref()
                 .map(|p| p.clone().into_any_element()),
             SettingsPage::Notifications => self
@@ -310,6 +325,7 @@ impl Render for SettingsScreen {
         let is_device = page == SettingsPage::Device;
         let is_appearance = page == SettingsPage::Appearance;
         let is_activity = page == SettingsPage::Activity;
+        let is_chat = page == SettingsPage::Chat;
         let is_notifications = page == SettingsPage::Notifications;
         let is_language = page == SettingsPage::Language;
         let is_voice = page == SettingsPage::Voice;
@@ -562,6 +578,13 @@ impl Render for SettingsScreen {
                 is_activity,
                 &theme,
                 "/settings/activity",
+            ))
+            .child(nav_item(
+                "chat-page",
+                mezon_i18n::t(&locale, "setting.appSettings.chat"),
+                is_chat,
+                &theme,
+                "/settings/chat",
             ))
             .child(nav_item(
                 "notifications-page",

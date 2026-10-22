@@ -16,13 +16,15 @@ type CapturedScreenFrame = scap::capturer::engine::mac::PixelBuffer;
 #[cfg(not(target_os = "macos"))]
 type CapturedScreenFrame = BGRAFrame;
 
+use crate::annotation::AnnotationCompositor;
 use crate::screen_picker::{
     PickedScreen, pick_is_window, pick_uses_portal, portal_source_types_for_pick,
     scap_target_for_pick,
 };
+#[cfg(any(target_os = "linux", target_os = "freebsd"))]
+use crate::video::SharedMonitor;
 #[cfg(not(target_os = "macos"))]
 use crate::video::bgra_to_i420;
-#[cfg(target_os = "macos")]
 use crate::video::i420_to_bgra_into;
 #[cfg(target_os = "macos")]
 use crate::video::nv12_full_to_i420;
@@ -44,8 +46,14 @@ const SCREEN_RESTART_DELAY: Duration = Duration::from_millis(500);
 #[derive(Default)]
 struct SlotState {
     frame: Option<CapturedScreenFrame>,
+    repaint: bool,
     closed: bool,
     error: Option<String>,
+}
+
+enum SlotItem {
+    Frame(CapturedScreenFrame),
+    Repaint,
 }
 
 #[derive(Default)]
@@ -65,6 +73,11 @@ impl LatestFrameSlot {
         self.cond.notify_one();
     }
 
+    fn request_repaint(&self) {
+        self.state.lock().repaint = true;
+        self.cond.notify_one();
+    }
+
     fn fail(&self, error: String) {
         let mut state = self.state.lock();
         state.error = Some(error);
@@ -76,21 +89,22 @@ impl LatestFrameSlot {
         self.state.lock().error.take()
     }
 
-    fn take_latest(
-        &self,
-        stop: &AtomicBool,
-        deadline: Option<Instant>,
-    ) -> Option<CapturedScreenFrame> {
+    fn take_latest(&self, stop: &AtomicBool, deadline: Option<Instant>) -> Option<SlotItem> {
         let mut state = self.state.lock();
         loop {
             if stop.load(Ordering::Relaxed) {
                 return None;
             }
             if let Some(frame) = state.frame.take() {
-                return Some(frame);
+                state.repaint = false;
+                return Some(SlotItem::Frame(frame));
             }
             if state.closed {
                 return None;
+            }
+            if state.repaint {
+                state.repaint = false;
+                return Some(SlotItem::Repaint);
             }
             if deadline.is_some_and(|at| Instant::now() >= at) {
                 return None;
@@ -232,6 +246,8 @@ pub fn start_screen(
             let pump_stop = thread_stop.clone();
             let pump_control = thread_control.clone();
             let restartable = !use_portal;
+            #[cfg(any(target_os = "linux", target_os = "freebsd"))]
+            let pump_store = frame_store.clone();
             let pump = std::thread::Builder::new()
                 .name("mezon-screen-pump".into())
                 .spawn(move || {
@@ -321,6 +337,15 @@ pub fn start_screen(
                                     return;
                                 }
                             };
+                            #[cfg(any(target_os = "linux", target_os = "freebsd"))]
+                            pump_store.set_shared_monitor(capturer.monitor_area().map(|area| {
+                                SharedMonitor {
+                                    x: area.origin.x,
+                                    y: area.origin.y,
+                                    width: area.size.width,
+                                    height: area.size.height,
+                                }
+                            }));
                             capturer.start_capture();
                             let mut reconfigure = false;
                             while !pump_stop.load(Ordering::Relaxed) {
@@ -362,6 +387,20 @@ pub fn start_screen(
                 return;
             }
 
+            let annotations = frame_store.screen_annotations.clone();
+            let mut compositor =
+                is_window_share.then(|| AnnotationCompositor::new(annotations.clone()));
+            let repaint_waker = is_window_share.then(|| {
+                let waker_slot = Arc::downgrade(&slot);
+                annotations.set_waker(Arc::new(move || {
+                    if let Some(slot) = waker_slot.upgrade() {
+                        slot.request_repaint();
+                    }
+                }))
+            });
+            let mut annotation_base: Option<BaseFrame> = None;
+            let mut last_emit: Option<Instant> = None;
+
             let key = local_screen_key(&identity);
             let started = Instant::now();
             #[cfg(target_os = "macos")]
@@ -381,8 +420,47 @@ pub fn start_screen(
                 } else {
                     first_frame_deadline
                 };
-                let Some(captured) = slot.take_latest(&thread_stop, deadline) else {
+                let Some(item) = slot.take_latest(&thread_stop, deadline) else {
                     break;
+                };
+                let captured = match item {
+                    SlotItem::Frame(captured) => captured,
+                    SlotItem::Repaint => {
+                        let (Some(source), Some(compositor), Some(base)) =
+                            (&source, compositor.as_mut(), annotation_base.as_ref())
+                        else {
+                            continue;
+                        };
+                        let interval =
+                            Duration::from_millis(1000 / u64::from(thread_control.fps().max(1)));
+                        if let Some(elapsed) = last_emit.map(|at| at.elapsed())
+                            && elapsed < interval
+                        {
+                            std::thread::sleep(interval - elapsed);
+                        }
+                        let mut i420 = base.duplicate();
+                        let overlaid = compositor.prepare(base.width, base.height);
+                        if overlaid {
+                            blend_annotations(compositor, &mut i420);
+                        }
+                        let frame = VideoFrame {
+                            rotation: VideoRotation::VideoRotation0,
+                            timestamp_us: started.elapsed().as_micros() as i64,
+                            frame_metadata: None,
+                            buffer: i420,
+                        };
+                        source.capture_frame(&frame);
+                        last_emit = Some(Instant::now());
+                        publish_i420_preview(
+                            &frame_store,
+                            key,
+                            &frame.buffer,
+                            base.width,
+                            base.height,
+                            &mut display_buf,
+                        );
+                        continue;
+                    }
                 };
                 #[cfg(target_os = "macos")]
                 let (full_w, full_h) =
@@ -516,6 +594,21 @@ pub fn start_screen(
                         }
                     }
                 }
+                let annotating = compositor
+                    .as_ref()
+                    .is_some_and(|compositor| compositor.is_active());
+                let composited = match compositor.as_mut() {
+                    Some(compositor) if annotating => {
+                        annotation_base = Some(BaseFrame::copy_of(&i420, src_w, src_h));
+                        let overlaid = compositor.prepare(src_w, src_h);
+                        if overlaid {
+                            blend_annotations(compositor, &mut i420);
+                        }
+                        overlaid
+                    }
+                    _ => false,
+                };
+
                 let frame = VideoFrame {
                     rotation: VideoRotation::VideoRotation0,
                     timestamp_us: started.elapsed().as_micros() as i64,
@@ -524,60 +617,67 @@ pub fn start_screen(
                 };
                 if let Some(source) = &source {
                     source.capture_frame(&frame);
+                    last_emit = Some(Instant::now());
                 }
 
                 #[cfg(target_os = "macos")]
-                if last_preview.is_none_or(|at: Instant| at.elapsed() >= PREVIEW_MIN_INTERVAL) {
-                    last_preview = Some(Instant::now());
-                    let i420 = &frame.buffer;
-                    let (sy, su, sv) = i420.strides();
-                    let (y, u, v) = i420.data();
-                    display_buf.resize((src_w * src_h * 4) as usize, 0);
-                    i420_to_bgra_into(
+                let i420_preview = composited
+                    || last_preview.is_none_or(|at: Instant| at.elapsed() >= PREVIEW_MIN_INTERVAL);
+                #[cfg(not(target_os = "macos"))]
+                let i420_preview = composited;
+                if i420_preview {
+                    #[cfg(target_os = "macos")]
+                    {
+                        last_preview = Some(Instant::now());
+                    }
+                    publish_i420_preview(
+                        &frame_store,
+                        key,
+                        &frame.buffer,
+                        src_w,
+                        src_h,
                         &mut display_buf,
-                        y,
-                        u,
-                        v,
-                        sy as usize,
-                        su as usize,
-                        sv as usize,
+                    );
+                }
+
+                #[cfg(not(target_os = "macos"))]
+                if !i420_preview {
+                    let (pw, ph) = if _full_res.load(Ordering::Relaxed) {
+                        (src_w, src_h)
+                    } else {
+                        scaled_dims(src_w, src_h, PREVIEW_MAX_WIDTH, PREVIEW_MAX_HEIGHT)
+                    };
+                    display_buf.resize((pw * ph * 4) as usize, 0);
+                    downscale_bgra_into(
+                        &mut display_buf,
+                        &captured.data,
                         src_w as usize,
                         src_h as usize,
+                        row_stride,
+                        pw as usize,
+                        ph as usize,
                     );
                     if let Some(recycled) =
-                        frame_store.publish(key, src_w, src_h, std::mem::take(&mut display_buf))
+                        frame_store.publish(key, pw, ph, std::mem::take(&mut display_buf))
                     {
                         display_buf = recycled;
                     }
                 }
 
-                #[cfg(not(target_os = "macos"))]
-                let (pw, ph) = if _full_res.load(Ordering::Relaxed) {
-                    (src_w, src_h)
-                } else {
-                    scaled_dims(src_w, src_h, PREVIEW_MAX_WIDTH, PREVIEW_MAX_HEIGHT)
-                };
-                #[cfg(not(target_os = "macos"))]
-                display_buf.resize((pw * ph * 4) as usize, 0);
-                #[cfg(not(target_os = "macos"))]
-                downscale_bgra_into(
-                    &mut display_buf,
-                    &captured.data,
-                    src_w as usize,
-                    src_h as usize,
-                    row_stride,
-                    pw as usize,
-                    ph as usize,
-                );
-                #[cfg(not(target_os = "macos"))]
-                if let Some(recycled) =
-                    frame_store.publish(key, pw, ph, std::mem::take(&mut display_buf))
-                {
-                    display_buf = recycled;
+                if compositor.is_some() && !annotating {
+                    annotation_base = Some(BaseFrame {
+                        width: src_w,
+                        height: src_h,
+                        buffer: frame.buffer,
+                    });
                 }
             }
 
+            if let Some(token) = repaint_waker {
+                annotations.clear_waker(token);
+            }
             frame_store.remove(local_screen_key(&identity));
+            frame_store.set_shared_monitor(None);
             if !sent_track {
                 let timed_out = first_frame_deadline.is_some_and(|at| Instant::now() >= at);
                 let msg = slot.take_error().unwrap_or_else(|| {
@@ -599,6 +699,70 @@ pub fn start_screen(
     }
 
     (ScreenStopper { stop, control }, track_rx)
+}
+
+struct BaseFrame {
+    width: u32,
+    height: u32,
+    buffer: I420Buffer,
+}
+
+impl BaseFrame {
+    fn copy_of(buffer: &I420Buffer, width: u32, height: u32) -> Self {
+        Self {
+            width,
+            height,
+            buffer: copy_i420(buffer, width, height),
+        }
+    }
+
+    fn duplicate(&self) -> I420Buffer {
+        copy_i420(&self.buffer, self.width, self.height)
+    }
+}
+
+fn copy_i420(source: &I420Buffer, width: u32, height: u32) -> I420Buffer {
+    let mut copy = I420Buffer::new(width, height);
+    let (src_y, src_u, src_v) = source.data();
+    let (dst_y, dst_u, dst_v) = copy.data_mut();
+    for (dst, src) in [(dst_y, src_y), (dst_u, src_u), (dst_v, src_v)] {
+        let len = dst.len().min(src.len());
+        dst[..len].copy_from_slice(&src[..len]);
+    }
+    copy
+}
+
+fn blend_annotations(compositor: &AnnotationCompositor, buffer: &mut I420Buffer) {
+    let (sy, su, sv) = buffer.strides();
+    let (y, u, v) = buffer.data_mut();
+    compositor.blend(y, u, v, sy as usize, su as usize, sv as usize);
+}
+
+fn publish_i420_preview(
+    frame_store: &VideoFrameStore,
+    key: u64,
+    buffer: &I420Buffer,
+    width: u32,
+    height: u32,
+    display_buf: &mut Vec<u8>,
+) {
+    let (sy, su, sv) = buffer.strides();
+    let (y, u, v) = buffer.data();
+    display_buf.resize((width * height * 4) as usize, 0);
+    i420_to_bgra_into(
+        display_buf,
+        y,
+        u,
+        v,
+        sy as usize,
+        su as usize,
+        sv as usize,
+        width as usize,
+        height as usize,
+    );
+    if let Some(recycled) = frame_store.publish(key, width, height, std::mem::take(display_buf)) {
+        *display_buf = recycled;
+    }
 }
 
 #[cfg(any(not(target_os = "macos"), test))]
