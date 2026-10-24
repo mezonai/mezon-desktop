@@ -9,20 +9,7 @@ pub fn navigate_after_thread_removed(
     removed_id: ChannelId,
     parent_id: ChannelId,
 ) {
-    let viewing_removed = match Router::global(cx).read(cx).route() {
-        Route::Channel {
-            channel_id: active, ..
-        } => active == removed_id,
-        Route::Thread { thread_id, .. } => thread_id == removed_id,
-        Route::ChannelSettings {
-            channel_id: active, ..
-        }
-        | Route::Canvas {
-            channel_id: active, ..
-        } => active == removed_id,
-        _ => false,
-    };
-    if !viewing_removed {
+    if !viewing_thread(cx, removed_id) {
         return;
     }
     if !parent_id.is_zero() {
@@ -30,6 +17,39 @@ pub fn navigate_after_thread_removed(
             list.clear_compose_draft(parent_id, cx);
         });
     }
+    open_parent_or_go_back(cx, clan_id, parent_id);
+}
+
+pub fn navigate_after_thread_left(
+    cx: &mut App,
+    clan_id: ClanId,
+    thread_id: ChannelId,
+    parent_id: ChannelId,
+) {
+    if viewing_thread(cx, thread_id) {
+        open_parent_or_go_back(cx, clan_id, parent_id);
+    }
+}
+
+fn viewing_thread(cx: &App, thread_id: ChannelId) -> bool {
+    match Router::global(cx).read(cx).route() {
+        Route::Channel {
+            channel_id: active, ..
+        } => active == thread_id,
+        Route::Thread {
+            thread_id: active, ..
+        } => active == thread_id,
+        Route::ChannelSettings {
+            channel_id: active, ..
+        }
+        | Route::Canvas {
+            channel_id: active, ..
+        } => active == thread_id,
+        _ => false,
+    }
+}
+
+fn open_parent_or_go_back(cx: &mut App, clan_id: ClanId, parent_id: ChannelId) {
     let parent_in_clan = ChannelList::global(cx)
         .read(cx)
         .channel_in_clan(clan_id, parent_id);
