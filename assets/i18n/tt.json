@@ -1805,6 +1805,7 @@
   "common.addMembers": "Әгъзалар өстәгез",
   "common.addRole": "Роль өстәргә",
   "common.anonymous": "Аноним",
+  "common.anonymousDisabledByClan": "Anonymous mode is turned off for this clan.",
   "common.appDirectory.categories.all": "Барысы",
   "common.appDirectory.categories.entertainment": "Күңел ачу",
   "common.appDirectory.categories.games": "Уеннар",

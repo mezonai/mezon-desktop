@@ -39,6 +39,7 @@ use crate::channel::{
     ChannelEvent, ChannelList, ChannelType, STREAM_MODE_THREAD, joins_through_clan_stream,
 };
 use crate::channel_members::ChannelMembersStore;
+use crate::clan::ClanList;
 use crate::clan_members::ClanMembersStore;
 use crate::direct::{DirectChannel, DirectKind, DirectMessageStore};
 use crate::group_members::GroupMembersStore;
@@ -671,6 +672,7 @@ pub struct MessagesStore {
     counted_topic_reply_order: std::collections::VecDeque<(i64, MessageId)>,
     api: Arc<AppApi>,
     _channel_sub: Subscription,
+    _clan_sub: Option<Subscription>,
     _conn_watch: Task<()>,
     _cdn_access_sub: Option<Subscription>,
     pending_last_seen: HashMap<ChannelId, PendingLastSeen>,
@@ -1178,6 +1180,11 @@ impl MessagesStore {
         });
 
         let conn_watch = Self::spawn_connection_watch(api.clone(), cx);
+        let clan_sub = ClanList::try_global(cx).map(|clans| {
+            cx.observe(&clans, |this, _, cx| {
+                this.sync_anonymous_mode(cx);
+            })
+        });
         let cdn_access_sub = crate::CdnAccess::try_global(cx)
             .map(|access| cx.observe(&access, |this, _, cx| this.refresh_private_source_media(cx)));
 
@@ -1219,6 +1226,7 @@ impl MessagesStore {
             counted_topic_reply_order: std::collections::VecDeque::new(),
             api,
             _channel_sub: channel_sub,
+            _clan_sub: clan_sub,
             _conn_watch: conn_watch,
             _cdn_access_sub: cdn_access_sub,
             pending_last_seen: HashMap::new(),
@@ -2658,15 +2666,46 @@ impl MessagesStore {
     }
 
     pub(crate) fn sync_anonymous_mode(&mut self, cx: &mut Context<Self>) {
+        if let Some(clans) = ClanList::try_global(cx) {
+            let clans = clans.read(cx);
+            self.anonymous_clans.retain(|id| {
+                !clans
+                    .clan_by_id(*id)
+                    .is_some_and(|clan| clan.prevent_anonymous)
+            });
+            if self.active_clan_id.is_some_and(|id| {
+                clans
+                    .clan_by_id(id)
+                    .is_some_and(|clan| clan.prevent_anonymous)
+            }) {
+                self.topic_anonymous_mode = false;
+            }
+        }
         let next = (self.is_anonymous_mode(), self.topic_anonymous_mode());
         if self.last_anonymous_mode == next {
             return;
         }
         self.last_anonymous_mode = next;
         cx.emit(MessagesEvent::AnonymousModeChanged);
+        cx.notify();
+    }
+
+    fn anonymous_prevented(&self, cx: &App) -> bool {
+        ClanList::try_global(cx).is_some_and(|clans| {
+            self.active_clan_id.is_some_and(|id| {
+                clans
+                    .read(cx)
+                    .clan_by_id(id)
+                    .is_some_and(|clan| clan.prevent_anonymous)
+            })
+        })
     }
 
     pub fn toggle_anonymous_mode(&mut self, in_topic: bool, cx: &mut Context<Self>) {
+        if self.anonymous_prevented(cx) {
+            self.sync_anonymous_mode(cx);
+            return;
+        }
         if in_topic && self.active_topic_id.is_some() {
             self.topic_anonymous_mode = !self.topic_anonymous_mode;
             self.sync_anonymous_mode(cx);
@@ -5883,6 +5922,8 @@ impl MessagesStore {
         message_code: i32,
         cx: &mut Context<Self>,
     ) {
+        self.sync_anonymous_mode(cx);
+        let anonymous = anonymous && !self.anonymous_prevented(cx);
         let Some(channel_id) = self.active_channel_id else {
             return;
         };
@@ -6408,6 +6449,8 @@ impl MessagesStore {
         reply_override: Option<ReplyDraft>,
         cx: &mut Context<Self>,
     ) {
+        self.sync_anonymous_mode(cx);
+        let anonymous = anonymous && !self.anonymous_prevented(cx);
         if url.is_empty() {
             return;
         }
@@ -17451,6 +17494,94 @@ mod tests {
         ChannelList::init(api.clone(), cx);
         crate::account::AccountStore::init(api.clone(), cx);
         MessagesStore::init(api, cx)
+    }
+
+    fn set_anonymous_policy(prevent: bool, cx: &mut App) {
+        ClanList::global(cx).update(cx, |clans, cx| {
+            clans.update_clans(
+                vec![crate::clan::Clan::from(
+                    mezon_client::transport::ApiClanDesc {
+                        clan_id: 1,
+                        prevent_anonymous: prevent,
+                        ..Default::default()
+                    },
+                )],
+                cx,
+            );
+        });
+    }
+
+    #[gpui::test]
+    fn preventing_anonymous_clears_channel_and_topic_mode_realtime(cx: &mut gpui::TestAppContext) {
+        let store = cx.update(test_store);
+        cx.update(|cx| {
+            set_anonymous_policy(false, cx);
+            store.update(cx, |store, cx| {
+                anonymous_test_channel(store, cx);
+                store.set_active_topic(Some(77), cx);
+                store.toggle_anonymous_mode(false, cx);
+                store.toggle_anonymous_mode(true, cx);
+                store.anonymous_clans.insert(ClanId(2));
+                assert!(store.is_anonymous_mode());
+                assert!(store.topic_anonymous_mode());
+            });
+        });
+        cx.update(|cx| set_anonymous_policy(true, cx));
+        cx.update(|cx| {
+            store.update(cx, |store, cx| {
+                assert!(!store.is_anonymous_mode());
+                assert!(!store.topic_anonymous_mode());
+                assert_eq!(store.last_anonymous_mode, (false, false));
+                assert!(store.anonymous_clans.contains(&ClanId(2)));
+                store.toggle_anonymous_mode(false, cx);
+                store.toggle_anonymous_mode(true, cx);
+                assert!(!store.is_anonymous_mode());
+                assert!(!store.topic_anonymous_mode());
+            });
+            set_anonymous_policy(false, cx);
+            store.update(cx, |store, cx| {
+                assert!(!store.is_anonymous_mode());
+                store.toggle_anonymous_mode(false, cx);
+                assert!(store.is_anonymous_mode());
+            });
+        });
+    }
+
+    #[gpui::test]
+    fn prevented_anonymous_send_matches_the_normal_server_echo(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            let store = test_store(cx);
+            set_anonymous_policy(true, cx);
+            store.update(cx, |store, cx| {
+                let channel = anonymous_test_channel(store, cx);
+                store.anonymous_clans.insert(ClanId(1));
+                send_anonymous(store, "hello", cx);
+                let optimistic = last_row(store, channel);
+                assert!(!store.is_anonymous_mode());
+                assert!(!optimistic.anonymous_sender);
+                assert_eq!(optimistic.sender_id, "42");
+                store.apply_incoming_message(
+                    channel,
+                    Message::new(MessageId(100), "hello", "42", "Alice", unix_now_seconds()),
+                    cx,
+                );
+                let messages = &store.cache.get(&channel).unwrap().messages;
+                assert_eq!(messages.len(), 1);
+                assert_eq!(messages.last().unwrap().id, MessageId(100));
+                store.anonymous_clans.insert(ClanId(1));
+                store.send_sticker(
+                    "https://cdn.example/sticker.webp".into(),
+                    "sticker.webp".into(),
+                    "42".into(),
+                    "Alice".into(),
+                    cx,
+                );
+                let sticker = last_row(store, channel);
+                assert!(!sticker.anonymous_sender);
+                assert_eq!(sticker.sender_id, "42");
+                assert!(!store.is_anonymous_mode());
+            });
+        });
     }
 
     fn anonymous_test_channel(store: &mut MessagesStore, cx: &mut App) -> ChannelId {

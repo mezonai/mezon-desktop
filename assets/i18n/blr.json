@@ -1796,6 +1796,7 @@
   "common.addMembers": "Дадаць удзельнікаў",
   "common.addRole": "Дадаць ролю",
   "common.anonymous": "Ананімны",
+  "common.anonymousDisabledByClan": "Anonymous mode is turned off for this clan.",
   "common.appDirectory.categories.all": "Усе",
   "common.appDirectory.categories.entertainment": "Забавы",
   "common.appDirectory.categories.games": "Гульні",

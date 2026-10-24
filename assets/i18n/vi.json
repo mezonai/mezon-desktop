@@ -1798,6 +1798,7 @@
   "common.addMembers": "Thêm thành viên",
   "common.addRole": "Thêm vai trò",
   "common.anonymous": "Ẩn danh",
+  "common.anonymousDisabledByClan": "Clan này đã tắt chế độ ẩn danh.",
   "common.appDirectory.categories.all": "Tất cả",
   "common.appDirectory.categories.entertainment": "Giải trí",
   "common.appDirectory.categories.games": "Trò chơi",

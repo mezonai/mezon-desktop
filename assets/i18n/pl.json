@@ -1796,6 +1796,7 @@
   "common.addMembers": "Dodaj członków",
   "common.addRole": "Dodaj rolę",
   "common.anonymous": "Anonimowy",
+  "common.anonymousDisabledByClan": "Anonymous mode is turned off for this clan.",
   "common.appDirectory.categories.all": "Wszystkie",
   "common.appDirectory.categories.entertainment": "Rozrywka",
   "common.appDirectory.categories.games": "Gry",

@@ -1797,6 +1797,7 @@
   "common.addMembers": "멤버 추가",
   "common.addRole": "역할 추가",
   "common.anonymous": "익명",
+  "common.anonymousDisabledByClan": "Anonymous mode is turned off for this clan.",
   "common.appDirectory.categories.all": "모두",
   "common.appDirectory.categories.entertainment": "엔터테인먼트",
   "common.appDirectory.categories.games": "게임",

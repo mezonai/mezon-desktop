@@ -3,7 +3,7 @@ use gpui::{
     Task, Window, deferred, div, img, prelude::*, px,
 };
 use mezon_store::{
-    AppConfig, ChannelId, ChannelList, ChannelType, ClanId, ClanImageMimeType, ClanList,
+    AppConfig, ChannelId, ChannelList, ChannelType, ClanEvent, ClanId, ClanImageMimeType, ClanList,
     ClanOverviewDraft, ClanSaveError, ClanSystemMessage, MAX_CLAN_BANNER_BYTES,
     MAX_CLAN_LOGO_BYTES, Settings, is_valid_clan_name,
 };
@@ -99,6 +99,8 @@ pub struct OverviewSettingPage {
     banner_uploading: bool,
     system_loading: bool,
     _name_sub: Option<Subscription>,
+    _clan_sub: Subscription,
+    _clan_event_sub: Subscription,
     _channel_sub: Subscription,
     _fetch_task: Option<Task<()>>,
     _logo_upload_task: Option<Task<()>>,
@@ -129,7 +131,7 @@ impl OverviewSettingPage {
 
         let mut this = Self {
             clan_id,
-            clan_list,
+            clan_list: clan_list.clone(),
             channel_list: channel_list.clone(),
             settings,
             draft,
@@ -147,6 +149,21 @@ impl OverviewSettingPage {
             banner_uploading: false,
             system_loading: true,
             _name_sub: None,
+            _clan_event_sub: cx.subscribe(&clan_list, |this, _, event: &ClanEvent, cx| {
+                if matches!(event, ClanEvent::Updated(id) if *id == this.clan_id) {
+                    this.fetch_system_message(cx);
+                }
+            }),
+            _clan_sub: cx.observe(&clan_list, |this, _, cx| {
+                let Some(clan) = this.clan_list.read(cx).clan_by_id(this.clan_id) else {
+                    return;
+                };
+                let prevent_anonymous = clan.prevent_anonymous;
+                if sync_prevent_anonymous(&mut this.draft, &mut this.saved_draft, prevent_anonymous)
+                {
+                    cx.notify();
+                }
+            }),
             _channel_sub: cx.observe(&channel_list, |this, _, cx| {
                 this.rebuild_channel_options(cx);
             }),
@@ -281,7 +298,7 @@ impl OverviewSettingPage {
     }
 
     fn fetch_system_message(&mut self, cx: &mut Context<Self>) {
-        self.system_loading = true;
+        self.system_loading = self.system_message.is_none();
         let clan_id = self.clan_id;
         self._fetch_task = Some(cx.spawn(async move |this, cx| {
             let task = this
@@ -298,16 +315,20 @@ impl OverviewSettingPage {
                 this.system_loading = false;
                 match fetched {
                     Ok(msg) => {
-                        if msg.channel_id.get() != 0
-                            && let Some(index) = this
-                                .channel_options
-                                .iter()
-                                .position(|o| o.id == msg.channel_id)
-                        {
-                            this.selected_channel_index = Some(index);
+                        let welcome_channel = (msg.channel_id.get() != 0).then_some(msg.channel_id);
+                        if this.draft.welcome_channel_id == this.saved_draft.welcome_channel_id {
+                            this.draft.welcome_channel_id = welcome_channel;
                         }
-                        this.system_message = Some(msg.clone());
+                        this.saved_draft.welcome_channel_id = welcome_channel;
+                        if let (Some(current), Some(saved)) =
+                            (&mut this.system_message, &this.saved_system_message)
+                        {
+                            merge_system_message(current, saved, &msg);
+                        } else {
+                            this.system_message = Some(msg.clone());
+                        }
                         this.saved_system_message = Some(msg);
+                        this.rebuild_channel_options(cx);
                     }
                     Err(err) => {
                         tracing::error!("fetch system message failed: {err}");
@@ -1197,6 +1218,43 @@ impl Render for OverviewSettingPage {
 
 const NAME_TAKEN_KEY: &str = "clanOverviewSetting.menu.serverName.duplicateNameMessage";
 
+fn merge_system_message(
+    current: &mut ClanSystemMessage,
+    saved: &ClanSystemMessage,
+    incoming: &ClanSystemMessage,
+) {
+    macro_rules! sync_field {
+        ($($field:ident),+ $(,)?) => {
+            $(if current.$field == saved.$field {
+                current.$field = incoming.$field;
+            })+
+        };
+    }
+    sync_field!(
+        channel_id,
+        welcome_random,
+        welcome_sticker,
+        boost_message,
+        setup_tips,
+        hide_audit_log
+    );
+}
+
+fn sync_prevent_anonymous(
+    draft: &mut ClanOverviewDraft,
+    saved: &mut ClanOverviewDraft,
+    prevent_anonymous: bool,
+) -> bool {
+    if saved.prevent_anonymous == prevent_anonymous {
+        return false;
+    }
+    if draft.prevent_anonymous == saved.prevent_anonymous {
+        draft.prevent_anonymous = prevent_anonymous;
+    }
+    saved.prevent_anonymous = prevent_anonymous;
+    true
+}
+
 struct SaveOutcome {
     error: Option<&'static str>,
     clan_saved: bool,
@@ -1258,9 +1316,75 @@ pub fn render_clan_overview_save_bar(
 
 #[cfg(test)]
 mod save_outcome_tests {
-    use mezon_store::ClanSaveError;
+    use mezon_store::{ChannelId, ClanOverviewDraft, ClanSaveError, ClanSystemMessage};
 
-    use super::{NAME_TAKEN_KEY, save_outcome};
+    use super::{NAME_TAKEN_KEY, merge_system_message, save_outcome, sync_prevent_anonymous};
+
+    #[test]
+    fn realtime_system_toggles_merge_without_losing_local_edits() {
+        let saved = ClanSystemMessage {
+            channel_id: ChannelId(1),
+            welcome_random: false,
+            welcome_sticker: false,
+            boost_message: false,
+            setup_tips: false,
+            hide_audit_log: false,
+        };
+        let incoming = ClanSystemMessage {
+            welcome_random: true,
+            setup_tips: true,
+            hide_audit_log: true,
+            ..saved.clone()
+        };
+        let mut current = saved.clone();
+        merge_system_message(&mut current, &saved, &incoming);
+        assert_eq!(current, incoming);
+        merge_system_message(&mut current, &incoming, &saved);
+        assert_eq!(current, saved);
+
+        current.channel_id = ChannelId(2);
+        current.welcome_sticker = true;
+        merge_system_message(&mut current, &saved, &incoming);
+        assert_eq!(current.channel_id, ChannelId(2));
+        assert!(current.welcome_sticker);
+        assert!(current.welcome_random);
+        assert!(current.setup_tips);
+        assert!(current.hide_audit_log);
+    }
+
+    fn draft(prevent_anonymous: bool) -> ClanOverviewDraft {
+        ClanOverviewDraft {
+            clan_name: "Clan".into(),
+            logo: String::new(),
+            banner: String::new(),
+            welcome_channel_id: None,
+            prevent_anonymous,
+        }
+    }
+
+    #[test]
+    fn realtime_anonymous_changes_update_the_toggle_in_both_directions() {
+        let mut saved = draft(false);
+        let mut current = saved.clone();
+        current.clan_name = "Unsaved name".into();
+        for value in [true, false] {
+            assert!(sync_prevent_anonymous(&mut current, &mut saved, value));
+            assert_eq!(current.prevent_anonymous, value);
+            assert_eq!(saved.prevent_anonymous, value);
+            assert_eq!(current.clan_name, "Unsaved name");
+        }
+    }
+
+    #[test]
+    fn unrelated_store_updates_preserve_an_unsaved_toggle() {
+        let mut saved = draft(false);
+        let mut current = draft(true);
+        assert!(!sync_prevent_anonymous(&mut current, &mut saved, false));
+        assert!(current.prevent_anonymous);
+        assert!(!saved.prevent_anonymous);
+        assert!(sync_prevent_anonymous(&mut current, &mut saved, true));
+        assert_eq!(current, saved);
+    }
 
     #[test]
     fn a_taken_name_saves_nothing_and_says_so() {

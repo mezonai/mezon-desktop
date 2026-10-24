@@ -1797,6 +1797,7 @@
   "common.addMembers": "メンバーを追加",
   "common.addRole": "ロールを追加",
   "common.anonymous": "匿名",
+  "common.anonymousDisabledByClan": "Anonymous mode is turned off for this clan.",
   "common.appDirectory.categories.all": "すべて",
   "common.appDirectory.categories.entertainment": "エンターテインメント",
   "common.appDirectory.categories.games": "ゲーム",

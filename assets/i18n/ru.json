@@ -1805,6 +1805,7 @@
   "common.addMembers": "Добавить участников",
   "common.addRole": "Добавить роль",
   "common.anonymous": "Анонимно",
+  "common.anonymousDisabledByClan": "Anonymous mode is turned off for this clan.",
   "common.appDirectory.anonymous": "Анонимно",
   "common.appDirectory.call.connecting": "Подключение...",
   "common.appDirectory.call.ringing": "Идёт гудок...",

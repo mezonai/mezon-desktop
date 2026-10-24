@@ -1797,6 +1797,7 @@
   "common.addMembers": "Lägg till medlemmar",
   "common.addRole": "Lägg till roll",
   "common.anonymous": "Anonym",
+  "common.anonymousDisabledByClan": "Anonymous mode is turned off for this clan.",
   "common.appDirectory.categories.all": "Alla",
   "common.appDirectory.categories.entertainment": "Underhållning",
   "common.appDirectory.categories.games": "Spel",
