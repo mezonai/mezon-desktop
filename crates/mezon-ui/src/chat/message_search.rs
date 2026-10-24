@@ -25,8 +25,9 @@ use crate::chat::layout::ChatLayout;
 use crate::chat::member_list::{MentionMemberRaw, mention_member_pool};
 use crate::chat::mention_input::filter_members_for_search;
 use crate::chat::message::{
-    RichRunPalette, code_block_copy_overlay, format_message_time, open_message_link,
-    render_ogp_preview, render_poll_card_readonly, rich_run_highlight_with_link_underline,
+    RichRunPalette, code_block_copy_overlay, format_message_time, inline_code_chip,
+    open_message_link, render_ogp_preview, render_poll_card_readonly,
+    rich_run_highlight_with_link_underline,
 };
 use crate::chat::role_style::message_sender_color;
 use crate::components::primitives::{Icon, IconName, Input, InputState, Sizable, Size, Spinner};
@@ -1048,15 +1049,7 @@ fn render_search_spans(
                 );
             }
             MessageSpan::Code(text) => {
-                row = row.child(
-                    div()
-                        .max_w_full()
-                        .min_w_0()
-                        .px_1()
-                        .rounded_sm()
-                        .bg(code_bg)
-                        .child(text.to_string()),
-                );
+                row = row.child(inline_code_chip(theme).child(text.to_string()));
             }
             MessageSpan::Link { text, url, .. } => {
                 let resolved = if url.is_empty() {

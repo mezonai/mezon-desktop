@@ -1870,10 +1870,11 @@ fn render_pin_spans(
                     div()
                         .text_sm()
                         .line_height(rems(1.25))
-                        .px_1()
-                        .rounded_sm()
-                        .bg(code_bg)
-                        .text_color(body_color)
+                        .px(px(10.))
+                        .py(px(2.))
+                        .rounded_lg()
+                        .bg(theme.tokens.bg_active_member_channel)
+                        .text_color(theme.tokens.text_secondary)
                         .child(styled),
                 );
                 base = end;
