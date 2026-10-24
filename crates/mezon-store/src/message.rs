@@ -79,10 +79,10 @@ pub fn url_extension(url: &str) -> Option<String> {
 }
 
 pub fn is_image_type(filetype: &str, url: &str) -> bool {
-    let ext = url_extension(url);
-    if is_svg_type(filetype) || ext.as_deref() == Some("svg") {
+    if is_svg_type(filetype) {
         return false;
     }
+    let ext = url_extension(url);
     let mime_image = filetype.starts_with("image") || filetype == STICKER_FILETYPE;
     mime_image
         || matches!(
@@ -3425,10 +3425,10 @@ mod tests {
     }
 
     #[test]
-    fn svg_is_a_file_row_not_an_image() {
+    fn svg_follows_web_category_image_shows_raw_mime_stays_a_file() {
+        assert!(attachment("image", "https://cdn.example/logo.svg").is_image());
         assert!(!attachment("image/svg+xml", "https://cdn.example/logo.svg").is_image());
         assert!(!attachment("", "https://cdn.example/logo.svg").is_image());
-        assert!(!attachment("image", "https://cdn.example/logo.svg").is_image());
     }
 
     #[test]
