@@ -311,12 +311,9 @@ impl ClanSidebar {
             .filter(|logo| !logo.is_empty());
         let default_logo =
             crate::util::imgproxy::cdn_asset_url(cx, "landing-page-mezon/logodefault.webp");
-        self.home_logo = SharedString::from(crate::util::imgproxy::proxied(
+        self.home_logo = SharedString::from(crate::util::imgproxy::clan_logo_url(
             cx,
             custom_logo.as_deref().unwrap_or(&default_logo),
-            100,
-            100,
-            "fill-down",
         ));
     }
 
@@ -333,15 +330,7 @@ impl ClanSidebar {
                     .avatar_url
                     .as_deref()
                     .filter(|url| !url.is_empty())
-                    .map(|url| {
-                        SharedString::from(crate::util::imgproxy::proxied(
-                            cx,
-                            url,
-                            100,
-                            100,
-                            "fill-down",
-                        ))
-                    });
+                    .map(|url| SharedString::from(crate::util::imgproxy::clan_logo_url(cx, url)));
                 ClanRow {
                     id,
                     id_num: clan.id,
