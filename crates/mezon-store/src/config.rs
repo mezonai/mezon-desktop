@@ -469,6 +469,18 @@ impl AppConfig {
         resize_type: &str,
         enlarge: bool,
     ) -> String {
+        let enlarge_flag = u8::from(enlarge);
+        self.imgproxy_with(
+            source_image_url,
+            &format!("rs:{resize_type}:{width}:{height}:{enlarge_flag}"),
+        )
+    }
+
+    pub fn clan_logo_proxy(&self, source_image_url: &str, size: u32) -> String {
+        self.imgproxy_with(source_image_url, &format!("rs:fill-down:{size}:{size}:0:1"))
+    }
+
+    fn imgproxy_with(&self, source_image_url: &str, processing_options: &str) -> String {
         if source_image_url.is_empty() {
             return String::new();
         }
@@ -476,10 +488,7 @@ impl AppConfig {
         if !self.is_own_media_origin(source_image_url.as_ref()) {
             return source_image_url.to_string();
         }
-        let enlarge_flag = u8::from(enlarge);
-        let processing_options =
-            format!("rs:{resize_type}:{width}:{height}:{enlarge_flag}/mb:2097152");
-        let path = format!("/{}/plain/{}@webp", processing_options, source_image_url);
+        let path = format!("/{processing_options}/mb:2097152/plain/{source_image_url}@webp");
         let base = self.imgproxy_base_url.trim_end_matches('/');
         format!("{}/{}{}", base, self.imgproxy_key, path)
     }
@@ -1062,6 +1071,33 @@ mod tests {
         let cfg = AppConfig::dev_defaults();
         let src = "https://example.com/avatar.png";
         assert_eq!(cfg.imgproxy_url(src, 100, 100, "fit"), src);
+    }
+
+    #[test]
+    fn clan_logo_proxy_extends_instead_of_enlarging() {
+        let cfg = AppConfig {
+            imgproxy_base_url: "https://imgproxy.example".into(),
+            imgproxy_key: "sig".into(),
+            ..AppConfig::dev_defaults()
+        };
+        for src in [
+            format!("{}/clans/logo.png", cfg.base_img_url),
+            format!("{}/avatars/avatar_0746.png", cfg.profile_img_url),
+        ] {
+            let out = cfg.clan_logo_proxy(&src, 100);
+            assert!(out.starts_with(
+                "https://imgproxy.example/sig/rs:fill-down:100:100:0:1/mb:2097152/plain/"
+            ));
+            assert!(out.ends_with("@webp"));
+            assert!(out.contains(&src));
+        }
+    }
+
+    #[test]
+    fn clan_logo_proxy_skips_external_urls() {
+        let cfg = AppConfig::dev_defaults();
+        let src = "https://example.com/logo.png";
+        assert_eq!(cfg.clan_logo_proxy(src, 100), src);
     }
 
     #[test]

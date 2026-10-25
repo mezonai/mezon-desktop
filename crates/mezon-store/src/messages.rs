@@ -148,6 +148,7 @@ pub enum MessagesEvent {
     /// A send failed with no row to mark (the channel's first page had not landed,
     /// so there is no optimistic row) — the UI has to surface it as a toast.
     SendFailedWithoutRow,
+    SendPermissionDenied,
     OgpRemoveFailed,
     /// The whole viewport was replaced (channel switch / fetch). `count` is the
     /// new row count.
@@ -200,11 +201,11 @@ pub enum MessagesEvent {
     /// reported as if the whole forward failed.
     ForwardFinished {
         sent: usize,
-        failed: Vec<SharedString>,
+        failed: Vec<ForwardFailure>,
     },
     ShareContactFinished {
         sent: usize,
-        failed: Vec<SharedString>,
+        failed: Vec<ForwardFailure>,
     },
     AnonymousModeChanged,
 }
@@ -723,6 +724,20 @@ pub enum ForwardStart {
     PayloadTooLarge,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ForwardFailure {
+    pub label: SharedString,
+    pub permission_denied: bool,
+}
+
+fn dest_send_failed(label: SharedString, err: &anyhow::Error) -> ForwardFailure {
+    ForwardFailure {
+        label,
+        permission_denied: api_status_from_error(err)
+            .is_some_and(ApiStatusError::is_permission_denied),
+    }
+}
+
 /// A forward destination. A friend has no channel yet — the DM is created on
 /// send (React `createDirectMessageWithUser`).
 #[derive(Debug, Clone)]
@@ -983,7 +998,6 @@ async fn send_forward(
     note: Option<&str>,
 ) -> anyhow::Result<()> {
     let same_channel = dest.channel_id == source_channel_id.get();
-    let mut failures = 0usize;
     for source in sources {
         let mentions = if same_channel {
             source.mentions.clone()
@@ -1010,12 +1024,10 @@ async fn send_forward(
                 "forwarding one message to channel {} failed: {e}",
                 dest.channel_id
             );
-            failures += 1;
+            return Err(e);
         }
     }
-    let all_failed = failures == sources.len();
     if let Some(note) = note
-        && !all_failed
         && let Err(e) = api
             .send_channel_message(
                 dest.clan_id,
@@ -1031,13 +1043,7 @@ async fn send_forward(
             .await
     {
         tracing::error!("forward note to channel {} failed: {e}", dest.channel_id);
-        failures += 1;
-    }
-    if failures > 0 {
-        anyhow::bail!(
-            "{failures} of {} forwarded items failed",
-            sources.len() + usize::from(note.is_some())
-        );
+        return Err(e);
     }
     Ok(())
 }
@@ -4513,7 +4519,7 @@ impl MessagesStore {
         start_target_clan_joins(&targets, cx);
         self.forward_in_flight = true;
         let task = cx.spawn(async move |this, cx| {
-            let mut failed: Vec<SharedString> = Vec::new();
+            let mut failed: Vec<ForwardFailure> = Vec::new();
             for (index, target) in targets.iter().enumerate() {
                 match resolve_forward_target(target, cx).await {
                     Ok(dest) => {
@@ -4522,12 +4528,12 @@ impl MessagesStore {
                                 .await
                         {
                             tracing::error!("forward to channel {} failed: {e}", dest.channel_id);
-                            failed.push(target.label());
+                            failed.push(dest_send_failed(target.label(), &e));
                         }
                     }
                     Err(e) => {
                         tracing::error!("forward target could not be resolved: {e}");
-                        failed.push(target.label());
+                        failed.push(dest_send_failed(target.label(), &e));
                     }
                 }
                 let _ = this.update(cx, |_, cx| {
@@ -4870,12 +4876,12 @@ impl MessagesStore {
                             send_share_contact_to_target(&api, dest, &content_json).await
                         {
                             tracing::error!("share contact to {} failed: {e}", target.label());
-                            failed.push(target.label());
+                            failed.push(dest_send_failed(target.label(), &e));
                         }
                     }
                     Err(e) => {
                         tracing::error!("share contact target could not be resolved: {e}");
-                        failed.push(target.label());
+                        failed.push(dest_send_failed(target.label(), &e));
                     }
                 }
             }
@@ -6183,7 +6189,7 @@ impl MessagesStore {
                     Err(e) => {
                         tracing::error!("send_presigned_message failed: {e}");
                         let _ = this.update(cx, |this, cx| {
-                            this.mark_temp_failed(channel_id, temp_id, cx);
+                            this.reject_send(channel_id, temp_id, &e, cx);
                         });
                         return;
                     }
@@ -6292,7 +6298,7 @@ impl MessagesStore {
                     Err(e) => {
                         tracing::error!("send_channel_message failed: {e}");
                         let _ = this.update(cx, |this, cx| {
-                            this.mark_temp_failed(channel_id, temp_id, cx);
+                            this.reject_send(channel_id, temp_id, &e, cx);
                         });
                     }
                 }
@@ -6609,7 +6615,7 @@ impl MessagesStore {
                 Err(e) => {
                     tracing::error!("send url attachment failed: {e}");
                     let _ = this.update(cx, |this, cx| {
-                        this.mark_temp_failed(channel_id, temp_id, cx);
+                        this.reject_send(channel_id, temp_id, &e, cx);
                     });
                 }
             }
@@ -8221,6 +8227,22 @@ impl MessagesStore {
         }
     }
 
+    fn reject_send(
+        &mut self,
+        channel_id: ChannelId,
+        temp_id: MessageId,
+        err: &anyhow::Error,
+        cx: &mut Context<Self>,
+    ) {
+        if api_status_from_error(err).is_some_and(ApiStatusError::is_permission_denied) {
+            self.pending_send_payloads.remove(&temp_id);
+            self.remove_local_row(channel_id, temp_id, cx);
+            cx.emit(MessagesEvent::SendPermissionDenied);
+            return;
+        }
+        self.mark_temp_failed(channel_id, temp_id, cx);
+    }
+
     fn mark_temp_failed(
         &mut self,
         channel_id: ChannelId,
@@ -9476,7 +9498,7 @@ async fn send_anonymous_attachment_message(
         Err(e) => {
             tracing::error!("anonymous send_presigned_message failed: {e}");
             let _ = this.update(cx, |this, cx| {
-                this.mark_temp_failed(channel_id, temp_id, cx);
+                this.reject_send(channel_id, temp_id, &e, cx);
             });
             return;
         }
@@ -17309,6 +17331,59 @@ mod tests {
             });
         });
         assert_eq!(failures.get(), 1);
+    }
+
+    #[gpui::test]
+    fn a_permission_denied_send_drops_the_row_and_reports_it(cx: &mut gpui::TestAppContext) {
+        let denied = std::rc::Rc::new(std::cell::Cell::new(0));
+        let sink = denied.clone();
+        cx.update(|cx| {
+            let store = test_store(cx);
+            let channel = ChannelId(10);
+            let temp_id = MessageId::next_optimistic();
+            cx.subscribe(&store, move |_, event: &MessagesEvent, _| {
+                if matches!(event, MessagesEvent::SendPermissionDenied) {
+                    sink.set(sink.get() + 1);
+                }
+            })
+            .detach();
+            store.update(cx, |store, cx| {
+                store.set_channel(
+                    channel,
+                    vec![
+                        Message::new(MessageId(1), "hi", "42", "Me", 100),
+                        Message::new(temp_id, "blocked", "42", "Me", 110),
+                    ],
+                );
+                store.active_channel_id = Some(channel);
+                store.reject_send(
+                    channel,
+                    temp_id,
+                    &anyhow::Error::new(ApiStatusError {
+                        code: ApiStatusError::PERMISSION_DENIED,
+                    }),
+                    cx,
+                );
+                let rows = store.messages_in_channel(channel);
+                assert_eq!(rows.len(), 1);
+                assert_eq!(rows[0].id, MessageId(1));
+            });
+        });
+        assert_eq!(denied.get(), 1);
+    }
+
+    #[test]
+    fn a_permission_denied_forward_failure_is_flagged() {
+        let denied = dest_send_failed(
+            "chan".into(),
+            &anyhow::Error::new(ApiStatusError {
+                code: ApiStatusError::PERMISSION_DENIED,
+            }),
+        );
+        assert!(denied.permission_denied);
+        assert_eq!(denied.label.as_ref(), "chan");
+        let other = dest_send_failed("chan".into(), &anyhow::anyhow!("network"));
+        assert!(!other.permission_denied);
     }
 
     #[gpui::test]

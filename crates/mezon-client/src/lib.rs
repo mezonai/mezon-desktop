@@ -80,13 +80,13 @@ pub use transport::unknown_api_error;
 pub use transport::{
     ApiCanvas, ApiCanvasDetail, ApiCategoryDesc, ApiChannelApp, ApiChannelAttachment,
     ApiChannelDesc, ApiFriend, ApiPinMessage, ApiStatusError, ApiThreadDesc, ApiVoiceChannelUser,
-    CANVAS_LIST_LIMIT, CANVAS_STATUS_CREATED, CANVAS_STATUS_UPDATE, FACEBOOK_LINK_MARKDOWN_KIND,
-    HttpFallbackSession, LINK_MARKDOWN_KIND, MENTION_SEARCH_MAX_CHARS, MENTION_SEARCH_MIN_CHARS,
-    RealtimeControlError, RegistrationPasswordError, SessionRefreshRejected,
-    TIKTOK_LINK_MARKDOWN_KIND, UpdateChannelDescParams, YOUTUBE_LINK_MARKDOWN_KIND,
-    api_status_from_error, is_channel_limit_api_error, is_link_markdown_kind, is_unknown_api_error,
-    link_markdown_kind, mention_search_text_accepted, parse_search_attachment_field,
-    parse_search_mentions_field,
+    CANVAS_LIST_LIMIT, CANVAS_STATUS_CREATED, CANVAS_STATUS_UPDATE, EveryoneExcludeType,
+    FACEBOOK_LINK_MARKDOWN_KIND, HttpFallbackSession, LINK_MARKDOWN_KIND, MENTION_SEARCH_MAX_CHARS,
+    MENTION_SEARCH_MIN_CHARS, OverrideEveryoneChannel, RealtimeControlError,
+    RegistrationPasswordError, SessionRefreshRejected, TIKTOK_LINK_MARKDOWN_KIND,
+    UpdateChannelDescParams, YOUTUBE_LINK_MARKDOWN_KIND, api_status_from_error,
+    is_channel_limit_api_error, is_link_markdown_kind, is_unknown_api_error, link_markdown_kind,
+    mention_search_text_accepted, parse_search_attachment_field, parse_search_mentions_field,
 };
 pub use transport_adapter::TransportAdapter;
 pub use transport_runtime::TransportClient;

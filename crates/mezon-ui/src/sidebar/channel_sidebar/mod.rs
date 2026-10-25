@@ -25,6 +25,7 @@ use crate::components::compositions::channel_row_element::{
     ChannelRowBadge, ChannelRowElement, ChannelRowTrailingAction, ThreadConnector,
 };
 use crate::components::primitives::{Avatar, Icon, IconName, Sizable, Size, context_menu_at};
+use crate::components::primitives::{MentionLabels, mention_float_button};
 use crate::theme::{ActiveTheme, Theme};
 
 /// How close to an edge the pointer has to come before the list starts moving under it,
@@ -138,6 +139,7 @@ pub struct ChannelSidebar {
     skeleton_clan: Option<ClanId>,
     _skeleton_timer: Option<Task<()>>,
     last_locale: String,
+    mention_labels: MentionLabels,
     last_route_channel: Option<ChannelId>,
     pending_route_channel: Option<ChannelId>,
     route_reveal_queued: bool,
@@ -305,10 +307,10 @@ impl ChannelSidebar {
         let settings_observe = cx.observe(&settings, |this, settings, cx| {
             let locale = settings.read(cx).language.clone();
             if locale != this.last_locale {
+                this.mention_labels = MentionLabels::new(&locale);
                 this.last_locale = locale;
-                if this.rebuild_items(cx) {
-                    cx.notify();
-                }
+                this.rebuild_items(cx);
+                cx.notify();
             } else {
                 cx.notify();
             }
@@ -414,6 +416,7 @@ impl ChannelSidebar {
             skeleton_phase: skeleton::Phase::default(),
             skeleton_clan: None,
             _skeleton_timer: None,
+            mention_labels: MentionLabels::new(&initial_locale),
             last_locale: initial_locale,
             last_route_channel: initial_route_channel,
             pending_route_channel: None,
@@ -1400,7 +1403,7 @@ impl Render for ChannelSidebar {
 
         let mention_button = self.mention_target().map(|_| {
             let sidebar = sidebar.clone();
-            let label = mezon_i18n::t(&locale, "common.newMention").to_uppercase();
+
             div()
                 .absolute()
                 .top(px(8.))
@@ -1409,21 +1412,7 @@ impl Render for ChannelSidebar {
                 .flex()
                 .justify_center()
                 .child(
-                    div()
-                        .id("mention-float-button")
-                        .occlude()
-                        .px_2()
-                        .py_1()
-                        .rounded_full()
-                        .bg(gpui::rgb(0xda_37_3c))
-                        .text_color(gpui::white())
-                        .text_sm()
-                        .font_weight(gpui::FontWeight::SEMIBOLD)
-                        .shadow_lg()
-                        .cursor_pointer()
-                        .opacity(0.9)
-                        .hover(|s| s.opacity(0.95))
-                        .child(label)
+                    mention_float_button("mention-float-button", &self.mention_labels, false, cx)
                         .on_click(move |_, _window, cx| {
                             if let Some(view) = sidebar.upgrade() {
                                 view.update(cx, |this, cx| this.scroll_to_first_mention(cx));

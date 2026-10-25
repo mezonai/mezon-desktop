@@ -50,8 +50,25 @@ fn test_unicode_char_limit_not_bytes() {
 #[test]
 fn test_low_confidence_intent_yields_no_model_quick_replies() {
     let client = MezonGrammarClient::new();
-    let replies = client.suggest_quick_replies_with_model("asdf qwerty zxcv", None, 4);
+    let replies = client.suggest_quick_replies_with_model("123456", None, 4);
     assert!(replies.is_empty());
+}
+
+#[test]
+fn test_junior_workplace_proposal_senior_response() {
+    let client = MezonGrammarClient::new();
+    let msg = "Chỗ assign manually, em thấy bên zoom đang như thế này ạ, nếu room nhiều người thì UI như này có vẻ gọn ạ.";
+    let replies = client.suggest_quick_replies_with_model(msg, None, 4);
+    assert!(!replies.is_empty());
+    assert!(!replies.iter().any(|r| r.starts_with("Dạ")));
+    assert!(replies.iter().any(|r| r.contains("Anh thấy") || r.contains("anh")));
+    assert!(replies.iter().any(|r| r.contains("em")));
+
+    let replies_chi = client.suggest_quick_replies_with_model(msg, Some("chị"), 4);
+    assert!(!replies_chi.is_empty());
+    assert!(!replies_chi.iter().any(|r| r.starts_with("Dạ")));
+    assert!(replies_chi.iter().any(|r| r.contains("Chị thấy") || r.contains("chị")));
+    assert!(replies_chi.iter().any(|r| r.contains("em")));
 }
 
 #[test]

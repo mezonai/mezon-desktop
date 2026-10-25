@@ -84,7 +84,7 @@ fn neural_accent_restores_minh_sua_roi_nhe() {
     );
     assert_eq!(
         apply_neural_accent_onnx("minh sua roi nhé"),
-        "minh sua roi nhé"
+        "mình sửa rồi nhé"
     );
     assert_eq!(apply_neural_accent_onnx("em sẽ làm ngay"), "em sẽ làm ngay");
     let client = MezonGrammarClient::new();
@@ -97,4 +97,19 @@ fn neural_accent_restores_minh_sua_roi_nhe() {
         "Mình sửa rồi nhé"
     );
     assert!(!apply_neural_accent_onnx("Bob ban oi").contains("Bọn"));
+}
+
+#[test]
+fn test_neural_model_called_after_pipeline_for_final_spelling_result() {
+    let client = MezonGrammarClient::new();
+    // Partially accented or unaccented phrase where neural model completes diacritics
+    let res = client.correct("anh em gio trao doi o day nhe");
+    assert!(
+        res.edits
+            .iter()
+            .any(|e| e.reason.contains("Neural Accent Model")),
+        "Edits: {:?}",
+        res.edits
+    );
+    assert!(res.corrected.contains("trao đổi") || res.corrected.contains("ở đây"));
 }

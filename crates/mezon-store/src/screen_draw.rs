@@ -6,6 +6,7 @@ use serde::{Deserialize, Serialize};
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum DrawTool {
     Pointer,
+    Select,
     Pen,
     Highlighter,
     Laser,
@@ -153,6 +154,25 @@ pub struct AnnotationDrag {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Marquee {
+    pub start: NormalizedPoint,
+    pub end: NormalizedPoint,
+    pub canvas: (f32, f32),
+}
+
+impl Marquee {
+    pub fn frame(&self) -> HitBox {
+        let (width, height) = self.canvas;
+        HitBox {
+            left: self.start.x.min(self.end.x) * width,
+            top: self.start.y.min(self.end.y) * height,
+            right: self.start.x.max(self.end.x) * width,
+            bottom: self.start.y.max(self.end.y) * height,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub struct TextResize {
     pub id: u64,
     pub origin: (f32, f32),
@@ -217,6 +237,13 @@ impl HitBox {
 
     pub fn handle_contains(&self, x: f32, y: f32) -> bool {
         (x - self.right).abs() <= TEXT_HANDLE_SIZE && (y - self.bottom).abs() <= TEXT_HANDLE_SIZE
+    }
+
+    pub fn intersects(&self, other: &Self) -> bool {
+        self.left <= other.right
+            && other.left <= self.right
+            && self.top <= other.bottom
+            && other.top <= self.bottom
     }
 }
 
@@ -379,6 +406,8 @@ pub struct ScreenDrawState {
     pub drag: Option<AnnotationDrag>,
     pub text_resize: Option<TextResize>,
     pub selected: Option<u64>,
+    pub selection: Vec<u64>,
+    pub marquee: Option<Marquee>,
     pub vanishing: Vec<VanishingStroke>,
     pub editing_text_id: Option<u64>,
     pub editing_text_content: String,
@@ -401,6 +430,8 @@ impl Default for ScreenDrawState {
             drag: None,
             text_resize: None,
             selected: None,
+            selection: Vec::new(),
+            marquee: None,
             vanishing: Vec::new(),
             editing_text_id: None,
             editing_text_content: String::new(),
@@ -427,6 +458,8 @@ impl ScreenDrawState {
             self.drag = None;
             self.text_resize = None;
             self.selected = None;
+            self.selection.clear();
+            self.marquee = None;
             self.editing_text_id = None;
         }
     }
@@ -440,8 +473,12 @@ impl ScreenDrawState {
         self.current_shape = None;
         self.drag = None;
         self.text_resize = None;
+        self.marquee = None;
         if !matches!(tool, DrawTool::Text | DrawTool::Pointer) {
             self.selected = None;
+        }
+        if tool != DrawTool::Select {
+            self.selection.clear();
         }
     }
 
@@ -472,6 +509,7 @@ impl ScreenDrawState {
             || self.current_shape.is_some()
             || self.drag.is_some()
             || self.text_resize.is_some()
+            || self.marquee.is_some()
     }
 
     pub fn pointer_down(
@@ -491,6 +529,31 @@ impl ScreenDrawState {
                     self.start_drag(existing, point);
                 } else {
                     self.selected = None;
+                }
+                true
+            }
+            DrawTool::Select => {
+                match self.annotation_at(&point, canvas, measure) {
+                    Some(id) => {
+                        if !self.selection.contains(&id) {
+                            self.selection = vec![id];
+                        }
+                        self.drag = Some(AnnotationDrag {
+                            id,
+                            start: point,
+                            last: point,
+                            moved: false,
+                            edit_on_click: false,
+                        });
+                    }
+                    None => {
+                        self.selection.clear();
+                        self.marquee = Some(Marquee {
+                            start: point,
+                            end: point,
+                            canvas,
+                        });
+                    }
                 }
                 true
             }
@@ -528,12 +591,20 @@ impl ScreenDrawState {
         }
     }
 
-    pub fn pointer_move(&mut self, point: NormalizedPoint, pressed: bool) -> bool {
+    pub fn pointer_move(
+        &mut self,
+        point: NormalizedPoint,
+        pressed: bool,
+        measure: &dyn Fn(&TextAnnotation) -> f32,
+    ) -> bool {
         if let Some(resize) = self.text_resize {
             return self.resize_text(resize, point);
         }
         if let Some(drag) = self.drag {
             return self.drag_annotation(drag, point);
+        }
+        if let Some(marquee) = self.marquee {
+            return self.update_marquee(marquee, point, measure);
         }
         match self.active_tool {
             DrawTool::Pen | DrawTool::Highlighter | DrawTool::Laser
@@ -559,6 +630,8 @@ impl ScreenDrawState {
             if !drag.moved && drag.edit_on_click && self.active_tool == DrawTool::Text {
                 self.start_editing_text(drag.id);
             }
+            true
+        } else if self.marquee.take().is_some() {
             true
         } else if self.current_stroke.is_some() {
             self.finish_stroke();
@@ -748,17 +821,54 @@ impl ScreenDrawState {
             p.x += dx;
             p.y += dy;
         };
-        match self.annotations.iter_mut().find(|ann| ann.id() == drag.id) {
-            Some(DrawAnnotation::Text(t)) => {
-                t.position = NormalizedPoint::new(t.position.x + dx, t.position.y + dy);
+        let moving = if self.selection.contains(&drag.id) {
+            self.selection.clone()
+        } else {
+            vec![drag.id]
+        };
+        for ann in self
+            .annotations
+            .iter_mut()
+            .filter(|ann| moving.contains(&ann.id()))
+        {
+            match ann {
+                DrawAnnotation::Text(t) => {
+                    t.position = NormalizedPoint::new(t.position.x + dx, t.position.y + dy);
+                }
+                DrawAnnotation::Stroke(s) => s.points.iter_mut().for_each(shift),
+                DrawAnnotation::Shape(s) => {
+                    shift(&mut s.start);
+                    shift(&mut s.end);
+                }
             }
-            Some(DrawAnnotation::Stroke(s)) => s.points.iter_mut().for_each(shift),
-            Some(DrawAnnotation::Shape(s)) => {
-                shift(&mut s.start);
-                shift(&mut s.end);
-            }
-            None => {}
         }
+        true
+    }
+
+    fn update_marquee(
+        &mut self,
+        marquee: Marquee,
+        point: NormalizedPoint,
+        measure: &dyn Fn(&TextAnnotation) -> f32,
+    ) -> bool {
+        let marquee = Marquee {
+            end: point,
+            ..marquee
+        };
+        self.marquee = Some(marquee);
+        self.selection = if marquee.start.distance(&point) < TEXT_DRAG_THRESHOLD {
+            Vec::new()
+        } else {
+            let frame = marquee.frame();
+            self.annotations
+                .iter()
+                .filter(|ann| {
+                    self.annotation_bounds(ann, marquee.canvas, measure)
+                        .is_some_and(|bounds| bounds.intersects(&frame))
+                })
+                .map(DrawAnnotation::id)
+                .collect()
+        };
         true
     }
 
@@ -817,6 +927,7 @@ impl ScreenDrawState {
         self.current_shape = None;
         self.drag = None;
         self.text_resize = None;
+        self.marquee = None;
     }
 
     fn start_shape(&mut self, kind: ShapeKind, point: NormalizedPoint) {
@@ -891,6 +1002,26 @@ impl ScreenDrawState {
         }
         self.push_undo();
         self.annotations.retain(|ann| ann.id() != id);
+        true
+    }
+
+    pub fn delete_selection(&mut self) -> bool {
+        let targets: Vec<u64> = if self.selection.is_empty() {
+            self.selected.into_iter().collect()
+        } else {
+            self.selection.clone()
+        };
+        if !self
+            .annotations
+            .iter()
+            .any(|ann| targets.contains(&ann.id()))
+        {
+            return false;
+        }
+        self.push_undo();
+        self.annotations.retain(|ann| !targets.contains(&ann.id()));
+        self.selection.clear();
+        self.selected = None;
         true
     }
 
@@ -998,6 +1129,8 @@ impl ScreenDrawState {
         self.drag = None;
         self.text_resize = None;
         self.selected = None;
+        self.selection.clear();
+        self.marquee = None;
         self.vanishing.clear();
         self.editing_text_id = None;
         self.editing_text_content.clear();

@@ -1701,8 +1701,6 @@ impl Render for ChatLayout {
         }
         self.chat_area.bind_window(window, cx);
         self.sync_composer_on_channel_switch(window, cx);
-        self.voice_store
-            .update(cx, |store, cx| store.flush_texture_drops(Some(window), cx));
         if std::mem::take(&mut self.pending_open_threads_popover) {
             let handle = self.thread_popover_handle.clone();
             window.defer(cx, move |window, cx| handle.show(window, cx));
@@ -1917,6 +1915,8 @@ impl Render for ChatLayout {
         } else {
             None
         };
+        self.voice_store
+            .update(cx, |store, cx| store.flush_texture_drops(Some(window), cx));
         let theme = cx.theme();
 
         div()

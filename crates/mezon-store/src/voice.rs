@@ -1,5 +1,5 @@
 use std::collections::hash_map::DefaultHasher;
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::hash::{Hash, Hasher};
 use std::path::Path;
 use std::sync::{
@@ -395,11 +395,300 @@ pub enum BreakoutRule {
     SelfSelect = 3,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+const BREAKOUT_EMPTY_CLOSE_DELAY_SECS: u64 = 20;
+const BREAKOUT_INVITE_RESPONSE_SECS: u64 = 180;
+const BREAKOUT_AUTO_CLOSE_RETRY_SECS: [u64; 2] = [15, 60];
+const BREAKOUT_UNOBSERVED_RECHECK_SECS: u64 = 30;
+const API_INVALID_ARGUMENT: u32 = 3;
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct HostedBreakout {
     pub breakout_id: i64,
     pub parent_channel_id: String,
     pub rooms: Vec<i64>,
+    #[serde(default)]
+    pub had_occupants: bool,
+    #[serde(default)]
+    pub owner_user_id: i64,
+    #[serde(default)]
+    pub opened_at_unix_secs: u64,
+    #[serde(default)]
+    pub invitees: Vec<i64>,
+    #[serde(default)]
+    pub pending_invitees: Vec<i64>,
+    #[serde(default)]
+    pub clan_id: i64,
+    #[serde(skip)]
+    closed_signal: bool,
+    #[serde(skip)]
+    empty_since_unix_secs: Option<u64>,
+    #[serde(skip)]
+    auto_close_failures: u32,
+    #[serde(skip)]
+    auto_close_retry_at: u64,
+    #[serde(skip)]
+    auto_close_gave_up: bool,
+}
+
+impl HostedBreakout {
+    fn opened(
+        breakout_id: i64,
+        parent_channel_id: String,
+        clan_id: i64,
+        rooms: Vec<i64>,
+        owner_user_id: i64,
+        invitees: Vec<i64>,
+        opened_at_unix_secs: u64,
+    ) -> Self {
+        Self {
+            breakout_id,
+            parent_channel_id,
+            rooms,
+            had_occupants: false,
+            owner_user_id,
+            opened_at_unix_secs,
+            pending_invitees: invitees.clone(),
+            invitees,
+            clan_id,
+            closed_signal: false,
+            empty_since_unix_secs: None,
+            auto_close_failures: 0,
+            auto_close_retry_at: 0,
+            auto_close_gave_up: false,
+        }
+    }
+
+    fn note_auto_close_failure(&mut self, permanent: bool, now_unix_secs: u64) {
+        self.auto_close_failures += 1;
+        let retry_delay = BREAKOUT_AUTO_CLOSE_RETRY_SECS
+            .get(self.auto_close_failures as usize - 1)
+            .filter(|_| !permanent);
+        match retry_delay {
+            Some(delay) => self.auto_close_retry_at = now_unix_secs.saturating_add(*delay),
+            None => self.auto_close_gave_up = true,
+        }
+    }
+}
+
+#[derive(Debug, Default)]
+struct HostedRoomsObservation {
+    occupants: HashSet<i64>,
+    parent_members: HashSet<i64>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum HostedBreakoutPlan {
+    Keep,
+    RecheckAt(u64),
+    Close,
+}
+
+fn active_voice_member_ids(members: &[crate::VoiceMember]) -> impl Iterator<Item = i64> + '_ {
+    members
+        .iter()
+        .map(|member| member.user_id.0)
+        .filter(|&user_id| user_id > 0)
+}
+
+fn observe_hosted_rooms(
+    hosted: &HostedBreakout,
+    list: &crate::ChannelList,
+) -> Option<HostedRoomsObservation> {
+    if hosted.rooms.is_empty() {
+        return None;
+    }
+    let parent_id = crate::ChannelId(hosted.parent_channel_id.parse::<i64>().ok()?);
+    let clan_id = if hosted.clan_id > 0 {
+        ClanId(hosted.clan_id)
+    } else {
+        list.linkable_channel(parent_id)?.clan_id
+    };
+    if !list.is_clan_extras_loaded(clan_id) || list.categories_for_clan(clan_id).is_empty() {
+        return None;
+    }
+    let members_of = |channel_id: crate::ChannelId| {
+        list.channel(clan_id, channel_id)
+            .map(|channel| active_voice_member_ids(&channel.voice_members).collect::<Vec<_>>())
+            .unwrap_or_default()
+    };
+    let invited: HashSet<i64> = hosted.invitees.iter().copied().collect();
+    Some(HostedRoomsObservation {
+        occupants: hosted
+            .rooms
+            .iter()
+            .flat_map(|&room_id| members_of(crate::ChannelId(room_id)))
+            .filter(|user_id| invited.is_empty() || invited.contains(user_id))
+            .collect(),
+        parent_members: members_of(parent_id).into_iter().collect(),
+    })
+}
+
+fn plan_hosted_breakout(
+    hosted: &mut HostedBreakout,
+    observation: Option<&HostedRoomsObservation>,
+    now_unix_secs: u64,
+) -> (bool, HostedBreakoutPlan) {
+    let Some(observation) = observation else {
+        hosted.empty_since_unix_secs = None;
+        return (false, HostedBreakoutPlan::Keep);
+    };
+    let pending_before = hosted.pending_invitees.len();
+    hosted
+        .pending_invitees
+        .retain(|user_id| !observation.occupants.contains(user_id));
+    let mut dirty = hosted.pending_invitees.len() != pending_before;
+    if !observation.occupants.is_empty() {
+        dirty |= !hosted.had_occupants;
+        hosted.had_occupants = true;
+        hosted.empty_since_unix_secs = None;
+        hosted.auto_close_failures = 0;
+        hosted.auto_close_retry_at = 0;
+        hosted.auto_close_gave_up = false;
+        return (dirty, HostedBreakoutPlan::Keep);
+    }
+    if hosted.auto_close_gave_up {
+        return (dirty, HostedBreakoutPlan::Keep);
+    }
+    let response_deadline = hosted
+        .opened_at_unix_secs
+        .saturating_add(BREAKOUT_INVITE_RESPONSE_SECS);
+    let invitee_waiting = !hosted.had_occupants
+        || hosted
+            .pending_invitees
+            .iter()
+            .any(|user_id| observation.parent_members.contains(user_id));
+    if invitee_waiting
+        && !hosted.closed_signal
+        && hosted.opened_at_unix_secs > 0
+        && now_unix_secs < response_deadline
+    {
+        hosted.empty_since_unix_secs = None;
+        return (dirty, HostedBreakoutPlan::RecheckAt(response_deadline));
+    }
+    let empty_since = *hosted.empty_since_unix_secs.get_or_insert(now_unix_secs);
+    let close_at = empty_since
+        .saturating_add(BREAKOUT_EMPTY_CLOSE_DELAY_SECS)
+        .max(hosted.auto_close_retry_at);
+    if now_unix_secs >= close_at {
+        (dirty, HostedBreakoutPlan::Close)
+    } else {
+        (dirty, HostedBreakoutPlan::RecheckAt(close_at))
+    }
+}
+
+fn breakout_invitees(
+    assignments: &[Vec<i64>],
+    participants: &[VoiceParticipant],
+    host_user_id: Option<i64>,
+) -> Vec<i64> {
+    let mut seen = HashSet::new();
+    let assigned: Vec<i64> = assignments.iter().flatten().copied().collect();
+    let candidates = if assigned.is_empty() {
+        participants
+            .iter()
+            .filter(|participant| !participant.is_local && !participant.is_agent)
+            .filter_map(|participant| participant.identity.parse::<i64>().ok())
+            .collect()
+    } else {
+        assigned
+    };
+    candidates
+        .into_iter()
+        .filter(|&user_id| user_id > 0 && Some(user_id) != host_user_id)
+        .filter(|user_id| seen.insert(*user_id))
+        .collect()
+}
+
+fn participant_rosters_differ(old: &[VoiceParticipant], new: &[VoiceParticipant]) -> bool {
+    old.len() != new.len()
+        || old.iter().zip(new).any(|(before, after)| {
+            before.identity != after.identity
+                || before.name != after.name
+                || before.metadata_name != after.metadata_name
+                || before.is_local != after.is_local
+                || before.is_agent != after.is_agent
+        })
+}
+
+fn breakout_now_secs() -> u64 {
+    crate::message_time::unix_now_seconds().max(0) as u64
+}
+
+fn current_user_id(cx: &App) -> Option<i64> {
+    crate::BadgeService::try_global(cx)
+        .and_then(|badges| badges.read(cx).current_user_id(cx))
+        .map(|user_id| user_id.0)
+        .filter(|&id| id > 0)
+}
+
+fn retain_hosted_breakouts_for_user(
+    hosted_breakouts: &mut HashMap<String, HostedBreakout>,
+    user_id: i64,
+) -> bool {
+    let before = hosted_breakouts.len();
+    hosted_breakouts.retain(|_, hosted| hosted.owner_user_id == user_id);
+    hosted_breakouts.len() != before
+}
+
+fn hosted_breakouts_path(user_id: i64) -> std::path::PathBuf {
+    dirs::config_dir()
+        .unwrap_or_else(|| std::path::PathBuf::from("."))
+        .join("mezon")
+        .join(format!("hosted_breakouts_{user_id}.json"))
+}
+
+fn load_hosted_breakouts(user_id: i64) -> HashMap<String, HostedBreakout> {
+    if cfg!(test) {
+        return HashMap::new();
+    }
+    let bytes = match std::fs::read(hosted_breakouts_path(user_id)) {
+        Ok(bytes) => bytes,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return HashMap::new(),
+        Err(error) => {
+            tracing::warn!(%error, "could not read hosted breakout rooms");
+            return HashMap::new();
+        }
+    };
+    serde_json::from_slice(&bytes).unwrap_or_else(|error| {
+        tracing::warn!(%error, "saved hosted breakout rooms are unreadable; starting without them");
+        HashMap::new()
+    })
+}
+
+fn save_hosted_breakouts(user_id: i64, hosted: &HashMap<String, HostedBreakout>) {
+    if cfg!(test) {
+        return;
+    }
+    let path = hosted_breakouts_path(user_id);
+    if hosted.is_empty() {
+        if let Err(error) = std::fs::remove_file(&path)
+            && error.kind() != std::io::ErrorKind::NotFound
+        {
+            tracing::warn!(%error, "could not remove saved hosted breakout rooms");
+        }
+        return;
+    }
+    if let Err(error) = crate::upload_jobs::write_private(&path, hosted) {
+        tracing::warn!(%error, "could not save hosted breakout rooms");
+    }
+}
+
+enum HostedBreakoutsWrite {
+    Replace(i64, HashMap<String, HostedBreakout>),
+    Add(i64, String, HostedBreakout),
+}
+
+impl HostedBreakoutsWrite {
+    fn apply(self) {
+        match self {
+            Self::Replace(user_id, hosted) => save_hosted_breakouts(user_id, &hosted),
+            Self::Add(user_id, parent, hosted) => {
+                let mut saved = load_hosted_breakouts(user_id);
+                saved.insert(parent, hosted);
+                save_hosted_breakouts(user_id, &saved);
+            }
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -610,6 +899,7 @@ pub struct VoiceStore {
     muted_by_moderator: bool,
     agent_pending: bool,
     participants: Vec<VoiceParticipant>,
+    participant_roster_revision: u64,
     join_ranks: Vec<String>,
     speak_ranks: HashMap<String, u64>,
     speak_seq: u64,
@@ -663,6 +953,14 @@ pub struct VoiceStore {
     breakout_room: Option<BreakoutRoom>,
     breakout_invite: Option<(String, BreakoutInvite)>,
     hosted_breakouts: HashMap<String, HostedBreakout>,
+    closing_breakouts: HashSet<i64>,
+    breakout_recheck: Option<(u64, Task<()>)>,
+    hosted_breakouts_save: Option<Task<()>>,
+    hosted_breakouts_save_dirty: bool,
+    hosted_breakouts_user: Option<i64>,
+    hosted_breakouts_ready: bool,
+    hosted_breakouts_flush: VecDeque<HostedBreakoutsWrite>,
+    _hosted_breakouts_load: Option<Task<()>>,
     breakout_parents: HashSet<String>,
     breakout_pending: bool,
     meeting_chat: Vec<MeetingChatMessage>,
@@ -980,10 +1278,15 @@ impl VoiceStore {
         let recording_announcement =
             cx.observe_self(|this, cx| this.sync_recording_announcement(cx));
         let channel_list_subscription = crate::ChannelList::try_global(cx).map(|channels| {
-            cx.subscribe(&channels, |this, _, event, cx| {
-                if let crate::ChannelEvent::AccessLost(channel_id) = event {
+            cx.subscribe(&channels, |this, _, event, cx| match event {
+                crate::ChannelEvent::AccessLost(channel_id) => {
                     this.leave_lost_channel(&channel_id.to_string(), cx);
                 }
+                crate::ChannelEvent::VoiceMembersChanged(clan_id)
+                | crate::ChannelEvent::ClanChannelsLoaded(clan_id) => {
+                    this.sync_hosted_breakouts_in_clan(*clan_id, cx);
+                }
+                _ => {}
             })
         });
         Self {
@@ -1013,6 +1316,7 @@ impl VoiceStore {
             muted_by_moderator: false,
             agent_pending: false,
             participants: Vec::new(),
+            participant_roster_revision: 0,
             join_ranks: Vec::new(),
             speak_ranks: HashMap::new(),
             speak_seq: 0,
@@ -1067,6 +1371,14 @@ impl VoiceStore {
             breakout_room: None,
             breakout_invite: None,
             hosted_breakouts: HashMap::new(),
+            closing_breakouts: HashSet::new(),
+            breakout_recheck: None,
+            hosted_breakouts_save: None,
+            hosted_breakouts_save_dirty: false,
+            hosted_breakouts_user: None,
+            hosted_breakouts_ready: false,
+            hosted_breakouts_flush: VecDeque::new(),
+            _hosted_breakouts_load: None,
             breakout_parents: HashSet::new(),
             breakout_pending: false,
             meeting_chat: Vec::new(),
@@ -1295,6 +1607,17 @@ impl VoiceStore {
 
     pub fn participants(&self) -> &[VoiceParticipant] {
         &self.participants
+    }
+
+    pub fn participant_roster_revision(&self) -> u64 {
+        self.participant_roster_revision
+    }
+
+    fn replace_participants(&mut self, list: Vec<VoiceParticipant>) {
+        if participant_rosters_differ(&self.participants, &list) {
+            self.participant_roster_revision = self.participant_roster_revision.wrapping_add(1);
+        }
+        self.participants = list;
     }
 
     pub fn join_rank(&self, session_id: &str) -> usize {
@@ -1585,17 +1908,23 @@ impl VoiceStore {
             return;
         }
         let drops: Vec<Arc<RenderImage>> = std::mem::take(&mut *self.pending_texture_drops.lock());
-        let replaces: Vec<Arc<RenderImage>> =
-            std::mem::take(&mut *self.pending_texture_replaces.lock());
         let dropped: HashSet<_> = drops.iter().map(|image| image.id).collect();
+        if !dropped.is_empty() {
+            self.pending_texture_replaces
+                .lock()
+                .retain(|image| !dropped.contains(&image.id));
+        }
         for image in drops {
             cx.drop_image(image, window.as_deref_mut());
         }
-        for image in replaces {
-            if dropped.contains(&image.id) {
-                continue;
+        if window.is_some() {
+            let replaces: Vec<Arc<RenderImage>> =
+                std::mem::take(&mut *self.pending_texture_replaces.lock());
+            for image in replaces {
+                cx.update_render_image(&image, window.as_deref_mut());
             }
-            cx.update_render_image(&image, window.as_deref_mut());
+        } else if !self.pending_texture_replaces.lock().is_empty() {
+            self.pending_texture_work.store(true, Ordering::Release);
         }
     }
 
@@ -1753,6 +2082,296 @@ impl VoiceStore {
         self.breakout_pending
     }
 
+    fn ensure_hosted_breakouts_owner(&mut self, cx: &mut Context<Self>) {
+        let user_id = current_user_id(cx);
+        if user_id == self.hosted_breakouts_user {
+            return;
+        }
+        self.reset_hosted_breakouts(cx);
+        self.hosted_breakouts_user = user_id;
+        self._hosted_breakouts_load = user_id.map(|user_id| {
+            cx.spawn(async move |this, cx| {
+                let loaded = cx
+                    .background_spawn(async move { load_hosted_breakouts(user_id) })
+                    .await;
+                let _ = this.update(cx, |this, cx| {
+                    this.finish_hosted_breakouts_load(user_id, loaded, cx);
+                });
+            })
+        });
+    }
+
+    fn reset_hosted_breakouts(&mut self, cx: &mut Context<Self>) {
+        let hosted = std::mem::take(&mut self.hosted_breakouts);
+        if self.hosted_breakouts_ready
+            && self.hosted_breakouts_save_dirty
+            && let Some(user_id) = self.hosted_breakouts_user
+        {
+            self.hosted_breakouts_flush
+                .push_back(HostedBreakoutsWrite::Replace(user_id, hosted));
+        }
+        self.closing_breakouts.clear();
+        self.breakout_recheck = None;
+        self.hosted_breakouts_user = None;
+        self.hosted_breakouts_ready = false;
+        self.hosted_breakouts_save_dirty = false;
+        self._hosted_breakouts_load = None;
+        self.start_hosted_breakouts_writer(cx);
+    }
+
+    fn finish_hosted_breakouts_load(
+        &mut self,
+        user_id: i64,
+        mut loaded: HashMap<String, HostedBreakout>,
+        cx: &mut Context<Self>,
+    ) {
+        if self.hosted_breakouts_user != Some(user_id) {
+            return;
+        }
+        for write in &self.hosted_breakouts_flush {
+            if let HostedBreakoutsWrite::Add(owner, parent, hosted) = write
+                && *owner == user_id
+            {
+                loaded.insert(parent.clone(), hosted.clone());
+            }
+        }
+        retain_hosted_breakouts_for_user(&mut loaded, user_id);
+        loaded.retain(|_, hosted| !hosted.rooms.is_empty());
+        for (parent, hosted) in loaded {
+            self.hosted_breakouts.entry(parent).or_insert(hosted);
+        }
+        self.hosted_breakouts_ready = true;
+        self.start_hosted_breakouts_writer(cx);
+        self.sync_hosted_breakouts(cx);
+        cx.notify();
+    }
+
+    fn persist_hosted_breakouts(&mut self, cx: &mut Context<Self>) {
+        self.hosted_breakouts_save_dirty = true;
+        self.start_hosted_breakouts_writer(cx);
+    }
+
+    fn next_hosted_breakouts_write(&mut self) -> Option<HostedBreakoutsWrite> {
+        if let Some(write) = self.hosted_breakouts_flush.pop_front() {
+            return Some(write);
+        }
+        if !self.hosted_breakouts_ready || !self.hosted_breakouts_save_dirty {
+            return None;
+        }
+        self.hosted_breakouts_save_dirty = false;
+        self.hosted_breakouts_user
+            .map(|user_id| HostedBreakoutsWrite::Replace(user_id, self.hosted_breakouts.clone()))
+    }
+
+    fn save_hosted_breakout_for_signed_out_host(
+        &mut self,
+        owner_user_id: i64,
+        parent: String,
+        hosted: HostedBreakout,
+        cx: &mut Context<Self>,
+    ) {
+        tracing::info!(
+            breakout_id = hosted.breakout_id,
+            "breakout rooms opened after the host signed out; saving them for that account"
+        );
+        self.hosted_breakouts_flush
+            .push_back(HostedBreakoutsWrite::Add(owner_user_id, parent, hosted));
+        self.start_hosted_breakouts_writer(cx);
+    }
+
+    fn start_hosted_breakouts_writer(&mut self, cx: &mut Context<Self>) {
+        let has_work = !self.hosted_breakouts_flush.is_empty()
+            || (self.hosted_breakouts_ready && self.hosted_breakouts_save_dirty);
+        if !has_work || self.hosted_breakouts_save.is_some() {
+            return;
+        }
+        self.hosted_breakouts_save = Some(cx.spawn(async move |this, cx| {
+            loop {
+                let next = this.update(cx, |this, _| {
+                    let next = this.next_hosted_breakouts_write();
+                    if next.is_none() {
+                        this.hosted_breakouts_save = None;
+                    }
+                    next
+                });
+                let Ok(Some(write)) = next else {
+                    return;
+                };
+                cx.background_spawn(async move { write.apply() }).await;
+            }
+        }));
+    }
+
+    fn sync_hosted_breakouts_in_clan(&mut self, clan_id: ClanId, cx: &mut Context<Self>) {
+        self.ensure_hosted_breakouts_owner(cx);
+        if self
+            .hosted_breakouts
+            .values()
+            .any(|hosted| hosted.clan_id == 0 || hosted.clan_id == clan_id.get())
+        {
+            self.sync_hosted_breakouts(cx);
+        }
+    }
+
+    fn sync_hosted_breakouts(&mut self, cx: &mut Context<Self>) {
+        self.ensure_hosted_breakouts_owner(cx);
+        if self.hosted_breakouts.is_empty() {
+            self.breakout_recheck = None;
+            return;
+        }
+        if self.breakout_pending {
+            return;
+        }
+        let Some(channels) = crate::ChannelList::try_global(cx) else {
+            return;
+        };
+        let now = breakout_now_secs();
+        let list = channels.read(cx);
+        let mut dirty = false;
+        let mut recheck_at: Option<u64> = None;
+        let mut due = Vec::new();
+        let mut unobserved_clans = HashSet::new();
+        for (parent, hosted) in self.hosted_breakouts.iter_mut() {
+            let observation = observe_hosted_rooms(hosted, list);
+            if observation.is_none() && hosted.clan_id > 0 && !hosted.rooms.is_empty() {
+                unobserved_clans.insert(ClanId(hosted.clan_id));
+                let at = now.saturating_add(BREAKOUT_UNOBSERVED_RECHECK_SECS);
+                recheck_at = Some(recheck_at.map_or(at, |earliest| earliest.min(at)));
+            }
+            let (changed, plan) = plan_hosted_breakout(hosted, observation.as_ref(), now);
+            dirty |= changed;
+            match plan {
+                HostedBreakoutPlan::Keep => {}
+                HostedBreakoutPlan::RecheckAt(at) => {
+                    recheck_at = Some(recheck_at.map_or(at, |earliest| earliest.min(at)));
+                }
+                HostedBreakoutPlan::Close => due.push((parent.clone(), hosted.breakout_id)),
+            }
+        }
+        if dirty {
+            self.persist_hosted_breakouts(cx);
+        }
+        if !unobserved_clans.is_empty() {
+            channels.update(cx, |list, cx| {
+                for clan_id in unobserved_clans {
+                    list.load_for_clan(clan_id, cx);
+                    drop(list.ensure_clan_joined(clan_id, cx));
+                }
+            });
+        }
+        self.schedule_hosted_breakout_recheck(recheck_at, now, cx);
+        for (parent, breakout_id) in due {
+            self.auto_close_hosted_breakout(parent, breakout_id, cx);
+        }
+    }
+
+    fn schedule_hosted_breakout_recheck(
+        &mut self,
+        at: Option<u64>,
+        now_unix_secs: u64,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(at) = at else {
+            self.breakout_recheck = None;
+            return;
+        };
+        if self
+            .breakout_recheck
+            .as_ref()
+            .is_some_and(|(scheduled, _)| *scheduled == at)
+        {
+            return;
+        }
+        let delay = Duration::from_secs(at.saturating_sub(now_unix_secs).max(1));
+        let task = cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(delay).await;
+            let _ = this.update(cx, |this, cx| {
+                this.breakout_recheck = None;
+                this.sync_hosted_breakouts(cx);
+            });
+        });
+        self.breakout_recheck = Some((at, task));
+    }
+
+    fn auto_close_hosted_breakout(
+        &mut self,
+        parent: String,
+        breakout_id: i64,
+        cx: &mut Context<Self>,
+    ) {
+        if !self.closing_breakouts.insert(breakout_id) {
+            return;
+        }
+        let api = self.api.clone();
+        cx.spawn(async move |this, cx| {
+            let result = api.sfu_breakout_merge(breakout_id).await;
+            let _ = this.update(cx, |this, cx| {
+                this.finish_hosted_breakout_auto_close(&parent, breakout_id, result, cx);
+            });
+        })
+        .detach();
+    }
+
+    fn finish_hosted_breakout_auto_close(
+        &mut self,
+        parent: &str,
+        breakout_id: i64,
+        result: anyhow::Result<()>,
+        cx: &mut Context<Self>,
+    ) {
+        self.closing_breakouts.remove(&breakout_id);
+        let status = result
+            .as_ref()
+            .err()
+            .and_then(api_status_from_error)
+            .map(|status| status.code);
+        let Some(hosted) = self
+            .hosted_breakouts
+            .get_mut(parent)
+            .filter(|hosted| hosted.breakout_id == breakout_id)
+        else {
+            return;
+        };
+        match result {
+            Ok(()) => {
+                tracing::info!(
+                    breakout_id,
+                    "breakout rooms closed after every room emptied"
+                );
+            }
+            Err(_) if status == Some(API_NOT_FOUND) => {
+                tracing::info!(
+                    breakout_id,
+                    "breakout rooms were already closed on the server"
+                );
+            }
+            Err(e) => {
+                let permanent = status == Some(API_INVALID_ARGUMENT);
+                hosted.note_auto_close_failure(permanent, breakout_now_secs());
+                let attempts = hosted.auto_close_failures;
+                if hosted.auto_close_gave_up {
+                    tracing::warn!(
+                        breakout_id,
+                        attempts,
+                        "giving up closing empty breakout rooms automatically: {e:#}"
+                    );
+                } else {
+                    tracing::warn!(
+                        breakout_id,
+                        attempts,
+                        "closing empty breakout rooms failed, will retry: {e:#}"
+                    );
+                }
+                self.sync_hosted_breakouts(cx);
+                return;
+            }
+        }
+        self.hosted_breakouts.remove(parent);
+        self.persist_hosted_breakouts(cx);
+        self.sync_hosted_breakouts(cx);
+        cx.notify();
+    }
+
     fn handle_breakout_room(&mut self, event: &RealtimeEvent, cx: &mut Context<Self>) {
         let RealtimeEvent::SfuBreakoutRoom(event) = event else {
             return;
@@ -1776,7 +2395,15 @@ impl VoiceStore {
                 cx.emit(VoiceStoreEvent::Breakout(BreakoutNotice::Invited));
                 cx.notify();
             }
-            Some(BreakoutSignal::Closed) => self.dismiss_breakout_invite(cx),
+            Some(BreakoutSignal::Closed) => {
+                if let Some(hosted) = self.hosted_breakouts.get_mut(&parent) {
+                    hosted.closed_signal = true;
+                    self.sync_hosted_breakouts(cx);
+                }
+                if self.breakout_invite.take().is_some() {
+                    cx.notify();
+                }
+            }
             None => {}
         }
     }
@@ -1913,33 +2540,39 @@ impl VoiceStore {
         assignments: Vec<Vec<i64>>,
         cx: &mut Context<Self>,
     ) {
-        if self.breakout_pending || self.breakout_room.is_some() {
+        self.ensure_hosted_breakouts_owner(cx);
+        if self.breakout_pending || self.breakout_room.is_some() || !self.hosted_breakouts_ready {
             return;
         }
-        let Some(parent) = self
+        let Some(owner_user_id) = current_user_id(cx) else {
+            return;
+        };
+        let Some((parent, clan_id)) = self
             .connection
             .connected_channel()
-            .map(|(channel_id, _)| channel_id.to_owned())
+            .map(|(channel_id, clan_id)| (channel_id.to_owned(), clan_id.parse::<i64>()))
         else {
             return;
         };
         if self.hosted_breakouts.contains_key(&parent) {
             return;
         }
-        let Ok(parent_channel_id) = parent.parse::<i64>() else {
+        let (Ok(parent_channel_id), Ok(clan_id)) = (parent.parse::<i64>(), clan_id) else {
             return;
         };
-        let list_participants = if rule == BreakoutRule::Manual {
-            assignments
-                .into_iter()
-                .map(|user_ids| mezon_proto::api::SfuBreakoutParticipant {
-                    channel_id: 0,
-                    user_ids,
-                })
-                .collect()
-        } else {
+        let assignments = if rule == BreakoutRule::SelfSelect {
             Vec::new()
+        } else {
+            assignments
         };
+        let invitees = breakout_invitees(&assignments, &self.participants, Some(owner_user_id));
+        let list_participants = assignments
+            .into_iter()
+            .map(|user_ids| mezon_proto::api::SfuBreakoutParticipant {
+                channel_id: 0,
+                user_ids,
+            })
+            .collect();
         let request = mezon_proto::api::SfuBreakoutRoomRequest {
             parent_channel_id,
             room_count: room_count as i32,
@@ -1953,17 +2586,42 @@ impl VoiceStore {
             let result = api.sfu_breakout_room(request).await;
             let _ = this.update(cx, |this, cx| {
                 this.breakout_pending = false;
+                let still_signed_in = current_user_id(cx) == Some(owner_user_id)
+                    && this.hosted_breakouts_user == Some(owner_user_id);
                 let notice = match result {
+                    Ok(response) if response.list_child_rooms.is_empty() => {
+                        tracing::warn!(
+                            breakout_id = response.breakout_id,
+                            "breakout opened without rooms; not tracking it"
+                        );
+                        BreakoutNotice::Failed(
+                            mezon_i18n::t(&current_locale(cx), "channelVoice.breakout.failed")
+                                .to_string(),
+                        )
+                    }
                     Ok(response) => {
                         let opened = response.list_child_rooms.len();
-                        this.hosted_breakouts.insert(
+                        let hosted = HostedBreakout::opened(
+                            response.breakout_id,
                             parent.clone(),
-                            HostedBreakout {
-                                breakout_id: response.breakout_id,
-                                parent_channel_id: parent,
-                                rooms: response.list_child_rooms,
-                            },
+                            clan_id,
+                            response.list_child_rooms,
+                            owner_user_id,
+                            invitees,
+                            breakout_now_secs(),
                         );
+                        if !still_signed_in {
+                            this.save_hosted_breakout_for_signed_out_host(
+                                owner_user_id,
+                                parent,
+                                hosted,
+                                cx,
+                            );
+                            cx.notify();
+                            return;
+                        }
+                        this.hosted_breakouts.insert(parent, hosted);
+                        this.persist_hosted_breakouts(cx);
                         BreakoutNotice::Opened(opened)
                     }
                     Err(e) => {
@@ -1981,7 +2639,10 @@ impl VoiceStore {
                         )
                     }
                 };
-                cx.emit(VoiceStoreEvent::Breakout(notice));
+                this.sync_hosted_breakouts(cx);
+                if still_signed_in {
+                    cx.emit(VoiceStoreEvent::Breakout(notice));
+                }
                 cx.notify();
             });
         })
@@ -1989,9 +2650,13 @@ impl VoiceStore {
     }
 
     pub fn close_breakout_rooms(&mut self, cx: &mut Context<Self>) {
+        self.ensure_hosted_breakouts_owner(cx);
         if self.breakout_pending {
             return;
         }
+        let Some(owner_user_id) = current_user_id(cx) else {
+            return;
+        };
         let Some((parent, breakout_id)) = self
             .connection
             .connected_channel()
@@ -2007,6 +2672,10 @@ impl VoiceStore {
             let result = api.sfu_breakout_merge(breakout_id).await;
             let _ = this.update(cx, |this, cx| {
                 this.breakout_pending = false;
+                if current_user_id(cx) != Some(owner_user_id) {
+                    cx.notify();
+                    return;
+                }
                 let gone = match &result {
                     Ok(()) => true,
                     Err(e) => {
@@ -2020,6 +2689,7 @@ impl VoiceStore {
                         .is_some_and(|hosted| hosted.breakout_id == breakout_id)
                     {
                         this.hosted_breakouts.remove(&parent);
+                        this.persist_hosted_breakouts(cx);
                     }
                     BreakoutNotice::Closed
                 } else {
@@ -2029,6 +2699,7 @@ impl VoiceStore {
                     tracing::warn!("close breakout rooms failed: {e:#}");
                     BreakoutNotice::Failed(breakout_error_message(&e, &current_locale(cx)))
                 };
+                this.sync_hosted_breakouts(cx);
                 cx.emit(VoiceStoreEvent::Breakout(notice));
                 cx.notify();
             });
@@ -3545,7 +4216,11 @@ impl VoiceStore {
         };
         self.pending_removals
             .insert(identity.clone(), Instant::now());
+        let before = self.participants.len();
         self.participants.retain(|p| p.identity != identity);
+        if self.participants.len() != before {
+            self.participant_roster_revision = self.participant_roster_revision.wrapping_add(1);
+        }
         cx.notify();
         self.moderate_participant(identity, ModerationAction::Kick, cx);
     }
@@ -3779,6 +4454,11 @@ impl VoiceStore {
         cx: &mut Context<Self>,
     ) {
         self.teardown(Some(window), cx);
+        self.breakout_parents.retain(|parent| {
+            breakout_room
+                .as_ref()
+                .is_some_and(|room| &room.parent_channel_id == parent)
+        });
         self.external_meeting = external_meeting;
         self.breakout_room = breakout_room;
         self.channel_label = channel_label;
@@ -3806,7 +4486,7 @@ impl VoiceStore {
         };
         self.call_status = VoiceCallStatus::Stable;
         self.mic_enabled = false;
-        self.participants.clear();
+        self.replace_participants(Vec::new());
         self.join_ranks.clear();
         self.speak_ranks.clear();
         cx.notify();
@@ -4174,6 +4854,7 @@ impl VoiceStore {
                 })
                 .collect()
         };
+        self.pending_texture_replaces.lock().clear();
         for image in stale {
             cx.drop_image(image, window.as_deref_mut());
         }
@@ -4440,7 +5121,7 @@ impl VoiceStore {
                 }
                 self.join_sound_baseline_set = true;
                 self.track_visual_ranks(&list);
-                self.participants = list;
+                self.replace_participants(list);
                 self.prune_recording_users(cx);
                 if refresh_scene {
                     self.publish_recording_scene(cx);
@@ -4506,7 +5187,7 @@ impl VoiceStore {
 
     pub fn logout_teardown(&mut self, cx: &mut Context<Self>) {
         self.teardown(None, cx);
-        self.hosted_breakouts.clear();
+        self.reset_hosted_breakouts(cx);
         self.breakout_parents.clear();
         cx.notify();
     }
@@ -5241,7 +5922,7 @@ impl VoiceStore {
         list.retain(|p| !previous.contains(&p.identity));
         self.apply_simulated_participants(&mut list);
         self.track_visual_ranks(&list);
-        self.participants = list;
+        self.replace_participants(list);
 
         let screen_owner = self
             .simulated_participants
@@ -5524,7 +6205,7 @@ impl VoiceStore {
         self.pending_removals.clear();
         self.moderation_error = None;
         self.agent_pending = false;
-        self.participants.clear();
+        self.replace_participants(Vec::new());
         self.join_ranks.clear();
         self.speak_ranks.clear();
         self.raised_hands.clear();
@@ -5665,7 +6346,12 @@ mod tests {
     use std::time::{Duration, Instant};
 
     use super::parse_raise_token;
-    use super::{BreakoutInvite, BreakoutSignal, breakout_signal_from_event};
+    use super::{
+        BREAKOUT_AUTO_CLOSE_RETRY_SECS, BREAKOUT_EMPTY_CLOSE_DELAY_SECS,
+        BREAKOUT_INVITE_RESPONSE_SECS, BreakoutInvite, BreakoutSignal, HostedBreakout,
+        HostedBreakoutPlan, HostedRoomsObservation, breakout_invitees, breakout_signal_from_event,
+        plan_hosted_breakout, retain_hosted_breakouts_for_user,
+    };
     use super::{
         FLOWER_DEDUP_WINDOW, INTERACTIVE_LAUNCH_DEDUP_TTL, MAX_SOUND_BYTES,
         RECORDING_AVATAR_MAX_ATTEMPTS, RecordingAvatar, VoiceConnection, flower_pair_key,
@@ -5744,6 +6430,269 @@ mod tests {
             }))
         );
         assert_eq!(signal(0, "", vec![0], false, &[]), None);
+    }
+
+    fn hosted(opened_at: u64, pending: Vec<i64>) -> HostedBreakout {
+        HostedBreakout::opened(
+            9001,
+            "100".to_string(),
+            50,
+            vec![201, 202],
+            1,
+            pending,
+            opened_at,
+        )
+    }
+
+    fn observed(occupants: &[i64], parent_members: &[i64]) -> HostedRoomsObservation {
+        HostedRoomsObservation {
+            occupants: occupants.iter().copied().collect(),
+            parent_members: parent_members.iter().copied().collect(),
+        }
+    }
+
+    fn remote(identity: &str) -> crate::VoiceParticipant {
+        crate::VoiceParticipant {
+            session_id: identity.to_string(),
+            identity: identity.to_string(),
+            name: identity.to_string(),
+            metadata_name: String::new(),
+            metadata_avatar: String::new(),
+            is_local: false,
+            is_agent: false,
+            is_audience: false,
+            speaking: false,
+            muted: false,
+            camera: None,
+            screenshare: None,
+            quality: crate::NetworkQuality::Unknown,
+        }
+    }
+
+    #[test]
+    fn hosted_breakout_waits_for_invitees_before_closing_empty_rooms() {
+        let mut session = hosted(1000, vec![11, 12]);
+
+        assert_eq!(
+            plan_hosted_breakout(&mut session, None, 1005),
+            (false, HostedBreakoutPlan::Keep)
+        );
+
+        let (dirty, plan) = plan_hosted_breakout(&mut session, Some(&observed(&[11], &[12])), 1010);
+        assert!(dirty);
+        assert_eq!(plan, HostedBreakoutPlan::Keep);
+        assert!(session.had_occupants);
+        assert_eq!(session.pending_invitees, vec![12]);
+
+        let (_, plan) = plan_hosted_breakout(&mut session, Some(&observed(&[], &[11, 12])), 1020);
+        assert_eq!(
+            plan,
+            HostedBreakoutPlan::RecheckAt(1000 + BREAKOUT_INVITE_RESPONSE_SECS)
+        );
+
+        let (_, plan) = plan_hosted_breakout(&mut session, Some(&observed(&[], &[11])), 1030);
+        assert_eq!(
+            plan,
+            HostedBreakoutPlan::RecheckAt(1030 + BREAKOUT_EMPTY_CLOSE_DELAY_SECS)
+        );
+    }
+
+    #[test]
+    fn hosted_breakout_closes_only_after_rooms_stay_empty() {
+        let mut session = hosted(1000, vec![11]);
+        plan_hosted_breakout(&mut session, Some(&observed(&[11], &[])), 1010);
+
+        let (_, plan) = plan_hosted_breakout(&mut session, Some(&observed(&[], &[11])), 1020);
+        assert_eq!(
+            plan,
+            HostedBreakoutPlan::RecheckAt(1020 + BREAKOUT_EMPTY_CLOSE_DELAY_SECS)
+        );
+
+        let (_, plan) = plan_hosted_breakout(&mut session, Some(&observed(&[11], &[])), 1025);
+        assert_eq!(plan, HostedBreakoutPlan::Keep);
+
+        let (_, plan) = plan_hosted_breakout(&mut session, Some(&observed(&[], &[11])), 1030);
+        assert_eq!(
+            plan,
+            HostedBreakoutPlan::RecheckAt(1030 + BREAKOUT_EMPTY_CLOSE_DELAY_SECS)
+        );
+        let (_, plan) = plan_hosted_breakout(
+            &mut session,
+            Some(&observed(&[], &[11])),
+            1030 + BREAKOUT_EMPTY_CLOSE_DELAY_SECS,
+        );
+        assert_eq!(plan, HostedBreakoutPlan::Close);
+    }
+
+    #[test]
+    fn hosted_breakout_nobody_joined_is_kept_for_the_invite_window() {
+        let mut session = hosted(1000, vec![11]);
+
+        let (_, plan) = plan_hosted_breakout(&mut session, Some(&observed(&[], &[])), 1061);
+        assert_eq!(
+            plan,
+            HostedBreakoutPlan::RecheckAt(1000 + BREAKOUT_INVITE_RESPONSE_SECS)
+        );
+        assert!(session.empty_since_unix_secs.is_none());
+
+        let after_window = 1000 + BREAKOUT_INVITE_RESPONSE_SECS;
+        let (_, plan) =
+            plan_hosted_breakout(&mut session, Some(&observed(&[], &[11])), after_window);
+        assert_eq!(
+            plan,
+            HostedBreakoutPlan::RecheckAt(after_window + BREAKOUT_EMPTY_CLOSE_DELAY_SECS)
+        );
+    }
+
+    #[test]
+    fn hosted_breakout_auto_close_retries_are_capped() {
+        let mut session = hosted(1000, Vec::new());
+        session.had_occupants = true;
+        let empty = observed(&[], &[]);
+        plan_hosted_breakout(&mut session, Some(&empty), 2000);
+
+        let close_at = 2000 + BREAKOUT_EMPTY_CLOSE_DELAY_SECS;
+        assert_eq!(
+            plan_hosted_breakout(&mut session, Some(&empty), close_at).1,
+            HostedBreakoutPlan::Close
+        );
+
+        for delay in BREAKOUT_AUTO_CLOSE_RETRY_SECS {
+            session.note_auto_close_failure(false, close_at);
+            assert!(!session.auto_close_gave_up);
+            assert_eq!(
+                plan_hosted_breakout(&mut session, Some(&empty), close_at).1,
+                HostedBreakoutPlan::RecheckAt(close_at + delay)
+            );
+            assert_eq!(
+                plan_hosted_breakout(&mut session, Some(&empty), close_at + delay).1,
+                HostedBreakoutPlan::Close
+            );
+        }
+        session.note_auto_close_failure(false, close_at);
+        assert!(session.auto_close_gave_up);
+        assert_eq!(
+            plan_hosted_breakout(&mut session, Some(&empty), close_at + 3600).1,
+            HostedBreakoutPlan::Keep
+        );
+
+        assert_eq!(
+            plan_hosted_breakout(&mut session, Some(&observed(&[11], &[])), close_at + 3600).1,
+            HostedBreakoutPlan::Keep
+        );
+        assert_eq!(session.auto_close_failures, 0);
+        assert!(!session.auto_close_gave_up);
+
+        let mut denied = hosted(1000, Vec::new());
+        denied.note_auto_close_failure(true, 2000);
+        assert!(denied.auto_close_gave_up);
+    }
+
+    #[test]
+    fn hosted_breakout_restarts_the_empty_grace_after_losing_sight_of_rooms() {
+        let mut session = hosted(1000, Vec::new());
+        session.had_occupants = true;
+        let empty = observed(&[], &[]);
+        plan_hosted_breakout(&mut session, Some(&empty), 2000);
+        assert_eq!(session.empty_since_unix_secs, Some(2000));
+
+        assert_eq!(
+            plan_hosted_breakout(&mut session, None, 2010),
+            (false, HostedBreakoutPlan::Keep)
+        );
+        assert_eq!(session.empty_since_unix_secs, None);
+
+        assert_eq!(
+            plan_hosted_breakout(&mut session, Some(&empty), 2100).1,
+            HostedBreakoutPlan::RecheckAt(2100 + BREAKOUT_EMPTY_CLOSE_DELAY_SECS)
+        );
+    }
+
+    #[test]
+    fn hosted_breakout_closed_signal_skips_the_invite_window() {
+        let mut session = hosted(1000, vec![11]);
+        session.closed_signal = true;
+
+        let (_, plan) = plan_hosted_breakout(&mut session, Some(&observed(&[], &[11])), 1010);
+        assert_eq!(
+            plan,
+            HostedBreakoutPlan::RecheckAt(1010 + BREAKOUT_EMPTY_CLOSE_DELAY_SECS)
+        );
+
+        let (_, plan) = plan_hosted_breakout(&mut session, Some(&observed(&[12], &[11])), 1020);
+        assert_eq!(plan, HostedBreakoutPlan::Keep);
+    }
+
+    #[test]
+    fn breakout_invitees_come_from_assignments_or_remote_participants() {
+        let mut agent = remote("4");
+        agent.is_agent = true;
+        let mut local = remote("1");
+        local.is_local = true;
+        let participants = vec![local, remote("2"), remote("3"), agent, remote("2")];
+
+        assert_eq!(
+            breakout_invitees(&[vec![3, 1], vec![], vec![3, 5]], &participants, Some(1)),
+            vec![3, 5]
+        );
+        assert_eq!(
+            breakout_invitees(&[vec![], vec![]], &participants, Some(1)),
+            vec![2, 3]
+        );
+        assert_eq!(breakout_invitees(&[], &participants, Some(1)), vec![2, 3]);
+    }
+
+    #[test]
+    fn hosted_breakout_persistence_round_trip_and_user_isolation() {
+        let ownerless_json =
+            r#"{"100":{"breakout_id":42,"parent_channel_id":"100","rooms":[201,202]}}"#;
+        let mut ownerless: HashMap<String, HostedBreakout> =
+            serde_json::from_str(ownerless_json).unwrap();
+        assert_eq!(ownerless["100"].breakout_id, 42);
+        assert_eq!(ownerless["100"].owner_user_id, 0);
+        assert_eq!(ownerless["100"].clan_id, 0);
+        assert!(ownerless["100"].pending_invitees.is_empty());
+        assert!(retain_hosted_breakouts_for_user(&mut ownerless, 777));
+        assert!(ownerless.is_empty());
+
+        let mut updated = HashMap::from([(
+            "100".to_string(),
+            HostedBreakout::opened(
+                42,
+                "100".to_string(),
+                50,
+                vec![201, 202],
+                777,
+                Vec::new(),
+                0,
+            ),
+        )]);
+        assert!(!retain_hosted_breakouts_for_user(&mut updated, 777));
+        let entry = updated.get_mut("100").unwrap();
+        entry.had_occupants = true;
+        entry.opened_at_unix_secs = 1700000000;
+        entry.pending_invitees = vec![5];
+        entry.empty_since_unix_secs = Some(1700000100);
+        entry.closed_signal = true;
+        entry.note_auto_close_failure(false, 1700000100);
+
+        let dumped = serde_json::to_string(&updated).unwrap();
+        let mut reloaded: HashMap<String, HostedBreakout> = serde_json::from_str(&dumped).unwrap();
+        assert_eq!(reloaded["100"].breakout_id, 42);
+        assert_eq!(reloaded["100"].rooms, vec![201, 202]);
+        assert!(reloaded["100"].had_occupants);
+        assert_eq!(reloaded["100"].owner_user_id, 777);
+        assert_eq!(reloaded["100"].opened_at_unix_secs, 1700000000);
+        assert_eq!(reloaded["100"].pending_invitees, vec![5]);
+        assert_eq!(reloaded["100"].clan_id, 50);
+        assert_eq!(reloaded["100"].empty_since_unix_secs, None);
+        assert!(!reloaded["100"].closed_signal);
+        assert_eq!(reloaded["100"].auto_close_failures, 0);
+
+        assert!(!retain_hosted_breakouts_for_user(&mut reloaded, 777));
+        assert_eq!(reloaded.len(), 1);
+        assert!(retain_hosted_breakouts_for_user(&mut reloaded, 888));
+        assert!(reloaded.is_empty());
     }
 
     #[test]

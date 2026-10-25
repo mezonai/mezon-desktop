@@ -1,8 +1,8 @@
 use std::sync::Arc;
 
 use gpui::{App, Global};
-use mezon_client::AppApi;
-use mezon_store::{RoleId, UserId};
+use mezon_client::{AppApi, EveryoneExcludeType};
+use mezon_store::{ChannelType, RoleId, UserId};
 
 struct GlobalChannelAclApi(Arc<AppApi>);
 
@@ -42,6 +42,78 @@ pub fn acl_user_ids(
         ids.push(creator_id.get());
     }
     ids
+}
+
+pub fn everyone_applies_to(private: bool, is_thread: bool, channel_type: ChannelType) -> bool {
+    !private && !is_thread && channel_type == ChannelType::Text
+}
+
+pub fn everyone_exclude_ids(
+    kind: EveryoneExcludeType,
+    user_ids: &[UserId],
+    role_ids: &[RoleId],
+) -> Vec<i64> {
+    match kind {
+        EveryoneExcludeType::User => user_ids
+            .iter()
+            .copied()
+            .map(UserId::get)
+            .filter(|id| *id != 0)
+            .collect(),
+        EveryoneExcludeType::Role => role_ids
+            .iter()
+            .copied()
+            .map(RoleId::get)
+            .filter(|id| *id != 0)
+            .collect(),
+    }
+}
+
+pub fn everyone_is_dirty(
+    enabled: bool,
+    initial_enabled: bool,
+    user_ids: &[UserId],
+    initial_user_ids: &[UserId],
+    role_ids: &[RoleId],
+    initial_role_ids: &[RoleId],
+) -> bool {
+    if enabled != initial_enabled {
+        return true;
+    }
+    if !enabled {
+        return false;
+    }
+    user_ids != initial_user_ids || role_ids != initial_role_ids
+}
+
+pub fn everyone_set_calls(
+    enabled: bool,
+    kind: EveryoneExcludeType,
+    user_ids: &[UserId],
+    initial_user_ids: &[UserId],
+    role_ids: &[RoleId],
+    initial_role_ids: &[RoleId],
+) -> Vec<(EveryoneExcludeType, Vec<i64>)> {
+    if !enabled {
+        return vec![(EveryoneExcludeType::User, Vec::new())];
+    }
+    let mut calls = Vec::new();
+    if user_ids != initial_user_ids {
+        calls.push((
+            EveryoneExcludeType::User,
+            everyone_exclude_ids(EveryoneExcludeType::User, user_ids, role_ids),
+        ));
+    }
+    if role_ids != initial_role_ids {
+        calls.push((
+            EveryoneExcludeType::Role,
+            everyone_exclude_ids(EveryoneExcludeType::Role, user_ids, role_ids),
+        ));
+    }
+    if calls.is_empty() {
+        calls.push((kind, everyone_exclude_ids(kind, user_ids, role_ids)));
+    }
+    calls
 }
 
 pub fn acl_role_ids(private_enabled: bool, selected: &[RoleId]) -> Vec<i64> {
@@ -182,5 +254,146 @@ mod tests {
     fn system_roles_are_excluded_from_candidates() {
         assert!(is_system_role(UserId(0)));
         assert!(!is_system_role(UserId(12)));
+    }
+
+    #[test]
+    fn everyone_override_is_only_for_public_text_channels() {
+        assert!(everyone_applies_to(false, false, ChannelType::Text));
+        assert!(!everyone_applies_to(true, false, ChannelType::Text));
+        assert!(!everyone_applies_to(false, true, ChannelType::Text));
+        assert!(!everyone_applies_to(false, false, ChannelType::Voice));
+        assert!(!everyone_applies_to(false, false, ChannelType::Stream));
+        assert!(!everyone_applies_to(false, false, ChannelType::App));
+    }
+
+    #[test]
+    fn everyone_exclude_ids_follow_the_selected_type() {
+        assert_eq!(
+            everyone_exclude_ids(
+                EveryoneExcludeType::User,
+                &[UserId(1), UserId(0), UserId(2)],
+                &[RoleId(9)],
+            ),
+            vec![1, 2]
+        );
+        assert_eq!(
+            everyone_exclude_ids(
+                EveryoneExcludeType::Role,
+                &[UserId(1)],
+                &[RoleId(9), RoleId(0), RoleId(8)],
+            ),
+            vec![9, 8]
+        );
+    }
+
+    #[test]
+    fn everyone_dirty_ignores_lists_while_the_toggle_is_off() {
+        assert!(!everyone_is_dirty(
+            false,
+            false,
+            &[UserId(1)],
+            &[],
+            &[],
+            &[],
+        ));
+        assert!(everyone_is_dirty(true, false, &[], &[], &[], &[]));
+        assert!(everyone_is_dirty(true, true, &[], &[], &[RoleId(1)], &[],));
+        assert!(!everyone_is_dirty(
+            true,
+            true,
+            &[UserId(1)],
+            &[UserId(1)],
+            &[],
+            &[],
+        ));
+    }
+
+    #[test]
+    fn everyone_dirty_ignores_tab_kind_when_lists_are_unchanged() {
+        assert!(!everyone_is_dirty(
+            true,
+            true,
+            &[UserId(1)],
+            &[UserId(1)],
+            &[RoleId(8)],
+            &[RoleId(8)],
+        ));
+    }
+
+    #[test]
+    fn everyone_set_calls_one_type_when_only_that_list_changed() {
+        assert_eq!(
+            everyone_set_calls(
+                true,
+                EveryoneExcludeType::Role,
+                &[UserId(1)],
+                &[UserId(1), UserId(2)],
+                &[RoleId(9)],
+                &[RoleId(9)],
+            ),
+            vec![(EveryoneExcludeType::User, vec![1])]
+        );
+        assert_eq!(
+            everyone_set_calls(
+                true,
+                EveryoneExcludeType::User,
+                &[UserId(1)],
+                &[UserId(1)],
+                &[RoleId(8)],
+                &[RoleId(9), RoleId(8)],
+            ),
+            vec![(EveryoneExcludeType::Role, vec![8])]
+        );
+    }
+
+    #[test]
+    fn everyone_set_calls_both_types_including_empty_exclude_ids() {
+        assert_eq!(
+            everyone_set_calls(
+                true,
+                EveryoneExcludeType::User,
+                &[],
+                &[UserId(1)],
+                &[],
+                &[RoleId(9)],
+            ),
+            vec![
+                (EveryoneExcludeType::User, Vec::new()),
+                (EveryoneExcludeType::Role, Vec::new()),
+            ]
+        );
+        assert_eq!(
+            everyone_set_calls(
+                true,
+                EveryoneExcludeType::User,
+                &[UserId(2)],
+                &[UserId(1)],
+                &[RoleId(8)],
+                &[RoleId(9)],
+            ),
+            vec![
+                (EveryoneExcludeType::User, vec![2]),
+                (EveryoneExcludeType::Role, vec![8]),
+            ]
+        );
+    }
+
+    #[test]
+    fn everyone_set_calls_keeps_override_on_when_lists_are_unchanged() {
+        assert_eq!(
+            everyone_set_calls(true, EveryoneExcludeType::User, &[], &[], &[], &[],),
+            vec![(EveryoneExcludeType::User, Vec::new())]
+        );
+        assert_eq!(
+            everyone_set_calls(
+                false,
+                EveryoneExcludeType::Role,
+                &[UserId(1)],
+                &[UserId(1)],
+                &[RoleId(9)],
+                &[RoleId(9)],
+            ),
+            vec![(EveryoneExcludeType::User, Vec::new())]
+        );
     }
 }

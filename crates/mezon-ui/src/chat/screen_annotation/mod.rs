@@ -9,19 +9,6 @@ pub(crate) fn desktop_annotation_supported(store: &VoiceStore) -> bool {
     native::share_target(store).is_some()
 }
 
-#[cfg(target_os = "linux")]
-pub(crate) fn draw_unavailable(store: &VoiceStore) -> bool {
-    matches!(
-        store.shared_screen(),
-        Some(mezon_store::PickedScreen::LinuxPortal)
-    ) && !desktop_annotation_supported(store)
-}
-
-#[cfg(not(target_os = "linux"))]
-pub(crate) fn draw_unavailable(_store: &VoiceStore) -> bool {
-    false
-}
-
 pub(crate) fn toggle_desktop_annotation(voice: &Entity<VoiceStore>, cx: &mut App) {
     if voice.read(cx).desktop_draw().is_some() {
         voice.update(cx, |store, cx| store.end_desktop_draw(cx));

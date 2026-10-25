@@ -83,6 +83,19 @@ fn strip_accents(s: &str) -> String {
 pub fn extract_target_pronoun(previous_message: &str) -> &'static str {
     let clean = strip_accents(&previous_message.to_lowercase());
 
+    // 0. Junior proposal check (e.g. "Chỗ assign manually, em thấy bên zoom đang như thế này ạ...")
+    let norm_lower = previous_message.to_lowercase();
+    if Regex::new(r"\b(em thay|em nghi|em de xuat|theo em|em gop y|em bao cao|em xin y kien|em check thay|em thay ben|em hoi chut|em hoi ty)\b")
+        .unwrap()
+        .is_match(&clean)
+        || (Regex::new(r"\b(em|e)\b").unwrap().is_match(&clean)
+            && (Regex::new(r"\b(a|ah|ạ)\b").unwrap().is_match(&norm_lower)
+                || Regex::new(r"\b(da|dạ)\b").unwrap().is_match(&norm_lower))
+            && !Regex::new(r"\b(thay oi|bac oi|chu oi|co oi)\b").unwrap().is_match(&clean))
+    {
+        return "anh";
+    }
+
     // 1. Multi-participant / Team mentions
     let re_group = Regex::new(r"\b(ca nha|moi nguoi|team|mn|all|ca team|ae)\b").unwrap();
     let re_directive =
@@ -672,7 +685,33 @@ pub fn resolve_pronoun_pair(
             }
         }
     }
-    let addr = resolved_addr.unwrap_or_else(|| "bạn".to_string());
+    let mut addr = resolved_addr.unwrap_or_else(|| "bạn".to_string());
+
+    let is_junior_proposal = !trimmed.is_empty() && {
+        static RE_JUNIOR_PROP: LazyLock<Regex> = LazyLock::new(|| {
+            Regex::new(r"\b(em thay|em nghi|em de xuat|theo em|em gop y|em bao cao|em xin y kien|em check thay|em thay ben|em hoi chut|em hoi ty)\b").unwrap()
+        });
+        static RE_EM: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\b(em|e)\b").unwrap());
+        static RE_POLITE_A: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\b(a|ah|ạ)\b").unwrap());
+        static RE_POLITE_DA: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\b(da|dạ)\b").unwrap());
+        static RE_ELDER_OI: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\b(thay oi|bac oi|chu oi|co oi)\b").unwrap());
+
+        let clean = strip_accents(&trimmed.to_lowercase());
+        let norm_text = trimmed.to_lowercase();
+        RE_JUNIOR_PROP.is_match(&clean)
+            || (RE_EM.is_match(&clean)
+                && (RE_POLITE_A.is_match(&norm_text) || RE_POLITE_DA.is_match(&norm_text))
+                && !RE_ELDER_OI.is_match(&clean))
+    };
+
+    if is_junior_proposal && speaker.is_none() {
+        let target_persona = addr.as_str();
+        if matches!(target_persona, "anh" | "chị" | "sếp") {
+            resolved_spk = Some(target_persona.to_string());
+            addr = "em".to_string();
+        }
+    }
+
     if resolved_spk.is_none() && !trimmed.is_empty() {
         let clean = strip_accents(&trimmed.to_lowercase());
         if RE_ANH_SPEAKER.is_match(&clean) && (addr == "em" || addr == "chú") {
@@ -727,6 +766,7 @@ pub fn render_dynamic_template(template: &str, speaker: &str, addressee: &str) -
 }
 
 fn dynamic_templates(action: &str, speaker: &str, addressee: &str) -> &'static [&'static str] {
+    let is_senior = matches!(speaker, "anh" | "chị" | "sếp") && matches!(addressee, "em" | "cháu");
     match action {
         "action_health_ack" if addressee == "sếp" || addressee == "thầy" => &[
             "Dạ [Y] cảm ơn [X], [Y] vẫn khỏe ạ.",
@@ -776,6 +816,22 @@ fn dynamic_templates(action: &str, speaker: &str, addressee: &str) -> &'static [
             "Đi chứ [X]!",
             "Có chứ [X], mai [Y] đi.",
         ],
+        "action_task_accept" if is_senior => &[
+            "[Y] thấy cũng ổn đấy [X].",
+            "OK [X], để [Y] xem nhé.",
+            "[Y] thấy hợp lý đấy [X].",
+            "Nhất trí [X] nhé.",
+            "Được rồi [X] nhé.",
+            "Để [Y] xem nhé [X].",
+        ],
+        "action_task_accept" if matches!(speaker, "em" | "cháu") => &[
+            "OK, [X].",
+            "Dạ vâng [X].",
+            "Dạ để [Y] xử lý ngay ạ.",
+            "Nhất trí [X].",
+            "Dạ [Y] rõ rồi [X].",
+            "Dạ để [Y] kiểm tra ngay ạ.",
+        ],
         "action_task_accept" => &[
             "OK, [X].",
             "Dạ vâng [X].",
@@ -783,6 +839,13 @@ fn dynamic_templates(action: &str, speaker: &str, addressee: &str) -> &'static [
             "Nhất trí [X].",
             "Dạ để [Y] kiểm tra ngay.",
             "Để [Y] xem nhé [X].",
+        ],
+        "action_confirm_yes" if is_senior => &[
+            "Có chứ [X].",
+            "Được [X] nhé.",
+            "[Y] có nhé.",
+            "Chưa [X] ơi.",
+            "Để [Y] xem lại đã nhé.",
         ],
         "action_confirm_yes" => &[
             "Có chứ [X].",
@@ -816,11 +879,26 @@ fn dynamic_templates(action: &str, speaker: &str, addressee: &str) -> &'static [
             "Cảm ơn [X] nhiều ạ!",
             "Tuyệt vời [X] ơi!",
         ],
+        "action_question_inquiry" if is_senior => &[
+            "Được [X] nhé.",
+            "Để [Y] kiểm tra lại rồi báo [X] nhé.",
+            "Chưa [X] ơi.",
+            "Có [X] nhé.",
+            "Để [Y] xem lại đã nhé [X].",
+        ],
         "action_question_inquiry" => &[
             "Dạ được [X].",
             "Dạ để [Y] kiểm tra lại rồi báo [X] nhé.",
             "Dạ chưa [X] ơi.",
             "Dạ có [X] nhé.",
+        ],
+        _ if is_senior => &[
+            "[Y] thấy cũng ổn đấy [X].",
+            "OK [X], để [Y] xem nhé.",
+            "[Y] thấy hợp lý đấy [X].",
+            "Nhất trí [X] nhé.",
+            "Được rồi [X] nhé.",
+            "Để [Y] xem nhé [X].",
         ],
         _ => &[
             "OK, [X].",
@@ -937,7 +1015,7 @@ fn augment_quick_replies(
     speaker: &str,
     clean: &str,
 ) {
-    if action == "action_task_accept" && RE_TASK_CODE.is_match(clean) {
+    if action == "action_task_accept" && RE_TASK_CODE.is_match(clean) && matches!(speaker, "em" | "cháu") {
         let insert = match role {
             "anh" => "Để em add và test luôn.",
             "chị" => "Để em add và test luôn chị nhé.",

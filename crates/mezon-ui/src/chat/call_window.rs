@@ -125,7 +125,9 @@ impl CallOverlay {
 }
 
 impl Render for CallOverlay {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.call
+            .update(cx, |store, cx| store.flush_texture_drops(Some(window), cx));
         let (phase, peer) = {
             let store = self.call.read(cx);
             (store.phase(), store.peer().cloned())
@@ -350,12 +352,12 @@ impl CallPanelView {
                 .cam_on
                 .then(|| self.call.read(cx).render_frame(self_key))
                 .flatten();
-            self.call
-                .update(cx, |store, cx| store.flush_texture_drops(Some(window), cx));
             (remote_frame, self_frame)
         } else {
             (None, None)
         };
+        self.call
+            .update(cx, |store, cx| store.flush_texture_drops(Some(window), cx));
 
         let self_avatar_opt = (!self_avatar.is_empty()).then_some(self_avatar.as_str());
         let enlarged = if two_tile { self.enlarged } else { None };

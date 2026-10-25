@@ -15,15 +15,34 @@ use crate::GoBack;
 use crate::GoForward;
 use crate::app::shell::Shell;
 use crate::app::window_controls;
+use crate::components::primitives::MentionLabels;
 use crate::components::primitives::{ContextMenu, Icon, IconName, Tooltip, context_menu_at};
 use crate::router::{Route, Router};
 use crate::theme::{ActiveTheme, Theme};
 
 mod clan_row;
 mod direct_unread_list;
+mod mention_indicator;
 use clan_row::{CLAN_ROW_HEIGHT, ClanRow, build_clan_rail_menu, render_clan_row, render_pill};
 
 const DISCOVER_URL: &str = "https://mezon.ai/clans";
+const CLAN_FOOTER_BUTTON_SIZE: f32 = 40.;
+
+fn clan_footer_layout() -> gpui::Div {
+    div().flex().flex_col().items_center().w_full().gap_3()
+}
+
+fn new_clan_list_state() -> ListState {
+    ListState::new(0, gpui::ListAlignment::Top, px(48.))
+        .smooth_line_scroll()
+        .suppress_hover_while_scrolling()
+}
+
+fn reset_clan_list(state: &ListState, clan_count: usize) {
+    let item_count = clan_count + 1;
+    state.reset(item_count);
+    state.splice_with_size_hint(0..item_count, item_count, size(px(0.), px(CLAN_ROW_HEIGHT)));
+}
 
 pub(super) struct ClanMenuArgs {
     pub(super) position: Point<Pixels>,
@@ -55,6 +74,12 @@ pub struct ClanSidebar {
     direct_unread: DirectUnreadListState,
     direct_unread_fingerprint: Option<u64>,
     list_state: ListState,
+    mention_labels: MentionLabels,
+    rail_wheel: mention_indicator::RailWheel,
+    clan_drag_active: bool,
+    mention_indices: Vec<usize>,
+    mention_scroll: Option<mention_indicator::MentionScroll>,
+    mention_scroll_queued: bool,
     pending_reveal_ix: Option<usize>,
     reveal_wait_queued: bool,
     dm_active: bool,
@@ -84,9 +109,8 @@ impl ClanSidebar {
         cx: &mut Context<Self>,
     ) -> Self {
         let direct_store = DirectMessageStore::global(cx);
-        let list_state = ListState::new(0, gpui::ListAlignment::Top, px(48.))
-            .smooth_line_scroll()
-            .suppress_hover_while_scrolling();
+        let mention_labels = MentionLabels::new(&settings.read(cx).language);
+        let list_state = new_clan_list_state();
         let direct_sub = cx.observe(&direct_store, |this, _store, cx| {
             this.refresh_direct_unread(cx);
         });
@@ -126,6 +150,7 @@ impl ClanSidebar {
             }
         });
         let router_sub = cx.observe(&Router::global(cx), |this, router, cx| {
+            this.cancel_mention_reveal();
             let (new_dm_active, new_can_go_back, new_can_go_forward) = {
                 let router = router.read(cx);
                 (
@@ -172,6 +197,12 @@ impl ClanSidebar {
             )),
             direct_unread_fingerprint: Some(direct_unread_fingerprint(direct_store.read(cx), cx)),
             list_state,
+            mention_labels,
+            rail_wheel: Default::default(),
+            clan_drag_active: false,
+            mention_indices: Vec::new(),
+            mention_scroll: None,
+            mention_scroll_queued: false,
             pending_reveal_ix: None,
             reveal_wait_queued: false,
             dm_active: initial_dm_active,
@@ -263,6 +294,7 @@ impl ClanSidebar {
 
     fn sync_chrome(&mut self, cx: &App) {
         let locale = self.settings.read(cx).language.clone();
+        self.mention_labels = MentionLabels::new(&locale);
         self.nav_back_title = mezon_i18n::t(&locale, "nav.historyBack").to_string().into();
         self.nav_forward_title = mezon_i18n::t(&locale, "nav.historyForward")
             .to_string()
@@ -279,12 +311,9 @@ impl ClanSidebar {
             .filter(|logo| !logo.is_empty());
         let default_logo =
             crate::util::imgproxy::cdn_asset_url(cx, "landing-page-mezon/logodefault.webp");
-        self.home_logo = SharedString::from(crate::util::imgproxy::proxied(
+        self.home_logo = SharedString::from(crate::util::imgproxy::clan_logo_url(
             cx,
             custom_logo.as_deref().unwrap_or(&default_logo),
-            100,
-            100,
-            "fill-down",
         ));
     }
 
@@ -301,15 +330,7 @@ impl ClanSidebar {
                     .avatar_url
                     .as_deref()
                     .filter(|url| !url.is_empty())
-                    .map(|url| {
-                        SharedString::from(crate::util::imgproxy::proxied(
-                            cx,
-                            url,
-                            100,
-                            100,
-                            "fill-down",
-                        ))
-                    });
+                    .map(|url| SharedString::from(crate::util::imgproxy::clan_logo_url(cx, url)));
                 ClanRow {
                     id,
                     id_num: clan.id,
@@ -341,14 +362,22 @@ impl ClanSidebar {
         let count = rows.len();
         let item_count = count + 1;
         let needs_reset = self.list_state.item_count() != item_count;
+        if old_active_id != new_active.map(|(_, id)| id) {
+            self.cancel_mention_reveal();
+        }
+        if self.rows.len() != rows.len()
+            || self
+                .rows
+                .iter()
+                .zip(&rows)
+                .any(|(old, new)| old.id_num != new.id_num)
+        {
+            self.cancel_mention_reveal();
+        }
+        self.mention_indices = mention_indicator::mentioned_clan_indices(&rows);
         self.rows = Rc::new(rows);
         if needs_reset {
-            self.list_state.reset(item_count);
-            self.list_state.splice_with_size_hint(
-                0..item_count,
-                item_count,
-                size(px(0.), px(CLAN_ROW_HEIGHT)),
-            );
+            reset_clan_list(&self.list_state, count);
         }
         if let Some((ix, id)) = new_active
             && Some(id) != old_active_id
@@ -455,6 +484,7 @@ impl Render for ClanSidebar {
         .size_full();
 
         let unread_list = self.direct_unread.render();
+        let mention_targets = self.current_mention_targets();
 
         let sidebar_for_menu = sidebar.clone();
         let clan_menu_overlay = self.clan_menu_args(cx);
@@ -529,7 +559,30 @@ impl Render for ClanSidebar {
                     .child(unread_list)
                     .child(div().w(px(40.)).h(px(1.)).bg(theme.border).mt_3().mb_3()),
             )
-            .child(div().flex_1().min_h_0().w_full().child(list_element))
+            .child(
+                div()
+                    .relative()
+                    .flex_1()
+                    .min_h_0()
+                    .w_full()
+                    .capture_any_mouse_down(cx.listener(
+                        |this, event: &gpui::MouseDownEvent, _, _| {
+                            if this.list_state.viewport_bounds().contains(&event.position) {
+                                this.cancel_mention_reveal();
+                            }
+                        },
+                    ))
+                    .capture_any_mouse_up(cx.listener(|this, _, _, cx| {
+                        if this.clan_drag_active {
+                            this.clan_drag_active = false;
+                            cx.notify();
+                        }
+                    }))
+                    .child(list_element)
+                    .child(self.mention_layout_observer(mention_targets, cx))
+                    .children(self.render_mention_indicator(mention_targets, true, cx))
+                    .children(self.render_mention_indicator(mention_targets, false, cx)),
+            )
             .when_some(clan_menu_overlay, move |el, args| {
                 el.child(context_menu_at(
                     args.position,
@@ -653,16 +706,12 @@ fn render_clan_footer(
     suppress_hover: bool,
 ) -> AnyElement {
     let theme = cx.theme();
-    div()
-        .flex()
-        .flex_col()
-        .items_center()
-        .w_full()
+    clan_footer_layout()
         .child(
             div()
                 .id("discover-btn")
-                .w(px(40.))
-                .h(px(40.))
+                .w(px(CLAN_FOOTER_BUTTON_SIZE))
+                .h(px(CLAN_FOOTER_BUTTON_SIZE))
                 .rounded(px(12.))
                 .bg(theme.tokens.theme_base_color)
                 .flex()
@@ -691,9 +740,8 @@ fn render_clan_footer(
         .child(
             div()
                 .id("create-clan-btn")
-                .mt_3()
-                .w(px(40.))
-                .h(px(40.))
+                .w(px(CLAN_FOOTER_BUTTON_SIZE))
+                .h(px(CLAN_FOOTER_BUTTON_SIZE))
                 .rounded(px(12.))
                 .bg(theme.tokens.theme_base_color)
                 .flex()

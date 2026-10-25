@@ -165,9 +165,10 @@ impl AnnotationOverlay {
     }
 
     fn sync_click_through(&mut self, cx: &mut Context<Self>) {
-        let state = self.draw.read(cx).state();
-        let pass_through =
-            state.active_tool == DrawTool::Pointer && !self.hovering && !state.is_drawing();
+        let draw = self.draw.read(cx);
+        let state = draw.state();
+        let pass_through = draw.is_minimized()
+            || (state.active_tool == DrawTool::Pointer && !self.hovering && !state.is_drawing());
         if self.click_through == Some(pass_through) {
             return;
         }
@@ -216,8 +217,10 @@ impl AnnotationOverlay {
     }
 
     fn poll_hover(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let state = self.draw.read(cx).state();
-        let hovering = state.active_tool == DrawTool::Pointer
+        let draw = self.draw.read(cx);
+        let state = draw.state();
+        let hovering = !draw.is_minimized()
+            && state.active_tool == DrawTool::Pointer
             && self
                 .native
                 .and_then(|native| native.cursor_position())
@@ -326,8 +329,9 @@ impl AnnotationOverlay {
             return;
         }
         let (point, _) = self.normalize(event.position, window);
+        let measure = |text: &TextAnnotation| text_width(window, text);
         self.draw.update(cx, |draw, cx| {
-            draw.edit(cx, |state| state.pointer_move(point, pressed))
+            draw.edit(cx, |state| state.pointer_move(point, pressed, &measure))
         });
     }
 
@@ -345,6 +349,9 @@ impl AnnotationOverlay {
     }
 
     fn on_key_down(&mut self, event: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
+        if self.draw.read(cx).is_minimized() {
+            return;
+        }
         let key = event.keystroke.key.as_str();
         if self.text_editor.is_some() {
             if key == "escape" {
@@ -364,6 +371,7 @@ impl AnnotationOverlay {
             "z" if secondary && shift => self.edit(cx, |state| state.redo()),
             "z" if secondary => self.edit(cx, |state| state.undo()),
             "y" if modifiers.control => self.edit(cx, |state| state.redo()),
+            "backspace" | "delete" => self.edit(cx, |state| state.delete_selection()),
             "escape" => {
                 self.edit(cx, |state| state.set_tool(DrawTool::Pointer));
                 true
@@ -470,6 +478,7 @@ impl Render for AnnotationOverlay {
         let cursor = match state.active_tool {
             DrawTool::Pointer if state.is_drawing() => CursorStyle::ClosedHand,
             DrawTool::Pointer if self.hovering => CursorStyle::OpenHand,
+            DrawTool::Select if state.drag.is_some() => CursorStyle::ClosedHand,
             tool => cursor_for_tool(tool),
         };
         let text_editor = self.render_text_editor(window, cx);

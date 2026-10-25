@@ -3,11 +3,10 @@ use crate::neural::apply_neural_accent;
 use crate::onnx::quick_replies_with_intent;
 use crate::pronoun::{extract_target_pronoun, suggest_quick_replies};
 use crate::rules::{
-    COMPILED_CONFUSABLES, CorrectionEdit, CorrectionResult, TEENCODE_MAP,
-    contains_vietnamese_diacritics, is_foreign_or_tech_word, is_predominantly_english_sentence,
-    mask_protected_literals, match_case, normalize_punctuation_spacing,
-    normalize_sentence_capitalization, normalize_tone_placement, restore_diacritics,
-    unmask_protected_literals,
+    COMPILED_CONFUSABLES, CorrectionEdit, CorrectionResult, TEENCODE_MAP, is_foreign_or_tech_word,
+    is_predominantly_english_sentence, mask_protected_literals, match_case,
+    normalize_punctuation_spacing, normalize_sentence_capitalization, normalize_tone_placement,
+    restore_diacritics, unmask_protected_literals,
 };
 use crate::tokenizer::VietnameseTokenizer;
 use crate::trie::{WordSuggestion, WordTrie};
@@ -130,11 +129,9 @@ impl MezonGrammarClient {
             })
             .to_string();
 
-        if !contains_vietnamese_diacritics(original_input) {
-            let (restored, edits_diacritics) = restore_diacritics(&current);
-            edits.extend(edits_diacritics);
-            current = restored;
-        }
+        let (restored, edits_diacritics) = restore_diacritics(&current);
+        edits.extend(edits_diacritics);
+        current = restored;
 
         let (toned, edits_tone) = normalize_tone_placement(&current);
         edits.extend(edits_tone);

@@ -8,6 +8,7 @@ mod divider;
 mod dropdown;
 mod label;
 mod mention_count_badge;
+mod mention_float_button;
 mod modal;
 mod pagination;
 mod progress;
@@ -68,6 +69,7 @@ pub use label::Label;
 pub use mention_count_badge::{
     mention_count_badge, mention_count_badge_on_channel_row, unread_dot,
 };
+pub(crate) use mention_float_button::{MentionLabels, mention_float_button};
 pub use modal::Modal;
 pub use pagination::{
     PaginationButton, pagination_button, pagination_items, pagination_slot_count,

@@ -216,6 +216,12 @@ pub(super) struct ClanRow {
     pub active: bool,
 }
 
+impl ClanRow {
+    pub(super) fn shows_mention_badge(&self) -> bool {
+        crate::SHOW_UNREAD_BADGE_COUNT && self.badge_count > 0 && !self.muted
+    }
+}
+
 fn activate_clan(clan_list: &Entity<ClanList>, clan_id: ClanId, cx: &mut App) {
     clan_list.update(cx, |m, cx| {
         m.select_clan(clan_id, cx);
@@ -289,7 +295,7 @@ pub(super) fn render_clan_row(
     let clan_id = clan.id.clone();
     let prefetch_clan_id = clan.id_num;
     let is_active = clan.active && !dm_active;
-    let show_badge = crate::SHOW_UNREAD_BADGE_COUNT && clan.badge_count > 0 && !clan.muted;
+    let show_badge = clan.shows_mention_badge();
     let show_nub = clan.has_unread && clan.badge_count == 0 && !clan.muted && !is_active;
     let badge_count = clan.badge_count;
     let muted = clan.muted;
@@ -367,16 +373,24 @@ pub(super) fn render_clan_row(
                 avatar: clan.proxied_avatar_url.clone(),
                 muted,
             },
-            |drag, _, _, cx| {
-                cx.stop_propagation();
-                let name = drag.name.clone();
-                let avatar = drag.avatar.clone();
-                let muted = drag.muted;
-                cx.new(|_| ClanDragPreview {
-                    name,
-                    avatar,
-                    muted,
-                })
+            {
+                let sidebar = sidebar.clone();
+                move |drag, _, _, cx| {
+                    cx.stop_propagation();
+                    let _ = sidebar.update(cx, |this, cx| {
+                        this.clan_drag_active = true;
+                        this.cancel_mention_reveal();
+                        cx.notify();
+                    });
+                    let name = drag.name.clone();
+                    let avatar = drag.avatar.clone();
+                    let muted = drag.muted;
+                    cx.new(|_| ClanDragPreview {
+                        name,
+                        avatar,
+                        muted,
+                    })
+                }
             },
         )
         .drag_over::<ClanReorderDrag>(move |style, drag, _, _| {

@@ -568,8 +568,6 @@ fn render_chat_message(message: &MeetingChatMessage, locale: &str, cx: &App) -> 
 
 impl Render for MeetingView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        self.voice
-            .update(cx, |store, cx| store.flush_texture_drops(Some(window), cx));
         crate::image_cache::flush_atlas_drops(window, cx);
         let theme = cx.theme().clone();
         let (locale, input_device_id, output_device_id, camera_device_id) = {
@@ -635,6 +633,8 @@ impl Render for MeetingView {
             })
             .flatten();
         let share_modal = self.share_modal.as_ref().map(|(modal, _)| modal.clone());
+        self.voice
+            .update(cx, |store, cx| store.flush_texture_drops(Some(window), cx));
 
         div()
             .id("meeting-window")

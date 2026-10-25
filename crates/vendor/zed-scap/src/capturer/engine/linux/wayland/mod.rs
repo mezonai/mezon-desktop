@@ -1,8 +1,10 @@
 use std::{
+    cell::RefCell,
     mem::size_of,
+    rc::Rc,
     sync::{
         atomic::{AtomicBool, AtomicU8},
-        mpsc::{sync_channel, RecvError, SendError, Sender, SyncSender},
+        mpsc::{sync_channel, RecvError, SyncSender, TrySendError},
         Arc,
     },
     thread::JoinHandle,
@@ -46,9 +48,14 @@ mod portal;
 
 static LOGGED_FIRST_FRAME: AtomicBool = AtomicBool::new(false);
 
+const PENDING_FRAME_RETRY_INTERVAL: Duration = Duration::from_millis(10);
+
+type PendingFrame = Rc<RefCell<Option<Result<Frame>>>>;
+
 #[derive(Clone)]
 struct ListenerUserData {
-    pub tx: Sender<Result<Frame>>,
+    pub tx: SyncSender<Result<Frame>>,
+    pub pending_frame: PendingFrame,
     pub format: spa::param::video::VideoInfoRaw,
     pub stream_error: Arc<AtomicBool>,
 }
@@ -216,14 +223,23 @@ fn process_callback(stream: &StreamRef, user_data: &mut ListenerUserData) {
         Err(err) => Some(Err(err)),
     };
     if let Some(frame_result) = frame_result {
-        match user_data.tx.send(frame_result) {
-            Ok(()) => {}
-            Err(SendError(_)) => {
-                log::debug!("Frame receiver was dropped.")
-            }
-        }
+        // mezon vendor edit: bounded channel keeps the newest frame pending instead of dropping it, so a burst that ends on a full queue still delivers its final frame.
+        user_data
+            .pending_frame
+            .replace(offer_frame(&user_data.tx, frame_result));
     }
     unsafe { stream.queue_raw_buffer(buffer) };
+}
+
+fn offer_frame(tx: &SyncSender<Result<Frame>>, frame: Result<Frame>) -> Option<Result<Frame>> {
+    match tx.try_send(frame) {
+        Ok(()) => None,
+        Err(TrySendError::Full(frame)) => Some(frame),
+        Err(TrySendError::Disconnected(_)) => {
+            log::debug!("Frame receiver was dropped.");
+            None
+        }
+    }
 }
 
 fn process_callback_impl(
@@ -346,7 +362,8 @@ struct PipewireCapture {
 
 fn start_pipewire_capturer(
     options: Options,
-    tx: Sender<Result<Frame>>,
+    tx: SyncSender<Result<Frame>>,
+    pending_frame: PendingFrame,
     stream_id: u32,
     stream_error: Arc<AtomicBool>,
 ) -> Result<PipewireCapture> {
@@ -358,6 +375,7 @@ fn start_pipewire_capturer(
 
     let user_data = ListenerUserData {
         tx,
+        pending_frame,
         format: Default::default(),
         stream_error,
     };
@@ -468,13 +486,21 @@ fn start_pipewire_capturer(
 // TODO: Format negotiation
 fn pipewire_capturer(
     options: Options,
-    tx: Sender<Result<Frame>>,
+    tx: SyncSender<Result<Frame>>,
     ready_sender: &SyncSender<Result<()>>,
     stream_id: u32,
     capturer_state: Arc<AtomicU8>,
     stream_error: Arc<AtomicBool>,
 ) {
-    let capture = match start_pipewire_capturer(options, tx, stream_id, stream_error.clone()) {
+    let pending_frame = PendingFrame::default();
+    let retry_tx = tx.clone();
+    let capture = match start_pipewire_capturer(
+        options,
+        tx,
+        pending_frame.clone(),
+        stream_id,
+        stream_error.clone(),
+    ) {
         Ok(capture) => {
             ready_sender.send(Ok(())).ok();
             capture
@@ -496,7 +522,16 @@ fn pipewire_capturer(
         && /* If the stream state got changed to `Error`, we exit. TODO: tell user that we exited */
           !stream_error.load(std::sync::atomic::Ordering::Relaxed)
     {
-        pw_loop.iterate(Duration::from_millis(100));
+        let still_pending = pending_frame
+            .take()
+            .and_then(|frame| offer_frame(&retry_tx, frame));
+        let timeout = if still_pending.is_some() {
+            PENDING_FRAME_RETRY_INTERVAL
+        } else {
+            Duration::from_millis(100)
+        };
+        pending_frame.replace(still_pending);
+        pw_loop.iterate(timeout);
     }
 }
 
@@ -511,7 +546,7 @@ pub struct WaylandCapturer {
 
 impl WaylandCapturer {
     // TODO: Error handling
-    pub fn new(options: &Options, tx: Sender<Result<Frame>>) -> Result<Self> {
+    pub fn new(options: &Options, tx: SyncSender<Result<Frame>>) -> Result<Self> {
         let connection = dbus::blocking::Connection::new_session()
             .context("Failed to create dbus connection")?;
         let stream = ScreenCastPortal::new(&connection)

@@ -2491,7 +2491,9 @@ impl MentionInput {
                     ChannelEvent::ClanChannelsLoaded(_) | ChannelEvent::UserChannelsLoaded => {
                         this.invalidate_pool(Sigil::Hash, cx);
                     }
-                    ChannelEvent::Unread(_) | ChannelEvent::InVoiceChanged => {}
+                    ChannelEvent::Unread(_)
+                    | ChannelEvent::InVoiceChanged
+                    | ChannelEvent::VoiceMembersChanged(_) => {}
                     ChannelEvent::ArchivedByAdministrator { .. }
                     | ChannelEvent::AccessLost(_)
                     | ChannelEvent::LinkedChannelResolved(_)

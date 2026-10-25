@@ -11,6 +11,15 @@ pub fn proxied(cx: &App, source_url: &str, width: u32, height: u32, resize_type:
         .unwrap_or_else(|| source_url.to_string())
 }
 
+pub fn clan_logo_url(cx: &App, source_url: &str) -> String {
+    if source_url.is_empty() {
+        return String::new();
+    }
+    AppConfig::try_global(cx)
+        .map(|cfg| cfg.clan_logo_proxy(source_url, 100))
+        .unwrap_or_else(|| source_url.to_string())
+}
+
 pub fn avatar_url(cx: &App, source_url: &str) -> String {
     AppConfig::try_global(cx)
         .map(|cfg| cfg.avatar_proxy(source_url))

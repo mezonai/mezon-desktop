@@ -1,12 +1,15 @@
+use std::time::Duration;
+
 #[cfg(not(target_os = "windows"))]
 use gpui::MouseButton;
 #[cfg(target_os = "windows")]
 use gpui::WindowControlArea;
 #[cfg(any(target_os = "linux", target_os = "freebsd"))]
-use gpui::{AnyElement, DispatchPhase, MouseMoveEvent, MouseUpEvent, canvas};
+use gpui::{DispatchPhase, MouseMoveEvent, MouseUpEvent, canvas};
 use gpui::{
-    AnyWindowHandle, App, Bounds, Context, CursorStyle, Entity, Window, WindowBackgroundAppearance,
-    WindowBounds, WindowKind, WindowOptions, div, prelude::*, px, size,
+    AnyElement, AnyWindowHandle, App, Bounds, Context, CursorStyle, Div, Entity, Stateful, Task,
+    Window, WindowBackgroundAppearance, WindowBounds, WindowKind, WindowOptions, div, prelude::*,
+    px, size,
 };
 use mezon_store::{DesktopDraw, VoiceStore};
 
@@ -15,10 +18,39 @@ use crate::app::window_controls::linux_app_id;
 use crate::chat::screen_draw::{DrawTarget, render_draw_toolbar};
 use crate::components::primitives::{Icon, IconName};
 
-const TOOLBAR_WIDTH: f32 = 590.;
+const TOOLBAR_WIDTH: f32 = 624.;
 const TOOLBAR_HEIGHT: f32 = 46.;
+const BUBBLE_WIDTH: f32 = 84.;
+const BUBBLE_HEIGHT: f32 = 58.;
+const BUBBLE_BUTTON_SIZE: f32 = 44.;
+const BUBBLE_ICON_SIZE: f32 = 22.;
+const BUBBLE_ACCENT: u32 = 0x5865f2;
+const HINT_HEIGHT: f32 = 32.;
+const HINT_DURATION: Duration = Duration::from_secs(4);
 const WINDOW_TOP_GAP: f64 = 12.;
 const DISPLAY_TOP_GAP: f64 = 56.;
+
+fn toolbar_height(hint_visible: bool) -> f32 {
+    if hint_visible {
+        TOOLBAR_HEIGHT + HINT_HEIGHT
+    } else {
+        TOOLBAR_HEIGHT
+    }
+}
+
+fn render_hint() -> Div {
+    div()
+        .mt(px(6.))
+        .px(px(10.))
+        .py(px(4.))
+        .rounded_full()
+        .bg(gpui::rgba(0x18181bf2))
+        .border_1()
+        .border_color(gpui::rgba(0xffffff26))
+        .text_xs()
+        .text_color(gpui::rgb(0xffffff))
+        .child("Press Esc to exit drawing mode")
+}
 
 #[cfg(any(target_os = "linux", target_os = "freebsd"))]
 #[derive(Clone, Copy)]
@@ -29,8 +61,13 @@ struct DragAnchor {
 
 pub(super) struct AnnotationToolbar {
     target: DrawTarget,
-    #[cfg(any(target_os = "linux", target_os = "freebsd"))]
+    draw: Entity<DesktopDraw>,
+    overlay: NativeWindow,
     native: Option<NativeWindow>,
+    minimized: bool,
+    drawing: bool,
+    hint_visible: bool,
+    _hint_timer: Option<Task<()>>,
     #[cfg(any(target_os = "linux", target_os = "freebsd"))]
     drag: Option<DragAnchor>,
 }
@@ -43,10 +80,11 @@ pub(super) fn open(
     overlay: NativeWindow,
     cx: &mut App,
 ) -> Option<AnyWindowHandle> {
+    let height = toolbar_height(draw.read(cx).in_drawing_mode());
     let options = WindowOptions {
         window_bounds: Some(WindowBounds::Windowed(Bounds::centered(
             None,
-            size(px(TOOLBAR_WIDTH), px(TOOLBAR_HEIGHT)),
+            size(px(TOOLBAR_WIDTH), px(height)),
             cx,
         ))),
         titlebar: None,
@@ -70,7 +108,7 @@ pub(super) fn open(
     let handle: AnyWindowHandle = cx
         .open_window(options, |window, cx| {
             native = native_window(window);
-            cx.new(|cx| AnnotationToolbar::new(voice, draw, cx).with_native(native))
+            cx.new(|cx| AnnotationToolbar::new(voice, draw, overlay, native, window, cx))
         })
         .ok()?
         .into();
@@ -90,8 +128,18 @@ pub(super) fn open(
 }
 
 impl AnnotationToolbar {
-    fn new(voice: Entity<VoiceStore>, draw: Entity<DesktopDraw>, cx: &mut Context<Self>) -> Self {
-        cx.observe(&draw, |_, _, cx| cx.notify()).detach();
+    fn new(
+        voice: Entity<VoiceStore>,
+        draw: Entity<DesktopDraw>,
+        overlay: NativeWindow,
+        native: Option<NativeWindow>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        cx.observe_in(&draw, window, |this, _, window, cx| {
+            this.sync_with_draw(window, cx)
+        })
+        .detach();
         let release_voice = voice.clone();
         let release_draw = draw.clone();
         cx.on_release(move |_, cx| {
@@ -100,23 +148,141 @@ impl AnnotationToolbar {
             });
         })
         .detach();
-        Self {
-            target: DrawTarget::Desktop { voice, draw },
-            #[cfg(any(target_os = "linux", target_os = "freebsd"))]
-            native: None,
+        let target = DrawTarget::Desktop { draw: draw.clone() };
+        let drawing = draw.read(cx).in_drawing_mode();
+        let mut this = Self {
+            target,
+            draw,
+            overlay,
+            native,
+            minimized: false,
+            drawing,
+            hint_visible: drawing,
+            _hint_timer: None,
             #[cfg(any(target_os = "linux", target_os = "freebsd"))]
             drag: None,
+        };
+        if drawing {
+            this.schedule_hint_hide(window, cx);
+        }
+        this
+    }
+
+    fn sync_with_draw(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let draw = self.draw.read(cx);
+        let minimized = draw.is_minimized();
+        let drawing = draw.in_drawing_mode();
+        let previous_size = self.window_size();
+        self.minimized = minimized;
+        if drawing && !self.drawing {
+            self.hint_visible = true;
+            self.schedule_hint_hide(window, cx);
+        } else if !drawing {
+            self.hint_visible = false;
+            self._hint_timer = None;
+        }
+        self.drawing = drawing;
+        if self.window_size() != previous_size {
+            self.fit_window(window, cx);
+        }
+        cx.notify();
+    }
+
+    fn schedule_hint_hide(&mut self, window: &Window, cx: &mut Context<Self>) {
+        let handle = window.window_handle();
+        self._hint_timer = Some(cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(HINT_DURATION).await;
+            let _ = handle.update(cx, |_, window, cx| {
+                this.update(cx, |this, cx| this.hide_hint(window, cx))
+            });
+        }));
+    }
+
+    fn hide_hint(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.hint_visible {
+            return;
+        }
+        self.hint_visible = false;
+        self.fit_window(window, cx);
+        cx.notify();
+    }
+
+    fn window_size(&self) -> (f32, f32) {
+        if self.minimized {
+            (BUBBLE_WIDTH, BUBBLE_HEIGHT)
+        } else {
+            (TOOLBAR_WIDTH, toolbar_height(self.hint_visible))
         }
     }
 
-    #[cfg(any(target_os = "linux", target_os = "freebsd"))]
-    fn with_native(self, native: Option<NativeWindow>) -> Self {
-        Self { native, ..self }
+    fn fit_window(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let (width, height) = self.window_size();
+        let Some(native) = self.native else {
+            window.resize(size(px(width), px(height)));
+            return;
+        };
+        let frame = native.frame();
+        let overlay = self.overlay.frame();
+        let scale = native.scale(window);
+        let scaled_width = width as f64 * scale;
+        let keep_right_edge = frame.x + frame.width / 2.0 > overlay.x + overlay.width / 2.0;
+        let x = if keep_right_edge {
+            frame.x + frame.width - scaled_width
+        } else {
+            frame.x
+        };
+        native.place(NativeRect {
+            x,
+            y: frame.y,
+            width: scaled_width,
+            height: height as f64 * scale,
+        });
+        window.bounds_changed(cx);
     }
 
-    #[cfg(not(any(target_os = "linux", target_os = "freebsd")))]
-    fn with_native(self, _native: Option<NativeWindow>) -> Self {
-        self
+    fn render_bubble(&self, grip: AnyElement) -> Stateful<Div> {
+        let draw = self.draw.clone();
+        let expand = div()
+            .id("desktop-annotation-expand")
+            .size(px(BUBBLE_BUTTON_SIZE))
+            .rounded_full()
+            .flex()
+            .items_center()
+            .justify_center()
+            .cursor_pointer()
+            .bg(gpui::rgb(BUBBLE_ACCENT))
+            .hover(|s| s.opacity(0.85))
+            .child(
+                Icon::new(IconName::PenEdit)
+                    .size(px(BUBBLE_ICON_SIZE))
+                    .text_color(gpui::rgb(0xffffff)),
+            )
+            .on_click(move |_, _, cx| {
+                cx.stop_propagation();
+                draw.update(cx, |draw, cx| draw.set_minimized(false, cx));
+            });
+
+        div()
+            .id("desktop-annotation-bubble")
+            .size_full()
+            .flex()
+            .items_center()
+            .justify_center()
+            .child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap_1()
+                    .p(px(4.))
+                    .rounded_full()
+                    .bg(gpui::rgba(0x18181bf2))
+                    .border_1()
+                    .border_color(gpui::rgba(0xffffff26))
+                    .shadow_xl()
+                    .child(grip)
+                    .child(expand),
+            )
     }
 
     #[cfg(any(target_os = "linux", target_os = "freebsd"))]
@@ -207,9 +373,23 @@ impl Render for AnnotationToolbar {
             cx.listener(|this, _, _, cx| this.begin_drag(cx)),
         );
 
-        let bar = render_draw_toolbar(&self.target, Some(grip.into_any_element()), cx)
-            .size_full()
-            .justify_center();
+        let bar = if self.minimized {
+            self.render_bubble(grip.into_any_element())
+        } else {
+            div()
+                .id("desktop-annotation-toolbar")
+                .size_full()
+                .flex()
+                .flex_col()
+                .items_center()
+                .child(
+                    render_draw_toolbar(&self.target, Some(grip.into_any_element()), cx)
+                        .w_full()
+                        .h(px(TOOLBAR_HEIGHT))
+                        .justify_center(),
+                )
+                .children(self.hint_visible.then(render_hint))
+        };
         #[cfg(any(target_os = "linux", target_os = "freebsd"))]
         let bar = bar.children(self.drag.is_some().then(|| self.drag_listener(cx)));
         bar

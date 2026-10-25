@@ -40,7 +40,7 @@ pub struct LinuxCapturer {
     pub imp: Box<dyn LinuxCapturerImpl>,
 }
 
-type Type = mpsc::Sender<Result<Frame>>;
+type Type = mpsc::SyncSender<Result<Frame>>;
 
 impl LinuxCapturer {
     pub fn new(options: &Options, tx: Type) -> Result<Self> {
@@ -73,7 +73,7 @@ impl LinuxCapturer {
 
 pub fn create_capturer(
     options: &Options,
-    tx: mpsc::Sender<Result<Frame>>,
+    tx: mpsc::SyncSender<Result<Frame>>,
 ) -> Result<LinuxCapturer> {
     LinuxCapturer::new(options, tx)
 }

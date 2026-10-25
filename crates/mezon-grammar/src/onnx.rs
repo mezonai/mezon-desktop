@@ -29,6 +29,23 @@ pub static INTENT_LABELS: [&str; 12] = [
     "action_meal_social",
 ];
 
+pub static TARGET_PRONOUNS: [&str; 14] = [
+    "anh",
+    "chị",
+    "em",
+    "sếp",
+    "cậu",
+    "ông",
+    "bà",
+    "bác",
+    "chú",
+    "cô",
+    "thầy",
+    "bạn",
+    "cả nhà",
+    "cháu",
+];
+
 #[derive(Debug, Clone, Deserialize)]
 struct AccentVocabFile {
     char_to_id: HashMap<String, i64>,
@@ -38,6 +55,18 @@ struct AccentVocabFile {
 pub struct IntentPrediction {
     pub intent: String,
     pub confidence: f32,
+}
+
+#[derive(Debug, Clone)]
+pub struct PronounPrediction {
+    pub pronoun: String,
+    pub confidence: f32,
+}
+
+#[derive(Debug, Clone)]
+pub struct DualPrediction {
+    pub intent: IntentPrediction,
+    pub pronoun: Option<PronounPrediction>,
 }
 
 static ACCENT_CHAR_TO_ID: LazyLock<HashMap<String, i64>> = LazyLock::new(|| {
@@ -128,31 +157,8 @@ fn encode_intent_input(tokenizer: &VietnameseTokenizer, text: &str) -> Vec<i64> 
     ids
 }
 
-pub fn predict_intent(tokenizer: &VietnameseTokenizer, text: &str) -> Option<IntentPrediction> {
-    let trimmed = text.trim();
-    if trimmed.is_empty() {
-        return None;
-    }
-    ensure_intent_session()?;
-    let ids = encode_intent_input(tokenizer, trimmed);
-    let seq_len = ids.len();
-    let input = match Tensor::from_array(([1i64, seq_len as i64], ids)) {
-        Ok(t) => t,
-        Err(_) => return None,
-    };
-    let mut guard = intent_slot().lock().unwrap();
-    let SessionSlot::Ready(session) = &mut *guard else {
-        return None;
-    };
-    let outputs = match session.run(ort::inputs!["input_ids" => input]) {
-        Ok(o) => o,
-        Err(_) => return None,
-    };
-    let (_shape, logits) = match outputs[0].try_extract_tensor::<f32>() {
-        Ok(v) => v,
-        Err(_) => return None,
-    };
-    let n = INTENT_LABELS.len();
+fn softmax_top(logits: &[f32], labels: &[&str]) -> Option<(String, f32)> {
+    let n = labels.len();
     if logits.len() < n {
         return None;
     }
@@ -181,10 +187,59 @@ pub fn predict_intent(tokenizer: &VietnameseTokenizer, text: &str) -> Option<Int
             top_idx = i;
         }
     }
-    Some(IntentPrediction {
-        intent: INTENT_LABELS[top_idx].to_string(),
-        confidence: top_prob,
-    })
+    Some((labels[top_idx].to_string(), top_prob))
+}
+
+pub fn predict_dual(tokenizer: &VietnameseTokenizer, text: &str) -> Option<DualPrediction> {
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    ensure_intent_session()?;
+    let ids = encode_intent_input(tokenizer, trimmed);
+    let seq_len = ids.len();
+    let input = match Tensor::from_array(([1i64, seq_len as i64], ids)) {
+        Ok(t) => t,
+        Err(_) => return None,
+    };
+    let mut guard = intent_slot().lock().unwrap();
+    let SessionSlot::Ready(session) = &mut *guard else {
+        return None;
+    };
+    let outputs = match session.run(ort::inputs!["input_ids" => input]) {
+        Ok(o) => o,
+        Err(_) => return None,
+    };
+    let (_shape, intent_logits) = match outputs[0].try_extract_tensor::<f32>() {
+        Ok(v) => v,
+        Err(_) => return None,
+    };
+    let (top_intent, top_intent_prob) = softmax_top(intent_logits, &INTENT_LABELS)?;
+    let intent = IntentPrediction {
+        intent: top_intent,
+        confidence: top_intent_prob,
+    };
+    let pronoun = if outputs.len() > 1 {
+        outputs[1]
+            .try_extract_tensor::<f32>()
+            .ok()
+            .and_then(|(_shape, pron_logits)| softmax_top(pron_logits, &TARGET_PRONOUNS))
+            .map(|(p, c)| PronounPrediction {
+                pronoun: p,
+                confidence: c,
+            })
+    } else {
+        None
+    };
+    Some(DualPrediction { intent, pronoun })
+}
+
+pub fn predict_intent(tokenizer: &VietnameseTokenizer, text: &str) -> Option<IntentPrediction> {
+    predict_dual(tokenizer, text).map(|d| d.intent)
+}
+
+pub fn predict_pronoun(tokenizer: &VietnameseTokenizer, text: &str) -> Option<PronounPrediction> {
+    predict_dual(tokenizer, text).and_then(|d| d.pronoun)
 }
 
 pub fn apply_neural_accent_onnx(text: &str) -> String {
@@ -213,23 +268,29 @@ pub fn quick_replies_with_intent(
     pronoun_override: Option<&str>,
     top_k: usize,
 ) -> Vec<String> {
-    let prediction = predict_intent(tokenizer, previous_message);
-    let override_intent = match prediction {
-        Some(p) if p.confidence >= INTENT_MIN_CONFIDENCE => {
+    let dual = predict_dual(tokenizer, previous_message);
+    let override_intent = match &dual {
+        Some(d) if d.intent.confidence >= INTENT_MIN_CONFIDENCE => {
             if matches!(
-                p.intent.as_str(),
+                d.intent.intent.as_str(),
                 "other" | "action_no_reply_needed" | "reply_none"
             ) {
                 return Vec::new();
             }
-            Some(p.intent)
+            Some(d.intent.intent.as_str())
         }
         Some(_) | None => return Vec::new(),
     };
+    let effective_pronoun = pronoun_override.or_else(|| {
+        dual.as_ref()
+            .and_then(|d| d.pronoun.as_ref())
+            .filter(|p| p.confidence >= INTENT_MIN_CONFIDENCE && p.pronoun != "bạn")
+            .map(|p| p.pronoun.as_str())
+    });
     crate::pronoun::suggest_quick_replies(
         previous_message,
-        pronoun_override,
+        effective_pronoun,
         top_k,
-        override_intent.as_deref(),
+        override_intent,
     )
 }

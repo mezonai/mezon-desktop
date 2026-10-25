@@ -6,7 +6,6 @@ use gpui::{App, AppContext, Context, Entity, EventEmitter, Global, Task};
 use mezon_client::{AppApi, ConnectionStatus, RealtimeEvent};
 use mezon_proto::api;
 
-use crate::AppConfig;
 use crate::KeyedCache;
 use crate::clan::upload_image_to_cdn;
 use crate::ids::{ChannelId, ClanId, UserId};
@@ -473,12 +472,11 @@ impl WebhookStore {
     ) -> gpui::Task<Result<String, String>> {
         let api = self.api.clone();
         let path = path.to_path_buf();
-        let base_img_url = AppConfig::global(cx).base_img_url.clone();
         cx.spawn(async move |_, cx| {
             cx.background_executor()
-                .spawn(async move {
-                    upload_image_to_cdn(&api, &base_img_url, &path, MAX_WEBHOOK_AVATAR_BYTES).await
-                })
+                .spawn(
+                    async move { upload_image_to_cdn(&api, &path, MAX_WEBHOOK_AVATAR_BYTES).await },
+                )
                 .await
         })
     }

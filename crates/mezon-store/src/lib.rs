@@ -262,11 +262,11 @@ pub use roles::{
 };
 pub use screen_draw::{
     AnnotationDrag, COLOR_BLACK, COLOR_BLUE, COLOR_GREEN, COLOR_ORANGE, COLOR_PURPLE, COLOR_RED,
-    COLOR_WHITE, COLOR_YELLOW, ContentViewport, DrawAnnotation, DrawTool, HitBox, NormalizedPoint,
-    PRESET_COLORS, PRESET_WIDTHS, PenStroke, STROKE_WIDTH_MEDIUM, STROKE_WIDTH_THICK,
-    STROKE_WIDTH_THIN, ScreenDrawState, ShapeAnnotation, ShapeKind, StrokeKind, TEXT_HANDLE_SIZE,
-    TEXT_LINE_HEIGHT, TEXT_PAD_X, TEXT_PAD_Y, TextAnnotation, TextResize, VanishingStroke,
-    scale_alpha, text_font_px,
+    COLOR_WHITE, COLOR_YELLOW, ContentViewport, DrawAnnotation, DrawTool, HitBox, Marquee,
+    NormalizedPoint, PRESET_COLORS, PRESET_WIDTHS, PenStroke, STROKE_WIDTH_MEDIUM,
+    STROKE_WIDTH_THICK, STROKE_WIDTH_THIN, ScreenDrawState, ShapeAnnotation, ShapeKind, StrokeKind,
+    TEXT_HANDLE_SIZE, TEXT_LINE_HEIGHT, TEXT_PAD_X, TEXT_PAD_Y, TextAnnotation, TextResize,
+    VanishingStroke, scale_alpha, text_font_px,
 };
 pub use sprite_atlas::{SpriteAtlas, SpriteFrame, fetch_sprite_atlas, parse_sprite_atlas};
 pub use sticker::{ClanSound, Sticker, StickerEvent, StickerStore};

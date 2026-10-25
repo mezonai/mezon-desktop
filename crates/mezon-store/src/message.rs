@@ -79,10 +79,10 @@ pub fn url_extension(url: &str) -> Option<String> {
 }
 
 pub fn is_image_type(filetype: &str, url: &str) -> bool {
-    let ext = url_extension(url);
-    if is_svg_type(filetype) || ext.as_deref() == Some("svg") {
+    if is_svg_type(filetype) {
         return false;
     }
+    let ext = url_extension(url);
     let mime_image = filetype.starts_with("image") || filetype == STICKER_FILETYPE;
     mime_image
         || matches!(
@@ -1057,6 +1057,13 @@ pub fn rollback_reaction(
 }
 
 pub fn parse_spans(content: &ApiMessageContent) -> Vec<MessageSpan> {
+    parse_spans_with_source(content, |_, _| {})
+}
+
+fn parse_spans_with_source(
+    content: &ApiMessageContent,
+    mut on_source: impl FnMut(Range<i64>, &MessageSpan),
+) -> Vec<MessageSpan> {
     let text = &content.t;
     if text.is_empty() {
         return Vec::new();
@@ -1117,9 +1124,12 @@ pub fn parse_spans(content: &ApiMessageContent) -> Vec<MessageSpan> {
             continue;
         }
         if last < s {
-            spans.push(MessageSpan::Text(slice(last, s).into()));
+            let gap = MessageSpan::Text(slice(last, s).into());
+            on_source(last..s, &gap);
+            spans.push(gap);
         }
         let inner = slice(s, e);
+        let source_start = spans.len();
         match kind {
             Kind::Mention => {
                 let has_user = tok
@@ -1199,13 +1209,24 @@ pub fn parse_spans(content: &ApiMessageContent) -> Vec<MessageSpan> {
                 }
             }
         }
+        for span in &spans[source_start..] {
+            on_source(s..e, span);
+        }
         prev_end = e;
         last = e;
     }
+    let tail_index = spans.len();
     if last < total {
-        spans.push(MessageSpan::Text(slice(last, total).into()));
+        let tail = MessageSpan::Text(slice(last, total).into());
+        spans.push(tail);
     }
     drop_hanging_line_break(&mut spans);
+    if let Some(MessageSpan::Text(tail)) = spans.get(tail_index) {
+        on_source(
+            last..last + tail.encode_utf16().count() as i64,
+            &spans[tail_index],
+        );
+    }
     apply_headings(spans)
 }
 
@@ -1237,6 +1258,63 @@ pub fn inbox_spans_from_raw(raw_content: &str) -> Option<Vec<MessageSpan>> {
         return None;
     }
     Some(parse_spans(&content))
+}
+
+#[derive(Clone, Debug)]
+pub struct MessageSourceSpan {
+    pub range: Range<usize>,
+    pub span: MessageSpan,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct InboxMessageContent {
+    pub text: String,
+    pub spans: Vec<MessageSpan>,
+    pub source_spans: Vec<MessageSourceSpan>,
+}
+
+pub fn inbox_content_from_raw(raw_content: &str) -> Option<InboxMessageContent> {
+    let content: ApiMessageContent = serde_json::from_str(raw_content.trim()).ok()?;
+    if content.t.is_empty() {
+        return None;
+    }
+    let mut offsets = vec![None; content.t.encode_utf16().count() + 1];
+    let mut utf16_index = 0;
+    for (byte_index, ch) in content.t.char_indices() {
+        offsets[utf16_index] = Some(byte_index);
+        utf16_index += ch.len_utf16();
+    }
+    offsets[utf16_index] = Some(content.t.len());
+    let mut source_spans = Vec::new();
+    let spans = parse_spans_with_source(&content, |range, span| {
+        let Some(start) = usize::try_from(range.start)
+            .ok()
+            .and_then(|i| offsets.get(i))
+            .copied()
+            .flatten()
+        else {
+            return;
+        };
+        let Some(end) = usize::try_from(range.end)
+            .ok()
+            .and_then(|i| offsets.get(i))
+            .copied()
+            .flatten()
+        else {
+            return;
+        };
+        if start < end {
+            source_spans.push(MessageSourceSpan {
+                range: start..end,
+                span: span.clone(),
+            });
+        }
+    });
+    Some(InboxMessageContent {
+        text: content.t,
+        spans,
+        source_spans,
+    })
 }
 
 fn link_kind_from_marker(marker: &str) -> LinkKind {
@@ -2251,6 +2329,46 @@ impl Message {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn inbox_source_ranges_keep_original_offsets_after_formatting() {
+        for (prefix, kind) in [("**📎 tài**", "b"), ("`x`", "c"), ("```rust\nx\n```", "t")] {
+            let label = "https://mezon.ai/chat/clans/123/channels/456/canvas/abc";
+            let text = format!("{prefix}{label}\n");
+            let start = prefix.encode_utf16().count();
+            let raw = serde_json::json!({"t":text,"mk":[{"s":0,"e":start,"type":kind}],"lk":[{"s":start,"e":start+label.encode_utf16().count(),"url":label}],"cvtt":{"abc":"Title"}}).to_string();
+            let parsed = inbox_content_from_raw(&raw).unwrap();
+            assert_eq!(parsed.spans, inbox_spans_from_raw(&raw).unwrap());
+            let canvas = parsed
+                .source_spans
+                .iter()
+                .find(|source| matches!(source.span, MessageSpan::Canvas { .. }))
+                .unwrap();
+            assert_eq!(canvas.range, prefix.len()..prefix.len() + label.len());
+            assert_eq!(&parsed.text[canvas.range.clone()], label);
+            assert!(
+                !matches!(parsed.source_spans.last().map(|source| &source.span), Some(MessageSpan::Text(value)) if value == "\n")
+            );
+        }
+    }
+
+    #[test]
+    fn inbox_source_parser_handles_empty_invalid_and_overlapping_tokens() {
+        for raw in ["", "bad json", "{}", "{\"t\":\"\"}"] {
+            assert!(inbox_content_from_raw(raw).is_none());
+        }
+        for (start, end) in [(-1, 3), (0, 999), (2, 1), (0, 1)] {
+            let raw = serde_json::json!({"t":"📎 text","lk":[{"s":start,"e":end,"url":"https://example.com"},{"s":0,"e":2,"url":"https://example.org"}]}).to_string();
+            let parsed = inbox_content_from_raw(&raw).unwrap();
+            assert_eq!(parsed.spans, inbox_spans_from_raw(&raw).unwrap());
+            assert!(
+                parsed
+                    .source_spans
+                    .iter()
+                    .all(|source| parsed.text.get(source.range.clone()).is_some())
+            );
+        }
+    }
 
     #[test]
     fn a_command_card_groups_with_its_own_senders_messages_only() {
@@ -3307,10 +3425,10 @@ mod tests {
     }
 
     #[test]
-    fn svg_is_a_file_row_not_an_image() {
+    fn svg_follows_web_category_image_shows_raw_mime_stays_a_file() {
+        assert!(attachment("image", "https://cdn.example/logo.svg").is_image());
         assert!(!attachment("image/svg+xml", "https://cdn.example/logo.svg").is_image());
         assert!(!attachment("", "https://cdn.example/logo.svg").is_image());
-        assert!(!attachment("image", "https://cdn.example/logo.svg").is_image());
     }
 
     #[test]

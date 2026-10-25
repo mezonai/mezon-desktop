@@ -1,8 +1,7 @@
 use crate::onnx::{ACCENT_MAX_CHARS, ACCENT_VOCAB_SIZE, accent_char_id};
 use crate::rules::{
-    COMPILED_CONFUSABLES, CONFUSABLE_PHRASES, contains_vietnamese_diacritics,
-    is_foreign_or_tech_word, is_predominantly_english_sentence, match_case,
-    protected_literal_spans, strip_accents,
+    COMPILED_CONFUSABLES, CONFUSABLE_PHRASES, is_foreign_or_tech_word,
+    is_predominantly_english_sentence, match_case, protected_literal_spans, strip_accents,
 };
 use regex::Regex;
 use serde::Deserialize;
@@ -110,6 +109,27 @@ static COLLOCATIONS: LazyLock<Collocations> = LazyLock::new(|| {
             );
         }
     }
+    let priority_bigrams = [
+        ("di", "ngay", "đi", "ngay"),
+        ("lam", "ngay", "làm", "ngay"),
+        ("ngay", "nhe", "ngay", "nhé"),
+        ("xong", "ngay", "xong", "ngay"),
+        ("den", "ngay", "đến", "ngay"),
+        ("ve", "ngay", "về", "ngay"),
+    ];
+    for (u1, u2, w1, w2) in priority_bigrams {
+        bigram.insert(pair_key(u1, u2, None), (w1.to_string(), w2.to_string()));
+    }
+    let priority_trigrams = [
+        ("di", "ngay", "nhe", "đi", "ngay", "nhé"),
+        ("lam", "ngay", "nhe", "làm", "ngay", "nhé"),
+        ("anh", "di", "ngay", "anh", "đi", "ngay"),
+        ("em", "se", "lam", "em", "sẽ", "làm"),
+        ("se", "lam", "ngay", "sẽ", "làm", "ngay"),
+    ];
+    for (u1, u2, u3, w1, w2, w3) in priority_trigrams {
+        trigram.insert(pair_key(u1, u2, Some(u3)), (w1.to_string(), w2.to_string(), w3.to_string()));
+    }
     Collocations { trigram, bigram }
 });
 
@@ -133,10 +153,7 @@ fn pair_key(first: &str, second: &str, third: Option<&str>) -> String {
 }
 
 pub(crate) fn add_accents(text: &str, infer: &dyn Fn(&str) -> Option<Vec<f32>>) -> String {
-    if text.trim().is_empty()
-        || is_predominantly_english_sentence(text)
-        || contains_vietnamese_diacritics(text)
-    {
+    if text.trim().is_empty() || is_predominantly_english_sentence(text) {
         return text.to_string();
     }
     if RE_SENTENCE.is_match(text) {

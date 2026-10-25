@@ -49,6 +49,7 @@ pub struct ChannelPermissionsStore {
     cache: KeyedCache<ChannelPermissionKey, HashMap<String, bool>>,
     loading: HashSet<ChannelPermissionKey>,
     failed_at: HashMap<ChannelPermissionKey, Instant>,
+    fetch_generation: HashMap<ChannelPermissionKey, u64>,
     reset_generation: u64,
     patch_generation: u64,
     api: Arc<AppApi>,
@@ -96,6 +97,7 @@ impl ChannelPermissionsStore {
             cache: KeyedCache::new(Some(MAX_CACHED_CHANNEL_PERMISSIONS)),
             loading: HashSet::new(),
             failed_at: HashMap::new(),
+            fetch_generation: HashMap::new(),
             reset_generation: 0,
             patch_generation: 0,
             api,
@@ -245,7 +247,7 @@ impl ChannelPermissionsStore {
                         return false;
                     }
                     for key in chunk {
-                        this.fetch(key.clan_id, key.channel_id, cx);
+                        this.fetch(key.clan_id, key.channel_id, false, cx);
                     }
                     true
                 });
@@ -262,6 +264,7 @@ impl ChannelPermissionsStore {
         self.cache.clear();
         self.loading.clear();
         self.failed_at.clear();
+        self.fetch_generation.clear();
         cx.notify();
     }
 
@@ -288,6 +291,21 @@ impl ChannelPermissionsStore {
             .and_then(|perms| perms.get(slug).copied())
     }
 
+    pub fn reload_channel(
+        &mut self,
+        clan_id: ClanId,
+        channel_id: ChannelId,
+        cx: &mut Context<Self>,
+    ) {
+        let key = ChannelPermissionKey {
+            clan_id,
+            channel_id,
+        };
+        self.cache.mark_stale(&key);
+        self.failed_at.remove(&key);
+        self.fetch(clan_id, channel_id, true, cx);
+    }
+
     pub fn ensure_loaded(
         &mut self,
         clan_id: ClanId,
@@ -309,17 +327,28 @@ impl ChannelPermissionsStore {
         {
             return;
         }
-        self.fetch(clan_id, channel_id, cx);
+        self.fetch(clan_id, channel_id, false, cx);
     }
 
-    fn fetch(&mut self, clan_id: ClanId, channel_id: ChannelId, cx: &mut Context<Self>) {
+    fn fetch(
+        &mut self,
+        clan_id: ClanId,
+        channel_id: ChannelId,
+        force: bool,
+        cx: &mut Context<Self>,
+    ) {
         let key = ChannelPermissionKey {
             clan_id,
             channel_id,
         };
-        if self.loading.contains(&key) {
+        if !force && self.loading.contains(&key) {
             return;
         }
+        let fetch_generation = {
+            let generation = self.fetch_generation.entry(key).or_insert(0);
+            *generation = generation.wrapping_add(1);
+            *generation
+        };
         self.loading.insert(key);
         let api = self.api.clone();
         let generation = self.reset_generation;
@@ -330,6 +359,9 @@ impl ChannelPermissionsStore {
                 .await;
             let _ = this.update(cx, |this, cx| {
                 if this.reset_generation != generation {
+                    return;
+                }
+                if this.fetch_generation.get(&key).copied() != Some(fetch_generation) {
                     return;
                 }
                 this.loading.remove(&key);
@@ -386,6 +418,7 @@ mod tests {
             cache: KeyedCache::new(Some(MAX_CACHED_CHANNEL_PERMISSIONS)),
             loading: HashSet::new(),
             failed_at: HashMap::new(),
+            fetch_generation: HashMap::new(),
             reset_generation: 0,
             patch_generation: 0,
             api: Arc::new(AppApi::new(
@@ -584,6 +617,31 @@ mod tests {
         assert!(is_overridden_slug(PERMISSION_DELETE_MESSAGE));
         assert!(!is_overridden_slug("manage-clan"));
         assert!(!is_overridden_slug("clan-owner"));
+    }
+
+    #[test]
+    fn a_stale_fetch_generation_does_not_replace_the_cache() {
+        let mut store = test_store();
+        let key = ChannelPermissionKey {
+            clan_id: TEST_CLAN,
+            channel_id: TEST_CHANNEL,
+        };
+        store.fetch_generation.insert(key, 2);
+        store.loading.insert(key);
+        let stale_generation = 1;
+        if store.fetch_generation.get(&key).copied() == Some(stale_generation) {
+            store.loading.remove(&key);
+            store.cache.insert(
+                key,
+                HashMap::from([(PERMISSION_SEND_MESSAGE.to_string(), false)]),
+                None,
+            );
+        }
+        assert!(store.loading.contains(&key));
+        assert_eq!(
+            store.permission_value(PERMISSION_SEND_MESSAGE, TEST_CLAN, TEST_CHANNEL),
+            None
+        );
     }
 
     #[test]

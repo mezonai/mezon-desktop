@@ -4,7 +4,7 @@ use std::time::{Duration, Instant};
 use gpui::{AnyWindowHandle, Context, Task};
 use mezon_voice::VideoFrameStore;
 
-use crate::screen_draw::ScreenDrawState;
+use crate::screen_draw::{DrawTool, ScreenDrawState};
 
 const VANISH_TICK: Duration = Duration::from_millis(33);
 
@@ -12,6 +12,7 @@ pub struct DesktopDraw {
     state: ScreenDrawState,
     canvas: (f32, f32),
     window_share: bool,
+    minimized: bool,
     frame_store: Option<Arc<VideoFrameStore>>,
     windows: Vec<AnyWindowHandle>,
     vanish_ticking: bool,
@@ -26,6 +27,7 @@ impl DesktopDraw {
             state,
             canvas: (0.0, 0.0),
             window_share,
+            minimized: false,
             frame_store,
             windows: Vec::new(),
             vanish_ticking: false,
@@ -39,6 +41,29 @@ impl DesktopDraw {
 
     pub fn is_window_share(&self) -> bool {
         self.window_share
+    }
+
+    pub fn is_minimized(&self) -> bool {
+        self.minimized
+    }
+
+    pub fn in_drawing_mode(&self) -> bool {
+        !self.minimized && self.state.active_tool != DrawTool::Pointer
+    }
+
+    pub fn set_minimized(&mut self, minimized: bool, cx: &mut Context<Self>) {
+        if self.minimized == minimized {
+            return;
+        }
+        self.minimized = minimized;
+        if minimized {
+            self.state.commit_editing_text();
+            self.state.cancel_stroke();
+            self.state.selected = None;
+            self.state.selection.clear();
+        }
+        self.sync(cx);
+        cx.notify();
     }
 
     pub fn edit<R>(

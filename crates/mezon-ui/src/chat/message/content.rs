@@ -2884,6 +2884,25 @@ pub(crate) fn open_message_link(url: String, cx: &mut App) {
     }
 }
 
+pub(crate) fn interactive_link_text(
+    id: impl Into<gpui::ElementId>,
+    styled: StyledText,
+    links: Vec<(Range<usize>, String)>,
+) -> AnyElement {
+    if links.is_empty() {
+        return styled.into_any_element();
+    }
+    let (ranges, urls): (Vec<_>, Vec<_>) = links.into_iter().unzip();
+    InteractiveText::new(id, styled)
+        .on_click(ranges, move |index, _, cx| {
+            if let Some(url) = urls.get(index) {
+                cx.stop_propagation();
+                open_message_link(url.clone(), cx);
+            }
+        })
+        .into_any_element()
+}
+
 pub(crate) fn meeting_code(url: &str, cx: &App) -> Option<String> {
     let cfg = AppConfig::try_global(cx)?;
     mezon_store::internal_meeting_code(url, Some(&cfg.domain_url))

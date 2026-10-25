@@ -75,10 +75,12 @@ fn multipart_part_ranges(total: u64) -> Vec<(u64, usize)> {
 
 pub(crate) const CDN_MEZON_MINIO: &str = "https://cdn.mezon.ai";
 const CDN_R2_CLOUDFLARE: &str = "https://cdn.komu.vn";
+const PROFILE_IMG_BASE: &str = "https://profile.mezon.ai";
 
 pub struct CdnReadBases {
     pub mezon: String,
     pub cloudflare: String,
+    pub profile: String,
 }
 
 static CDN_READ_BASES: OnceLock<CdnReadBases> = OnceLock::new();
@@ -87,7 +89,22 @@ pub fn configure_cdn_read_bases(bases: CdnReadBases) {
     let _ = CDN_READ_BASES.set(CdnReadBases {
         mezon: bases.mezon.trim_end_matches('/').to_owned(),
         cloudflare: bases.cloudflare.trim_end_matches('/').to_owned(),
+        profile: bases.profile.trim_end_matches('/').to_owned(),
     });
+}
+
+fn profile_read_base(bases: Option<&CdnReadBases>) -> &str {
+    bases
+        .map(|bases| bases.profile.as_str())
+        .filter(|profile| !profile.is_empty())
+        .unwrap_or(PROFILE_IMG_BASE)
+}
+
+fn public_image_url_for_upload(bases: Option<&CdnReadBases>, filename: &str) -> Result<String> {
+    if filename.is_empty() {
+        anyhow::bail!("public image upload returned an empty filename");
+    }
+    Ok(format!("{}/{filename}", profile_read_base(bases)))
 }
 
 fn mezon_cdn_base() -> &'static str {
@@ -1881,6 +1898,29 @@ impl AppApi {
             .await
     }
 
+    pub async fn set_override_everyone_channel(
+        &self,
+        clan_id: i64,
+        channel_id: i64,
+        enabled: bool,
+        exclude_type: crate::EveryoneExcludeType,
+        exclude_ids: Vec<i64>,
+    ) -> Result<()> {
+        self.transport
+            .set_override_everyone_channel(clan_id, channel_id, enabled, exclude_type, exclude_ids)
+            .await
+    }
+
+    pub async fn get_override_everyone_channel(
+        &self,
+        clan_id: i64,
+        channel_id: i64,
+    ) -> Result<crate::OverrideEveryoneChannel> {
+        self.transport
+            .get_override_everyone_channel(clan_id, channel_id)
+            .await
+    }
+
     pub async fn change_channel_category(
         &self,
         clan_id: i64,
@@ -2795,6 +2835,21 @@ impl AppApi {
         attachment_cdn_url_for_upload(upload.type_cdn, &self.base_img_url, &upload.filename)
     }
 
+    pub async fn upload_public_image(
+        &self,
+        filename: &str,
+        filetype: &str,
+        size: i32,
+        data: Vec<u8>,
+    ) -> Result<String> {
+        let upload = self
+            .transport
+            .upload_oauth_file(filename, filetype, size)
+            .await?;
+        crate::transport_runtime::put_bytes_to_content_type(&upload.url, data, filetype).await?;
+        public_image_url_for_upload(CDN_READ_BASES.get(), &upload.filename)
+    }
+
     async fn upload_media_from_url(
         &self,
         url: &str,
@@ -3009,7 +3064,7 @@ impl AppApi {
         );
 
         let permanent_url = self
-            .upload_bytes(&filename, filetype, filetype, size, width, height, data, 0)
+            .upload_public_image(&filename, filetype, size, data)
             .await?;
 
         tracing::info!("Avatar upload complete: url={}", permanent_url);
@@ -3464,8 +3519,9 @@ mod tests {
     use super::{
         AppApi, CdnFileLink, CdnReadBases, MULTIPART_PART_SIZE, PresignedAttachment,
         ResumableUpload, UploadPlan, attachment_cdn_url_for_upload, cdn_file_link_into_channel,
-        cdn_read_base_url, emoticon_id_from_filename, multipart_part_ranges, read_base_url,
-        sanitize_upload_filename, upload_attachment_type,
+        cdn_read_base_url, emoticon_id_from_filename, multipart_part_ranges,
+        public_image_url_for_upload, read_base_url, sanitize_upload_filename,
+        upload_attachment_type,
     };
     use crate::TransportClient;
     use crate::transport::{ApiAttachment, HttpFallbackSession};
@@ -3675,6 +3731,7 @@ mod tests {
         let dev = CdnReadBases {
             mezon: "https://cdn-dev.nccsoft.vn".into(),
             cloudflare: "https://cdn-dev.tx8.vn".into(),
+            profile: "https://cdn-dev-profile.nccsoft.vn".into(),
         };
         assert_eq!(
             read_base_url(Some(&dev), 1, "https://fallback"),
@@ -3688,6 +3745,24 @@ mod tests {
             read_base_url(Some(&dev), 0, "https://fallback/"),
             "https://fallback"
         );
+    }
+
+    #[test]
+    fn public_image_url_is_served_from_the_profile_host() {
+        let dev = CdnReadBases {
+            mezon: "https://cdn-dev.nccsoft.vn".into(),
+            cloudflare: "https://cdn-dev.tx8.vn".into(),
+            profile: "https://cdn-dev-profile.nccsoft.vn".into(),
+        };
+        assert_eq!(
+            public_image_url_for_upload(Some(&dev), "0000000000000000/1_logo.png").unwrap(),
+            "https://cdn-dev-profile.nccsoft.vn/0000000000000000/1_logo.png"
+        );
+        assert_eq!(
+            public_image_url_for_upload(None, "0000000000000000/1_logo.png").unwrap(),
+            "https://profile.mezon.ai/0000000000000000/1_logo.png"
+        );
+        assert!(public_image_url_for_upload(Some(&dev), "").is_err());
     }
 
     const FORWARD_DESTINATION: i64 = 0x1d00_0000_0000_abcd;

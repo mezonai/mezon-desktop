@@ -1179,12 +1179,19 @@ impl WgpuRenderer {
         self.max_texture_size
     }
 
+    fn flush_pending_work(&self) {
+        if let Some(resources) = self.resources.as_ref() {
+            resources.queue.submit(std::iter::empty());
+        }
+    }
+
     pub fn draw(&mut self, scene: &Scene) -> bool {
         // Bail out early if the surface has been unconfigured (e.g. during
         // Android background/rotation transitions).  Attempting to acquire
         // a texture from an unconfigured surface can block indefinitely on
         // some drivers (Adreno).
         if !self.surface_configured {
+            self.flush_pending_work();
             return false;
         }
 
@@ -1204,6 +1211,7 @@ impl WgpuRenderer {
                     res.invalidate_intermediate_textures();
                 }
                 self.atlas.clear();
+                self.flush_pending_work();
                 self.needs_redraw = true;
                 self.failed_frame_count = 0;
                 return false;
@@ -1211,8 +1219,6 @@ impl WgpuRenderer {
         } else {
             self.failed_frame_count = 0;
         }
-
-        self.atlas.before_frame();
 
         let frame = match self.resources().surface.get_current_texture() {
             wgpu::CurrentSurfaceTexture::Success(frame) => frame,
@@ -1224,6 +1230,7 @@ impl WgpuRenderer {
                 resources
                     .surface
                     .configure(&resources.device, &surface_config);
+                self.flush_pending_work();
                 return false;
             }
             wgpu::CurrentSurfaceTexture::Lost | wgpu::CurrentSurfaceTexture::Outdated => {
@@ -1232,18 +1239,23 @@ impl WgpuRenderer {
                 resources
                     .surface
                     .configure(&resources.device, &surface_config);
+                self.flush_pending_work();
                 return false;
             }
             wgpu::CurrentSurfaceTexture::Timeout | wgpu::CurrentSurfaceTexture::Occluded => {
+                self.flush_pending_work();
                 return false;
             }
             wgpu::CurrentSurfaceTexture::Validation => {
                 *self.last_error.lock().unwrap() =
                     Some("Surface texture validation error".to_string());
+                self.flush_pending_work();
                 return false;
             }
         };
 
+        // mezon vendor edit: replaces flush only once a frame will be submitted, and every failed present submits the writes already queued, so an unpresented surface cannot grow wgpu staging.
+        self.atlas.before_frame();
         // Now that we know the surface is healthy, ensure intermediate textures exist
         self.ensure_intermediate_textures();
 
@@ -1844,7 +1856,10 @@ impl WgpuRenderer {
     pub fn destroy(&mut self) {
         // Release surface-bound GPU resources eagerly so the underlying native
         // window can be destroyed before the renderer itself is dropped.
-        self.resources.take();
+        self.atlas.clear();
+        if let Some(resources) = self.resources.take() {
+            resources.queue.submit(std::iter::empty());
+        }
     }
 
     /// Returns true if the GPU device was lost and recovery is needed.

@@ -449,20 +449,9 @@ pub fn render_head(msg: &Message, ctx: &RowCtx) -> AnyElement {
     let (username_color, role_icon) = resolve_message_role_style(msg, ctx, ctx.app);
     let time_label = {
         let mut memo = ctx.row_memo.borrow_mut();
-        match memo.time_labels.get(&msg.id) {
-            Some(label) if !label.is_empty() || msg.time_hhmm.is_empty() => label.clone(),
-            _ => {
-                let label =
-                    format_message_time(&msg.time_hhmm, msg.local_date, ctx.locale, ctx.now);
-                if !label.is_empty() {
-                    if memo.time_labels.len() >= 4096 {
-                        memo.time_labels.clear();
-                    }
-                    memo.time_labels.insert(msg.id, label.clone());
-                }
-                label
-            }
-        }
+        memo.time_label(msg.id, &msg.time_hhmm, msg.local_date, || {
+            format_message_time(&msg.time_hhmm, msg.local_date, ctx.locale, ctx.now)
+        })
     };
     let mut name = div()
         .max_w_full()

@@ -4,8 +4,8 @@ use gpui::{
 };
 
 use mezon_store::{
-    AppConfig, ChannelId, ChannelList, ChannelWebhook, ClanId, ClanMembersStore, Settings,
-    WEBHOOK_NAME_MAX_LENGTH, WebhookStore,
+    AppConfig, ChannelEvent, ChannelId, ChannelList, ChannelWebhook, ClanId, ClanMembersStore,
+    Settings, WEBHOOK_NAME_MAX_LENGTH, WebhookStore,
 };
 
 use super::integration_setting_page::{
@@ -81,7 +81,10 @@ impl ChannelWebhookTab {
             edit_input_subs: std::collections::HashMap::new(),
             avatar_uploading: std::collections::HashSet::new(),
             creating: false,
-            _channel_sub: cx.subscribe(&channel_list_for_sub, |this, _, _, cx| {
+            _channel_sub: cx.subscribe(&channel_list_for_sub, |this, _, event, cx| {
+                if matches!(event, ChannelEvent::VoiceMembersChanged(_)) {
+                    return;
+                }
                 this.channel_options =
                     Self::build_channel_options(&this.channel_list, this.clan_id, cx);
                 this.sync_selected_channel();

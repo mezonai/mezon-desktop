@@ -1,7 +1,7 @@
 use std::{
     sync::{
         atomic::{AtomicBool, AtomicU8, Ordering},
-        mpsc::{SendError, Sender},
+        mpsc::{SyncSender, TrySendError},
         Arc,
     },
     thread::JoinHandle,
@@ -194,7 +194,10 @@ fn query_xfixes_version(conn: &xcb::Connection) -> Result<(), xcb::Error> {
 }
 
 impl X11Capturer {
-    pub fn new(options: &Options, tx: Sender<anyhow::Result<Frame>>) -> Result<Self, LinCapError> {
+    pub fn new(
+        options: &Options,
+        tx: SyncSender<anyhow::Result<Frame>>,
+    ) -> Result<Self, LinCapError> {
         let (conn, screen_num) = xcb::Connection::connect_with_xlib_display_and_extensions(
             &[xcb::Extension::RandR, xcb::Extension::XFixes],
             &[],
@@ -229,9 +232,9 @@ impl X11Capturer {
             while capturer_state_clone.load(Ordering::Acquire) == 1 {
                 let start = std::time::Instant::now();
 
-                match tx.send(grab(&conn, &target_clone, show_cursor)) {
-                    Ok(()) => {}
-                    Err(SendError(_)) => {
+                match tx.try_send(grab(&conn, &target_clone, show_cursor)) {
+                    Ok(()) | Err(TrySendError::Full(_)) => {}
+                    Err(TrySendError::Disconnected(_)) => {
                         log::debug!("Frame receiver was dropped.")
                     }
                 }

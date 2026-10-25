@@ -1973,6 +1973,9 @@ impl ChatArea {
                 |this: &mut crate::ChatLayout, store, event: &MessagesEvent, window, cx| {
                     let failure_key = match event {
                         MessagesEvent::SendFailedWithoutRow => Some("message.toast.sendFailed"),
+                        MessagesEvent::SendPermissionDenied => {
+                            Some("common.noPermissionToSendMessage")
+                        }
                         MessagesEvent::OgpRemoveFailed => Some("message.toast.closeOgpFailed"),
                         _ => None,
                     };

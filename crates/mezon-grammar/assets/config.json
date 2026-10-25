@@ -7,6 +7,7 @@
   "max_seq_len": 128,
   "dropout": 0.1,
   "num_intents": 12,
+  "num_pronouns": 14,
   "pad_token_id": 0,
   "unk_token_id": 1,
   "bos_token_id": 2,

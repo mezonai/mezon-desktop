@@ -43,8 +43,9 @@ mod video_player;
 pub use channel_messages::{ChannelMessages, ChannelMessagesEvent};
 pub(crate) use content::{RichRunPalette, rich_run_highlight_with_link_underline};
 pub(crate) use content::{
-    SELECTION_BG, code_block_copy_overlay, heading_line_height, heading_size, meeting_code,
-    open_message_link, pin_link_element, render_pin_rich_layout_element, resolve_message_link_url,
+    SELECTION_BG, code_block_copy_overlay, heading_line_height, heading_size,
+    interactive_link_text, meeting_code, open_message_link, pin_link_element,
+    render_pin_rich_layout_element, resolve_message_link_url,
 };
 pub use context::DEFAULT_DISPLAY_NAME_COLOR;
 pub(crate) use create_poll_modal::CreatePollModal;

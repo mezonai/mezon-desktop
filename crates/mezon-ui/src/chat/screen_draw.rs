@@ -8,10 +8,10 @@ use gpui::{
     prelude::*, px, size,
 };
 use mezon_store::{
-    ContentViewport, DesktopDraw, DrawAnnotation, DrawTool, NormalizedPoint, PRESET_COLORS,
-    PRESET_WIDTHS, STROKE_WIDTH_MEDIUM, STROKE_WIDTH_THIN, ScreenDrawState, ShapeAnnotation,
-    ShapeKind, TEXT_HANDLE_SIZE, TEXT_LINE_HEIGHT, TextAnnotation, VoiceStore, scale_alpha,
-    text_font_px,
+    ContentViewport, DesktopDraw, DrawAnnotation, DrawTool, HitBox, Marquee, NormalizedPoint,
+    PRESET_COLORS, PRESET_WIDTHS, STROKE_WIDTH_MEDIUM, STROKE_WIDTH_THIN, ScreenDrawState,
+    ShapeAnnotation, ShapeKind, TEXT_HANDLE_SIZE, TEXT_LINE_HEIGHT, TextAnnotation, VoiceStore,
+    scale_alpha, text_font_px,
 };
 use mezon_theme::Theme;
 use ui::Tooltip;
@@ -20,10 +20,12 @@ use crate::components::primitives::{Icon, IconName, Input, InputEvent, InputStat
 
 const ACCENT_BLUE: u32 = 0x5865f2;
 const CLOSE_RED: u32 = 0xef4444;
+const MARQUEE_FILL: u32 = 0x5865f22e;
 const ELLIPSE_SEGMENTS: usize = 64;
 
 const DESKTOP_TOOLS: &[DrawTool] = &[
     DrawTool::Pointer,
+    DrawTool::Select,
     DrawTool::Pen,
     DrawTool::Text,
     DrawTool::Eraser,
@@ -31,6 +33,7 @@ const DESKTOP_TOOLS: &[DrawTool] = &[
 
 const IN_APP_TOOLS: &[DrawTool] = &[
     DrawTool::Pointer,
+    DrawTool::Select,
     DrawTool::Pen,
     DrawTool::Text,
     DrawTool::Eraser,
@@ -40,7 +43,6 @@ const IN_APP_TOOLS: &[DrawTool] = &[
 pub(crate) enum DrawTarget {
     InApp(Entity<VoiceStore>),
     Desktop {
-        voice: Entity<VoiceStore>,
         draw: Entity<DesktopDraw>,
     },
 }
@@ -64,15 +66,12 @@ impl DrawTarget {
         }
     }
 
-    pub(crate) fn close(&self, window: &mut Window, cx: &mut App) {
+    pub(crate) fn close(&self, cx: &mut App) {
         match self {
             Self::InApp(voice) => {
                 voice.update(cx, |store, cx| store.set_screen_draw_active(false, cx))
             }
-            Self::Desktop { voice, draw } => {
-                voice.update(cx, |store, cx| store.end_desktop_draw_for(draw, cx));
-                window.remove_window();
-            }
+            Self::Desktop { draw } => draw.update(cx, |draw, cx| draw.set_minimized(true, cx)),
         }
     }
 
@@ -83,7 +82,7 @@ impl DrawTarget {
 
 pub(crate) fn cursor_for_tool(tool: DrawTool) -> CursorStyle {
     match tool {
-        DrawTool::Pointer => CursorStyle::Arrow,
+        DrawTool::Pointer | DrawTool::Select => CursorStyle::Arrow,
         DrawTool::Text => CursorStyle::IBeam,
         _ => CursorStyle::Crosshair,
     }
@@ -92,6 +91,7 @@ pub(crate) fn cursor_for_tool(tool: DrawTool) -> CursorStyle {
 fn tool_icon(tool: DrawTool) -> IconName {
     match tool {
         DrawTool::Pointer => IconName::AnnotatePointer,
+        DrawTool::Select => IconName::AnnotateSelect,
         DrawTool::Pen => IconName::PenEdit,
         DrawTool::Highlighter => IconName::AnnotateHighlighter,
         DrawTool::Laser => IconName::AnnotateLaser,
@@ -106,6 +106,7 @@ fn tool_icon(tool: DrawTool) -> IconName {
 fn tool_label(tool: DrawTool) -> &'static str {
     match tool {
         DrawTool::Pointer => "Select and move",
+        DrawTool::Select => "Select multiple",
         DrawTool::Pen => "Pen",
         DrawTool::Highlighter => "Highlighter",
         DrawTool::Laser => "Vanishing pen",
@@ -119,7 +120,7 @@ fn tool_label(tool: DrawTool) -> &'static str {
 
 fn tool_group(tool: DrawTool) -> u8 {
     match tool {
-        DrawTool::Pointer => 0,
+        DrawTool::Pointer | DrawTool::Select => 0,
         DrawTool::Pen | DrawTool::Highlighter | DrawTool::Laser => 1,
         DrawTool::Arrow | DrawTool::Rectangle | DrawTool::Ellipse => 2,
         DrawTool::Text | DrawTool::Eraser => 3,
@@ -214,12 +215,12 @@ pub(crate) fn render_draw_toolbar(
         let target = target.clone();
         close_button(
             if target.is_desktop() {
-                "Stop annotating"
+                "Minimize toolbar"
             } else {
                 "Close drawing"
             },
             tooltips,
-            move |_, window, cx| target.close(window, cx),
+            move |_, _, cx| target.close(cx),
         )
     };
 
@@ -533,14 +534,18 @@ pub(crate) fn render_screen_draw_overlay(
                     window.prevent_default();
                 }
             })
-            .on_mouse_move(move |e, _, cx| {
+            .on_mouse_move(move |e, window, cx| {
                 let Some(bounds) = bounds_for_move.lock().ok().and_then(|g| *g) else {
                     return;
                 };
                 let (point, _) = normalize(bounds, e.position);
                 let pressed = e.pressed_button == Some(MouseButton::Left);
+                let measure = |text: &TextAnnotation| text_width(window, text);
                 voice_move.update(cx, |store, cx| {
-                    if store.screen_draw_mut().pointer_move(point, pressed) {
+                    if store
+                        .screen_draw_mut()
+                        .pointer_move(point, pressed, &measure)
+                    {
                         cx.notify();
                     }
                 });
@@ -783,6 +788,9 @@ pub(crate) fn paint_draw_state(
     {
         paint_selection(window, state, vp, origin, selected);
     }
+    if state.active_tool == DrawTool::Select {
+        paint_group_selection(window, state, vp, origin);
+    }
 }
 
 pub(crate) fn text_width(window: &Window, text: &TextAnnotation) -> f32 {
@@ -816,23 +824,11 @@ fn paint_selection(
     let Some(frame) = state.annotation_bounds(selected, canvas, &measure) else {
         return;
     };
-    let left = origin.x + px(vp.offset_x + frame.left);
-    let top = origin.y + px(vp.offset_y + frame.top);
-    let accent = gpui::rgb(ACCENT_BLUE);
-    window.paint_quad(outline(
-        Bounds {
-            origin: point(left - px(2.0), top - px(2.0)),
-            size: size(
-                px(frame.right - frame.left + 4.0),
-                px(frame.bottom - frame.top + 4.0),
-            ),
-        },
-        accent,
-        BorderStyle::Dashed,
-    ));
+    paint_selection_frame(window, vp, origin, frame);
     if !matches!(selected, DrawAnnotation::Text(_)) {
         return;
     }
+    let accent = gpui::rgb(ACCENT_BLUE);
     let handle = px(TEXT_HANDLE_SIZE);
     let center = point(
         origin.x + px(vp.offset_x + frame.right),
@@ -859,6 +855,66 @@ fn paint_selection(
         )
         .corner_radii(px(1.0)),
     );
+}
+
+fn paint_group_selection(
+    window: &mut Window,
+    state: &ScreenDrawState,
+    vp: &ContentViewport,
+    origin: Point<Pixels>,
+) {
+    let canvas = (vp.width, vp.height);
+    let measure = |text: &TextAnnotation| text_width(window, text);
+    let frames: Vec<HitBox> = state
+        .annotations
+        .iter()
+        .filter(|ann| state.selection.contains(&ann.id()))
+        .filter_map(|ann| state.annotation_bounds(ann, canvas, &measure))
+        .collect();
+    for frame in frames {
+        paint_selection_frame(window, vp, origin, frame);
+    }
+    if let Some(marquee) = &state.marquee {
+        paint_marquee(window, vp, origin, marquee);
+    }
+}
+
+fn paint_selection_frame(
+    window: &mut Window,
+    vp: &ContentViewport,
+    origin: Point<Pixels>,
+    frame: HitBox,
+) {
+    let left = origin.x + px(vp.offset_x + frame.left);
+    let top = origin.y + px(vp.offset_y + frame.top);
+    window.paint_quad(outline(
+        Bounds {
+            origin: point(left - px(2.0), top - px(2.0)),
+            size: size(
+                px(frame.right - frame.left + 4.0),
+                px(frame.bottom - frame.top + 4.0),
+            ),
+        },
+        gpui::rgb(ACCENT_BLUE),
+        BorderStyle::Dashed,
+    ));
+}
+
+fn paint_marquee(
+    window: &mut Window,
+    vp: &ContentViewport,
+    origin: Point<Pixels>,
+    marquee: &Marquee,
+) {
+    let (x0, y0) = vp.to_pixels(&marquee.start);
+    let (x1, y1) = vp.to_pixels(&marquee.end);
+    let bounds = Bounds {
+        origin: point(origin.x + px(x0.min(x1)), origin.y + px(y0.min(y1))),
+        size: size(px((x1 - x0).abs()), px((y1 - y0).abs())),
+    };
+    let accent = gpui::rgb(ACCENT_BLUE);
+    window.paint_quad(fill(bounds, gpui::rgba(MARQUEE_FILL)));
+    window.paint_quad(outline(bounds, accent, BorderStyle::Dashed));
 }
 
 fn to_screen(vp: &ContentViewport, origin: Point<Pixels>, pt: &NormalizedPoint) -> Point<Pixels> {

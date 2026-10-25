@@ -355,7 +355,7 @@ pub fn save(jobs: &[Arc<UploadJob>], failed: &[FailedUpload], generation: u64) {
     }
 }
 
-fn write_private(path: &Path, saved: &SavedUploadsRef<'_>) -> anyhow::Result<()> {
+pub(crate) fn write_private<T: Serialize + ?Sized>(path: &Path, saved: &T) -> anyhow::Result<()> {
     use std::io::Write as _;
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir)?;

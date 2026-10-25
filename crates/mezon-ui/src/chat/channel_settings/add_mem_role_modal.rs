@@ -6,6 +6,7 @@ use gpui::{
     App, Context, Entity, EventEmitter, FocusHandle, Focusable, FontWeight, ListAlignment,
     ListState, SharedString, Subscription, Task, Window, div, list, prelude::*, px,
 };
+use mezon_client::EveryoneExcludeType;
 use mezon_store::{
     ChannelId, ChannelList, ChannelType, ChannelUsersStore, ClanId, ClanMember, ClanMembersStore,
     MentionSearchEvent, MentionSearchStore, RoleId, RolesStore, Settings, UserId,
@@ -21,7 +22,7 @@ use super::permissions_tab::{
 use super::remote_members;
 use crate::app::shell::Shell;
 use crate::components::primitives::{
-    Checkbox, Icon, IconName, Input, InputEvent, InputState, h_flex, v_flex,
+    Checkbox, Icon, IconName, Input, InputEvent, InputState, TabBar, h_flex, v_flex,
 };
 use crate::theme::{ActiveTheme, Theme};
 
@@ -61,6 +62,12 @@ pub(super) enum AddMemRoleEvent {
         role_ids: Vec<RoleId>,
         remote_members: Vec<ClanMember>,
     },
+    EveryoneExclude {
+        kind: EveryoneExcludeType,
+        user_ids: Vec<UserId>,
+        role_ids: Vec<RoleId>,
+        remote_members: Vec<ClanMember>,
+    },
 }
 
 pub struct AddMemRoleModal {
@@ -73,6 +80,7 @@ pub struct AddMemRoleModal {
     excluded_role_ids: Vec<RoleId>,
     selected_user_ids: Vec<UserId>,
     selected_role_ids: Vec<RoleId>,
+    everyone_kind: Option<EveryoneExcludeType>,
     role_rows: Rc<Vec<RoleRow>>,
     member_ids: Rc<Vec<UserId>>,
     remote_members: Rc<HashMap<UserId, ClanMember>>,
@@ -116,6 +124,37 @@ impl AddMemRoleModal {
                 private,
                 staged_user_ids,
                 staged_role_ids,
+                None,
+                window,
+                cx,
+            )
+        });
+        let focus_handle = modal.read(cx).focus_handle.clone();
+        window.focus(&focus_handle, cx);
+        Shell::global(cx).update(cx, |shell, cx| shell.show_modal(modal.clone().into(), cx));
+        modal
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn open_everyone_exclude<T: 'static>(
+        clan_id: ClanId,
+        channel_id: ChannelId,
+        settings: Entity<Settings>,
+        kind: EveryoneExcludeType,
+        selected_user_ids: Vec<UserId>,
+        selected_role_ids: Vec<RoleId>,
+        window: &mut Window,
+        cx: &mut Context<T>,
+    ) -> Entity<Self> {
+        let modal = cx.new(|cx| {
+            Self::new(
+                clan_id,
+                channel_id,
+                settings,
+                false,
+                selected_user_ids,
+                selected_role_ids,
+                Some(kind),
                 window,
                 cx,
             )
@@ -134,6 +173,7 @@ impl AddMemRoleModal {
         private: bool,
         staged_user_ids: Vec<UserId>,
         staged_role_ids: Vec<RoleId>,
+        everyone_kind: Option<EveryoneExcludeType>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
@@ -188,11 +228,12 @@ impl AddMemRoleModal {
             }));
         }
 
-        let (excluded_user_ids, excluded_role_ids) = if private {
-            (Vec::new(), Vec::new())
-        } else {
-            (staged_user_ids, staged_role_ids)
-        };
+        let (excluded_user_ids, excluded_role_ids, selected_user_ids, selected_role_ids) =
+            match everyone_kind {
+                Some(_) => (Vec::new(), Vec::new(), staged_user_ids, staged_role_ids),
+                None if private => (Vec::new(), Vec::new(), Vec::new(), Vec::new()),
+                None => (staged_user_ids, staged_role_ids, Vec::new(), Vec::new()),
+            };
 
         let mut this = Self {
             clan_id,
@@ -202,8 +243,9 @@ impl AddMemRoleModal {
             query: String::new(),
             excluded_user_ids,
             excluded_role_ids,
-            selected_user_ids: Vec::new(),
-            selected_role_ids: Vec::new(),
+            selected_user_ids,
+            selected_role_ids,
+            everyone_kind,
             role_rows: Rc::new(Vec::new()),
             member_ids: Rc::new(Vec::new()),
             remote_members: Rc::new(HashMap::new()),
@@ -284,17 +326,23 @@ impl AddMemRoleModal {
 
     fn compute_role_candidates(&self, cx: &App) -> Vec<RoleRow> {
         let search = parse_search(&self.query);
-        if search.mode == SearchMode::MembersOnly {
+        if search.mode == SearchMode::MembersOnly
+            || self.everyone_kind == Some(EveryoneExcludeType::User)
+        {
             return Vec::new();
         }
         let store = RolesStore::global(cx);
         let store = store.read(cx);
-        let on_channel: HashSet<RoleId> = store
-            .roles_for_channel(self.clan_id, self.channel_id)
-            .into_iter()
-            .filter(|(_, role)| role.role_channel_active)
-            .map(|(role_id, _)| role_id)
-            .collect();
+        let on_channel: HashSet<RoleId> = if self.everyone_kind.is_some() {
+            HashSet::new()
+        } else {
+            store
+                .roles_for_channel(self.clan_id, self.channel_id)
+                .into_iter()
+                .filter(|(_, role)| role.role_channel_active)
+                .map(|(role_id, _)| role_id)
+                .collect()
+        };
         let excluded_roles: HashSet<RoleId> = self.excluded_role_ids.iter().copied().collect();
         store
             .active_roles_in_clan(self.clan_id)
@@ -311,7 +359,10 @@ impl AddMemRoleModal {
 
     fn compute_member_candidates(&self, cx: &App) -> (Vec<UserId>, Vec<ClanMember>) {
         let search = parse_search(&self.query);
-        let in_channel: HashSet<UserId> = if self.is_private(cx) {
+        if self.everyone_kind == Some(EveryoneExcludeType::Role) {
+            return (Vec::new(), Vec::new());
+        }
+        let in_channel: HashSet<UserId> = if self.everyone_kind.is_none() && self.is_private(cx) {
             ChannelUsersStore::global(cx)
                 .read(cx)
                 .user_ids(self.channel_id)
@@ -393,10 +444,32 @@ impl AddMemRoleModal {
         Shell::global(cx).update(cx, |shell, cx| shell.close_modal(cx));
     }
 
+    fn set_everyone_kind(&mut self, kind: EveryoneExcludeType, cx: &mut Context<Self>) {
+        if self.everyone_kind == Some(kind) {
+            return;
+        }
+        self.everyone_kind = Some(kind);
+        self.refresh_candidates(cx);
+    }
+
     fn submit(&mut self, cx: &mut Context<Self>) {
         let user_ids = std::mem::take(&mut self.selected_user_ids);
         let role_ids = std::mem::take(&mut self.selected_role_ids);
         let picked = self.picked_remote_members(&user_ids);
+        if let Some(kind) = self.everyone_kind {
+            let (user_ids, role_ids) = match kind {
+                EveryoneExcludeType::User => (user_ids, Vec::new()),
+                EveryoneExcludeType::Role => (Vec::new(), role_ids),
+            };
+            cx.emit(AddMemRoleEvent::EveryoneExclude {
+                kind,
+                user_ids,
+                role_ids,
+                remote_members: picked,
+            });
+            Self::close(cx);
+            return;
+        }
         if !self.is_private(cx) {
             if !user_ids.is_empty() || !role_ids.is_empty() {
                 cx.emit(AddMemRoleEvent::Staged {
@@ -725,6 +798,35 @@ impl Render for AddMemRoleModal {
                         "channelSetting.addMembersRoles.instruction",
                     ))),
             )
+            .when_some(self.everyone_kind, |el, kind| {
+                let modal = cx.entity();
+                let selected = match kind {
+                    EveryoneExcludeType::Role => 0,
+                    EveryoneExcludeType::User => 1,
+                };
+                el.child(
+                    div().w_full().pb_3().child(
+                        TabBar::new(vec![
+                            mezon_i18n::t(locale.as_ref(), "channelSetting.addMembersRoles.roles")
+                                .into(),
+                            mezon_i18n::t(
+                                locale.as_ref(),
+                                "channelSetting.addMembersRoles.members",
+                            )
+                            .into(),
+                        ])
+                        .selected(selected)
+                        .on_select(move |index, _, cx| {
+                            let kind = if index == 0 {
+                                EveryoneExcludeType::Role
+                            } else {
+                                EveryoneExcludeType::User
+                            };
+                            modal.update(cx, |this, cx| this.set_everyone_kind(kind, cx));
+                        }),
+                    ),
+                )
+            })
             .child(self.render_candidate_list(locale.as_ref(), &theme, cx))
             .child(
                 h_flex()

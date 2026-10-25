@@ -495,6 +495,7 @@ pub enum ChannelEvent {
     ActiveChannelChanged(Option<ChannelId>),
     Unread(ChannelId),
     InVoiceChanged,
+    VoiceMembersChanged(ClanId),
     ClanChannelsLoaded(ClanId),
     UserChannelsLoaded,
     ArchivedByAdministrator {
@@ -1589,11 +1590,15 @@ impl ChannelList {
         .detach();
     }
 
+    pub fn is_clan_extras_loaded(&self, clan_id: ClanId) -> bool {
+        self.extras_loaded.contains(&clan_id)
+    }
+
     fn finish_extras(&mut self, clan_id: ClanId, extras: ClanExtras, cx: &mut Context<Self>) {
         let complete = extras.is_complete();
-        let applied = self.apply_clan_extras(clan_id, extras, cx);
-        if applied && complete {
-            self.extras_loaded.insert(clan_id);
+        let (applied, voice_members_changed) = self.apply_clan_extras(clan_id, extras, cx);
+        if applied && complete && self.extras_loaded.insert(clan_id) && !voice_members_changed {
+            cx.emit(ChannelEvent::VoiceMembersChanged(clan_id));
         }
     }
 
@@ -2367,7 +2372,7 @@ impl ChannelList {
         clan_id: ClanId,
         extras: ClanExtras,
         cx: &mut Context<Self>,
-    ) -> bool {
+    ) -> (bool, bool) {
         let mut app_channels_changed = false;
         if let Some(app_channels) = extras.app_channels {
             app_channels_changed = self.app_channels_cache.get(&clan_id) != Some(&app_channels);
@@ -2376,13 +2381,13 @@ impl ChannelList {
 
         let Some(slot) = self.cache.get_mut(&clan_id) else {
             cx.notify();
-            return false;
+            return (false, false);
         };
 
         let mut owned = std::mem::take(slot);
         owned.retain(|category| category.id != FAVOR_CATE_ID);
 
-        let mut changed = app_channels_changed;
+        let mut voice_members_changed = false;
         if let Some(voice_map) = extras.voice_map.as_ref() {
             for ch in owned
                 .iter_mut()
@@ -2391,7 +2396,7 @@ impl ChannelList {
                 let members = voice_map.get(&ch.id).cloned().unwrap_or_default();
                 if ch.voice_members != members {
                     ch.voice_members = members;
-                    changed = true;
+                    voice_members_changed = true;
                 }
             }
         }
@@ -2406,6 +2411,10 @@ impl ChannelList {
         if in_voice_changed {
             cx.emit(ChannelEvent::InVoiceChanged);
         }
+        if voice_members_changed {
+            cx.emit(ChannelEvent::VoiceMembersChanged(clan_id));
+        }
+        let changed = app_channels_changed || voice_members_changed;
         tracing::debug!(
             target: "clan_load",
             clan_id = clan_id.get(),
@@ -2416,7 +2425,7 @@ impl ChannelList {
         if changed || in_voice_changed {
             cx.notify();
         }
-        true
+        (true, voice_members_changed)
     }
 
     fn notify_channel_list(&self, clan_id: ClanId, cx: &mut Context<Self>) {
@@ -4374,6 +4383,9 @@ impl ChannelList {
                         sharing_screen: false,
                     },
                 );
+                if changed {
+                    cx.emit(ChannelEvent::VoiceMembersChanged(clan_id));
+                }
                 notify_in_voice_change(changed, in_voice_changed, cx);
             }
             RealtimeEvent::VoiceLeaved(e) => {
@@ -4409,6 +4421,9 @@ impl ChannelList {
                 );
                 let in_voice_changed =
                     apply_in_voice_leaved(&mut self.in_voice, user_id, channel_id);
+                if changed {
+                    cx.emit(ChannelEvent::VoiceMembersChanged(clan_id));
+                }
                 notify_in_voice_change(changed, in_voice_changed, cx);
             }
             RealtimeEvent::ScreenShare(e) => {
@@ -9522,6 +9537,59 @@ mod tests {
                 assert_voice_member_on_both_copies(channels, "structure refetch");
             });
         });
+    }
+
+    #[gpui::test]
+    fn a_voice_leave_after_the_next_join_still_reports_the_member_change(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        use std::cell::RefCell;
+        use std::rc::Rc;
+
+        let changes = Rc::new(RefCell::new(Vec::new()));
+        let sink = changes.clone();
+        let _channels = cx.update(|cx| {
+            let channels = init_channel_list(cx);
+            cx.subscribe(&channels, move |_, event, _| {
+                if let ChannelEvent::VoiceMembersChanged(clan_id) = event {
+                    sink.borrow_mut().push(*clan_id);
+                }
+            })
+            .detach();
+            channels.update(cx, |channels, cx| {
+                channels.apply_clan_structure(ClanId(1), structure_with_two_channels(), None, cx);
+                channels.apply_clan_extras(ClanId(1), voice_extras(one_user_in_voice()), cx);
+                channels.handle_event(
+                    &RealtimeEvent::VoiceJoined(mezon_proto::realtime::VoiceJoinedEvent {
+                        clan_id: 1,
+                        user_id: VOICE_USER.get(),
+                        voice_channel_id: 1,
+                        participant: "someone".into(),
+                        ..Default::default()
+                    }),
+                    cx,
+                );
+                channels.handle_event(
+                    &RealtimeEvent::VoiceLeaved(mezon_proto::realtime::VoiceLeavedEvent {
+                        clan_id: 1,
+                        voice_channel_id: VOICE_CHANNEL.get(),
+                        voice_user_id: VOICE_USER.get(),
+                        ..Default::default()
+                    }),
+                    cx,
+                );
+                let left = channels
+                    .channel(ClanId(1), VOICE_CHANNEL)
+                    .map(|ch| ch.voice_members.len());
+                assert_eq!(left, Some(0));
+                assert_eq!(
+                    channels.in_voice_status(VOICE_USER).map(|i| i.channel_id),
+                    Some(ChannelId(1))
+                );
+            });
+            channels
+        });
+        assert_eq!(changes.borrow().as_slice(), [ClanId(1); 3]);
     }
 
     #[gpui::test]

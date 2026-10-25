@@ -1,7 +1,8 @@
 use gpui::{Context, FocusHandle, SharedString, Window, div, prelude::*, px};
-use mezon_store::{ChannelId, ClanId, ThreadsStore};
+use mezon_store::{ChannelId, ChannelList, ClanId, ThreadsStore};
 
 use super::Shell;
+use crate::channel_navigation::navigate_after_thread_left;
 use crate::components::primitives::{Button, ButtonVariants, h_flex, v_flex};
 use crate::theme::ActiveTheme;
 
@@ -74,10 +75,16 @@ impl Render for ConfirmLeaveThreadModal {
                             .label(self.leave_label.clone())
                             .danger()
                             .on_click(move |_, _window, cx| {
+                                let parent_id = ChannelList::global(cx)
+                                    .read(cx)
+                                    .channel(clan_id, channel_id)
+                                    .and_then(|c| c.parent_id)
+                                    .unwrap_or(ChannelId(0));
                                 ThreadsStore::global(cx).update(cx, |store, cx| {
                                     store.leave_thread(clan_id, channel_id, cx);
                                 });
                                 Shell::global(cx).update(cx, |shell, cx| shell.close_modal(cx));
+                                navigate_after_thread_left(cx, clan_id, channel_id, parent_id);
                             }),
                     ),
             )

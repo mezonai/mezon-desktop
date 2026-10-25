@@ -1725,6 +1725,7 @@ impl ChannelMessages {
                 | MessagesEvent::ShareContactFinished { .. }
                 | MessagesEvent::AnonymousModeChanged
                 | MessagesEvent::SendFailedWithoutRow
+                | MessagesEvent::SendPermissionDenied
                 | MessagesEvent::OgpRemoveFailed => return,
                 MessagesEvent::TopicUpdated { .. } => {}
             }
@@ -3777,7 +3778,7 @@ impl ChannelMessages {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let channel_id = ChannelList::global(cx).read(cx).active_channel_id;
+        let channel_id = MessagesStore::global(cx).read(cx).active_channel_id();
         if self.cached_for_channel == channel_id {
             return;
         }

@@ -22,9 +22,9 @@ pub type ChannelItem = (
 #[cfg(not(target_os = "macos"))]
 pub type ChannelItem = Frame;
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "linux", target_os = "freebsd"))]
 pub type ChannelSender = mpsc::SyncSender<Result<ChannelItem>>;
-#[cfg(not(target_os = "macos"))]
+#[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "freebsd")))]
 pub type ChannelSender = mpsc::Sender<Result<ChannelItem>>;
 
 pub fn get_output_frame_size(options: &Options) -> [u32; 2] {

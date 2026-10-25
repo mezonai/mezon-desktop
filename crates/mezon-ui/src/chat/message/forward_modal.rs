@@ -9,10 +9,11 @@ use gpui::{
 };
 use mezon_store::{
     BadgeService, ChannelEvent, ChannelId, ChannelList, ChannelType, ClanId, ClanList,
-    CtrlKChannel, CtrlKSearchStore, DirectKind, DirectMessageStore, ForwardTarget, FriendState,
-    FriendStore, MAX_FORWARD_MESSAGE_LENGTH, Message, MessageRef, MessagesEvent, MessagesStore,
-    ProfileContext, SEARCH_CTRL_K_MAX_TEXT_BYTES, ShareContactSubject, UserId, UsersByUserStore,
-    channel_join_params, is_age_restricted, resolve_avatar_url, resolve_user_profile,
+    CtrlKChannel, CtrlKSearchStore, DirectKind, DirectMessageStore, ForwardFailure, ForwardTarget,
+    FriendState, FriendStore, MAX_FORWARD_MESSAGE_LENGTH, Message, MessageRef, MessagesEvent,
+    MessagesStore, ProfileContext, SEARCH_CTRL_K_MAX_TEXT_BYTES, ShareContactSubject, UserId,
+    UsersByUserStore, channel_join_params, is_age_restricted, resolve_avatar_url,
+    resolve_user_profile,
 };
 
 use crate::app::shell::Shell;
@@ -754,7 +755,7 @@ impl ForwardMessageModal {
 
     /// A partial failure names only the destinations that actually failed — the
     /// ones that went through are still reported as sent.
-    fn finish(&mut self, sent: usize, failed: Vec<SharedString>, cx: &mut Context<Self>) {
+    fn finish(&mut self, sent: usize, failed: Vec<ForwardFailure>, cx: &mut Context<Self>) {
         if !self.submitting {
             return;
         }
@@ -766,16 +767,26 @@ impl ForwardMessageModal {
                 if failed.is_empty() {
                     shell.success(mezon_i18n::t(&locale, "forwardMessage.successMessage"), cx);
                 } else {
+                    let denied = failed.iter().any(|f| f.permission_denied);
                     let names = failed
                         .iter()
-                        .map(SharedString::as_ref)
+                        .filter(|f| !f.permission_denied)
+                        .map(|f| f.label.as_ref())
                         .collect::<Vec<_>>()
                         .join(", ");
-                    let message = format!(
-                        "{}: {names}",
-                        mezon_i18n::t(&locale, "forwardMessage.errorMessage")
-                    );
-                    shell.error(SharedString::from(message), cx);
+                    if denied {
+                        shell.error(
+                            mezon_i18n::t(&locale, "common.noPermissionToSendMessage"),
+                            cx,
+                        );
+                    }
+                    if !names.is_empty() {
+                        let message = format!(
+                            "{}: {names}",
+                            mezon_i18n::t(&locale, "forwardMessage.errorMessage")
+                        );
+                        shell.error(SharedString::from(message), cx);
+                    }
                     if sent > 0 {
                         shell.success(mezon_i18n::t(&locale, "forwardMessage.successMessage"), cx);
                     }
@@ -1703,7 +1714,7 @@ impl ShareContactModal {
         Shell::global(cx).update(cx, |shell, cx| shell.close_modal(cx));
     }
 
-    fn finish(&mut self, sent: usize, failed: Vec<SharedString>, cx: &mut Context<Self>) {
+    fn finish(&mut self, sent: usize, failed: Vec<ForwardFailure>, cx: &mut Context<Self>) {
         if !self.submitting {
             return;
         }
@@ -1714,6 +1725,11 @@ impl ShareContactModal {
                 if failed.is_empty() && sent > 0 {
                     shell.success(
                         mezon_i18n::t(&locale, "shareContact.contactSharedSuccess"),
+                        cx,
+                    );
+                } else if failed.iter().any(|f| f.permission_denied) {
+                    shell.error(
+                        mezon_i18n::t(&locale, "common.noPermissionToSendMessage"),
                         cx,
                     );
                 } else {

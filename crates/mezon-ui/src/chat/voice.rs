@@ -23,9 +23,7 @@ use crate::chat::inbox::{InboxPopoverPanel, clan_has_inbox_badge};
 use crate::chat::media_permission_prompt::{
     media_access_missing, media_access_needed_label, media_permission_badge,
 };
-use crate::chat::screen_annotation::{
-    desktop_annotation_supported, draw_unavailable, toggle_desktop_annotation,
-};
+use crate::chat::screen_annotation::{desktop_annotation_supported, toggle_desktop_annotation};
 use crate::chat::screen_draw::{render_draw_toolbox, render_screen_draw_overlay};
 use crate::components::primitives::{
     Avatar, ContextMenu, Icon, IconName, Sizable, Size, Spinner, context_menu_at,
@@ -3818,11 +3816,17 @@ fn control_bar(
                 "channelVoice.breakout.title"
             },
         );
-        circle_button("voice-breakout-btn", bg, hover, IconName::People, color)
-            .tooltip(Tooltip::text(tooltip))
-            .on_click(move |_, window, cx| {
-                crate::chat::voice_breakout::BreakoutRoomsModal::show(voice.clone(), window, cx)
-            })
+        circle_button(
+            "voice-breakout-btn",
+            bg,
+            hover,
+            IconName::VoiceBreakoutIcon,
+            color,
+        )
+        .tooltip(Tooltip::text(tooltip))
+        .on_click(move |_, window, cx| {
+            crate::chat::voice_breakout::BreakoutRoomsModal::show(voice.clone(), window, cx)
+        })
     });
     let return_to_main_button = store.breakout_room_id().is_some().then(|| {
         let voice = voice.clone();
@@ -3905,12 +3909,7 @@ fn control_bar(
     if let Some(key) = store.primary_screen_key() {
         let pip_active = store.pip_key() == Some(key);
         let is_fullscreen = store.fullscreen_screen() == Some(key);
-        let desktop_draw = desktop_annotation_supported(store);
-        let draw_active = if desktop_draw {
-            store.desktop_draw().is_some()
-        } else {
-            store.screen_draw().is_active
-        };
+        let draw_active = store.desktop_draw().is_some();
 
         let draw_color: Hsla = if draw_active {
             gpui::rgb(ACCENT_BLUE).into()
@@ -3918,7 +3917,7 @@ fn control_bar(
             theme.text_secondary.into()
         };
 
-        let draw_button = {
+        let draw_button = desktop_annotation_supported(store).then(|| {
             let voice = voice.clone();
             circle_button(
                 "voice-draw-btn",
@@ -3931,20 +3930,13 @@ fn control_bar(
                 IconName::PenEdit,
                 draw_color,
             )
-            .tooltip(Tooltip::text(match (desktop_draw, draw_active) {
-                (true, true) => "Stop Annotating",
-                (true, false) => "Annotate Your Screen",
-                (false, true) => "Stop Drawing",
-                (false, false) => "Draw on Screen",
+            .tooltip(Tooltip::text(if draw_active {
+                "Stop Annotating"
+            } else {
+                "Annotate Your Screen"
             }))
-            .on_click(move |_, _, cx| {
-                if desktop_draw {
-                    toggle_desktop_annotation(&voice, cx);
-                } else {
-                    voice.update(cx, |store, cx| store.toggle_screen_draw(cx));
-                }
-            })
-        };
+            .on_click(move |_, _, cx| toggle_desktop_annotation(&voice, cx))
+        });
 
         let pip_color: Hsla = if pip_active {
             gpui::rgb(ACCENT_BLUE).into()
@@ -3991,7 +3983,7 @@ fn control_bar(
         };
 
         tail = tail
-            .children((!draw_unavailable(store)).then_some(draw_button))
+            .children(draw_button)
             .child(pip_button)
             .child(fs_button);
     }

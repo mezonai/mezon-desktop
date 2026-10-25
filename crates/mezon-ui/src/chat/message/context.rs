@@ -4,6 +4,7 @@ use std::ops::Range;
 use std::rc::Rc;
 use std::sync::Arc;
 
+use chrono::NaiveDate;
 use gpui::{App, Entity, HighlightStyle, Hsla, SharedString, WeakEntity};
 use mezon_store::{
     ChannelType, ClanId, MessageId, ProfileContext, RichClick, RichLayout, Settings, SpriteAtlas,
@@ -127,6 +128,12 @@ pub struct RecentEmojiCell {
     pub element_key: SharedString,
 }
 
+pub struct TimeLabelMemo {
+    pub time_hhmm: SharedString,
+    pub local_date: Option<NaiveDate>,
+    pub label: SharedString,
+}
+
 #[derive(Default)]
 pub struct RowMemo {
     /// sender -> live-resolved (raw, proxied) avatar urls; `None` caches a
@@ -138,7 +145,7 @@ pub struct RowMemo {
     /// (clan, sender) -> resolved username colour + role icon for head rows.
     pub role_styles: HashMap<(Option<ClanId>, UserId), (Hsla, Option<SharedString>)>,
     /// message -> formatted head time label ("14:03" / "Yesterday at 14:03").
-    pub time_labels: HashMap<MessageId, SharedString>,
+    pub time_labels: HashMap<MessageId, TimeLabelMemo>,
     /// emoji id -> reaction pill image url. Reactions are not precomputed by the
     /// store the way message spans are, so without this the imgproxy url for
     /// every pill of every visible message is rebuilt on every frame.
@@ -173,6 +180,36 @@ impl RowMemo {
         self.role_styles
             .retain(|(clan, _), _| *clan != Some(clan_id));
         before != self.role_styles.len()
+    }
+
+    pub fn time_label(
+        &mut self,
+        id: MessageId,
+        time_hhmm: &SharedString,
+        local_date: Option<NaiveDate>,
+        compute: impl FnOnce() -> SharedString,
+    ) -> SharedString {
+        if let Some(cached) = self.time_labels.get(&id)
+            && cached.time_hhmm == *time_hhmm
+            && cached.local_date == local_date
+        {
+            return cached.label.clone();
+        }
+        let label = compute();
+        if !label.is_empty() {
+            if self.time_labels.len() >= ROW_MEMO_CAPACITY {
+                self.time_labels.clear();
+            }
+            self.time_labels.insert(
+                id,
+                TimeLabelMemo {
+                    time_hhmm: time_hhmm.clone(),
+                    local_date,
+                    label: label.clone(),
+                },
+            );
+        }
+        label
     }
 }
 
@@ -239,5 +276,39 @@ mod tests {
         assert!(memo.forget_clan_role_styles(ClanId(1)));
         assert_eq!(memo.role_styles.len(), 2);
         assert!(!memo.forget_clan_role_styles(ClanId(1)));
+    }
+
+    #[test]
+    fn time_label_is_not_shared_by_two_rows_with_the_same_id() {
+        let mut memo = RowMemo::default();
+        let id = MessageId(7);
+        let today = NaiveDate::from_ymd_opt(2026, 10, 24);
+        let earlier_date = NaiveDate::from_ymd_opt(2026, 10, 16);
+        let first_time = SharedString::from("16:12");
+        let second_time = SharedString::from("15:22");
+
+        let first = memo.time_label(id, &first_time, today, || SharedString::from("16:12"));
+        let second = memo.time_label(id, &second_time, earlier_date, || {
+            SharedString::from("16/10/2026, 15:22")
+        });
+
+        assert_eq!(first.as_ref(), "16:12");
+        assert_eq!(second.as_ref(), "16/10/2026, 15:22");
+    }
+
+    #[test]
+    fn time_label_reuses_the_cached_label_when_inputs_match() {
+        let mut memo = RowMemo::default();
+        let id = MessageId(7);
+        let date = NaiveDate::from_ymd_opt(2026, 10, 24);
+        let time = SharedString::from("16:12");
+
+        let first = memo.time_label(id, &time, date, || SharedString::from("16:12"));
+        let second = memo.time_label(id, &time, date, || {
+            panic!("cached time label should be reused")
+        });
+
+        assert_eq!(first.as_ref(), "16:12");
+        assert_eq!(second.as_ref(), "16:12");
     }
 }
