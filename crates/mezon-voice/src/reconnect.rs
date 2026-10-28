@@ -109,7 +109,7 @@ pub enum SfuCloseAction {
 pub fn sfu_close_action(code: Option<u16>) -> SfuCloseAction {
     match code {
         Some(1000 | 4006 | 4011 | 4012) => SfuCloseAction::Stop,
-        Some(4003 | 4004 | 4005) => SfuCloseAction::RefreshToken,
+        Some(4003..=4005) => SfuCloseAction::RefreshToken,
         Some(4013) => SfuCloseAction::ResetTransport,
         _ => SfuCloseAction::Retry,
     }

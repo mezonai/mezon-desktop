@@ -10,6 +10,7 @@ pub(super) struct VoiceMemberSlot {
     pub(super) avatar_url: String,
     pub(super) avatar_raw: String,
     pub(super) sharing_screen: bool,
+    pub(super) viewer_count: u32,
 }
 
 #[derive(Clone, PartialEq)]
@@ -68,12 +69,16 @@ pub(super) enum SidebarItem {
         line_above: bool,
         line_below: bool,
         voice_members: Vec<VoiceMemberSlot>,
-        voice_compact: bool,
         /// What dragging this row would carry, and so also what a drop onto it lands beside.
         /// `None` while its category is collapsed: the rows still drawn there are the few
         /// with something to say, and an order dragged out of that handful would mean
         /// nothing once the rest came back.
         reorder: Option<ChannelReorderDrag>,
+    },
+    VoiceMember {
+        elem_id: SharedString,
+        channel_id: String,
+        member: VoiceMemberSlot,
     },
 }
 
@@ -81,7 +86,9 @@ impl SidebarItem {
     pub(super) fn anchor_id(&self) -> SharedString {
         match self {
             Self::BannerAndEvents { .. } => SharedString::new_static("banner-and-events"),
-            Self::Category { elem_id, .. } | Self::Channel { elem_id, .. } => elem_id.clone(),
+            Self::Category { elem_id, .. }
+            | Self::Channel { elem_id, .. }
+            | Self::VoiceMember { elem_id, .. } => elem_id.clone(),
         }
     }
 }

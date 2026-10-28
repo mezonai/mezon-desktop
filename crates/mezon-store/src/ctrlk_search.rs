@@ -135,19 +135,8 @@ impl CtrlKSearchStore {
                 if this.search_generation != store_generation {
                     return;
                 }
-                this.state.is_searching = false;
-                match result {
-                    Ok(response) => {
-                        this.state.users = map_users(response.users);
-                        this.state.channels = map_channels(response.channels);
-                    }
-                    Err(err) => {
-                        tracing::warn!("SearchCtrlK failed: {err}");
-                        this.state.users.clear();
-                        this.state.channels.clear();
-                    }
-                }
-                this.last_response_query = Some(trimmed);
+                let answered = settle_search(&mut this.state, result);
+                this.last_response_query = answered.then_some(trimmed);
                 cx.emit(CtrlKSearchEvent::Changed);
                 cx.notify();
             });
@@ -176,6 +165,26 @@ impl CtrlKSearchStore {
 
 fn mark_search_in_flight(state: &mut CtrlKSearchState) {
     state.is_searching = true;
+}
+
+fn settle_search(
+    state: &mut CtrlKSearchState,
+    result: anyhow::Result<mezon_proto::api::SearchCtrlKResponse>,
+) -> bool {
+    state.is_searching = false;
+    match result {
+        Ok(response) => {
+            state.users = map_users(response.users);
+            state.channels = map_channels(response.channels);
+            true
+        }
+        Err(err) => {
+            tracing::warn!("SearchCtrlK failed: {err}");
+            state.users.clear();
+            state.channels.clear();
+            false
+        }
+    }
 }
 
 fn map_users(users: Vec<mezon_proto::api::User>) -> Vec<CtrlKUser> {
@@ -274,6 +283,54 @@ mod tests {
         assert_eq!(state.channels.len(), 1);
         assert_eq!(state.users[0].id, UserId(7));
         assert_eq!(state.channels[0].channel_id, ChannelId(3));
+    }
+
+    #[test]
+    fn a_failed_search_leaves_the_query_unanswered() {
+        let mut state = CtrlKSearchState {
+            users: vec![CtrlKUser {
+                id: UserId(7),
+                ..Default::default()
+            }],
+            channels: vec![CtrlKChannel {
+                channel_id: ChannelId(3),
+                ..Default::default()
+            }],
+            is_searching: true,
+        };
+        let answered = settle_search(&mut state, Err(anyhow::anyhow!("code 13")));
+        assert!(!answered);
+        assert!(!state.is_searching);
+        assert!(state.users.is_empty());
+        assert!(state.channels.is_empty());
+    }
+
+    #[test]
+    fn a_successful_search_answers_the_query() {
+        let mut state = CtrlKSearchState {
+            is_searching: true,
+            ..Default::default()
+        };
+        let answered = settle_search(
+            &mut state,
+            Ok(mezon_proto::api::SearchCtrlKResponse {
+                users: vec![mezon_proto::api::User {
+                    id: 5,
+                    username: "alice".into(),
+                    ..Default::default()
+                }],
+                channels: vec![mezon_proto::api::ChannelDescription {
+                    clan_id: 1,
+                    channel_id: 9,
+                    channel_label: "general".into(),
+                    ..Default::default()
+                }],
+            }),
+        );
+        assert!(answered);
+        assert!(!state.is_searching);
+        assert_eq!(state.users[0].id, UserId(5));
+        assert_eq!(state.channels[0].channel_id, ChannelId(9));
     }
 
     #[test]

@@ -743,7 +743,6 @@ fn render_channel_webhook_item(
                         .child(
                             Avatar::new()
                                 .src(header_avatar)
-                                .name(webhook.webhook_name.clone())
                                 .size_px(px(50.0))
                                 .image_cache(avatar_cache),
                         )

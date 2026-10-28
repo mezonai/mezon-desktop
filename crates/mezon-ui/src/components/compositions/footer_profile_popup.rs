@@ -419,9 +419,7 @@ impl Render for FooterProfilePopup {
                 .rounded_full()
                 .bg(bg_card_surface)
                 .child({
-                    let mut avatar = Avatar::new()
-                        .name(self.display_name.clone())
-                        .size_px(px(78.));
+                    let mut avatar = Avatar::new().size_px(px(78.));
                     if !self.avatar.is_empty() {
                         avatar = avatar.src(self.avatar.clone());
                         if !self.avatar_raw.is_empty() && self.avatar_raw != self.avatar {

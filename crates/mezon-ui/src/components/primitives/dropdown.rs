@@ -1,8 +1,8 @@
 use std::rc::Rc;
 
 use gpui::{
-    App, ElementId, Hsla, MouseButton, SharedString, Window, deferred, div, prelude::*, px,
-    uniform_list,
+    AnyElement, App, ElementId, Hsla, MouseButton, SharedString, Window, deferred, div, prelude::*,
+    px, uniform_list,
 };
 
 use super::icon::{Icon, IconName};
@@ -32,6 +32,7 @@ pub struct Dropdown {
     items: Rc<Vec<SharedString>>,
     icons: Rc<Vec<Option<IconName>>>,
     selected: Option<usize>,
+    trigger_icon: Option<IconName>,
     open: bool,
     placeholder: SharedString,
     trigger_style: DropdownTriggerStyle,
@@ -39,6 +40,7 @@ pub struct Dropdown {
     popup_background: Option<Hsla>,
     placement: DropdownPlacement,
     no_results: SharedString,
+    header: Option<AnyElement>,
     on_toggle: Option<ToggleHandler>,
     on_close: Option<ToggleHandler>,
     on_select: Option<SelectHandler>,
@@ -51,6 +53,7 @@ impl Dropdown {
             items: Rc::new(Vec::new()),
             icons: Rc::new(Vec::new()),
             selected: None,
+            trigger_icon: None,
             open: false,
             placeholder: "Select…".into(),
             trigger_style: DropdownTriggerStyle::Default,
@@ -58,6 +61,7 @@ impl Dropdown {
             popup_background: None,
             placement: DropdownPlacement::Down,
             no_results: SharedString::default(),
+            header: None,
             on_toggle: None,
             on_close: None,
             on_select: None,
@@ -99,6 +103,11 @@ impl Dropdown {
         self
     }
 
+    pub fn header(mut self, header: impl IntoElement) -> Self {
+        self.header = Some(header.into_any_element());
+        self
+    }
+
     pub fn trigger_background(mut self, background: Hsla) -> Self {
         self.trigger_background = Some(background);
         self
@@ -111,6 +120,11 @@ impl Dropdown {
 
     pub fn selected(mut self, selected: Option<usize>) -> Self {
         self.selected = selected;
+        self
+    }
+
+    pub fn trigger_icon(mut self, icon: Option<IconName>) -> Self {
+        self.trigger_icon = icon;
         self
     }
 
@@ -151,13 +165,23 @@ impl RenderOnce for Dropdown {
         let on_select = self.on_select.clone();
         let open = self.open;
         let trigger_style = self.trigger_style;
-        let selected_icon = self
-            .selected
-            .and_then(|index| self.icons.get(index).copied().flatten());
+        let selected_icon = self.trigger_icon.or_else(|| {
+            self.selected
+                .and_then(|index| self.icons.get(index).copied().flatten())
+        });
         let popup_id = self.id.clone();
         let popup_background = self
             .popup_background
             .unwrap_or_else(|| theme.bg_floating.into());
+        let header = self.header.map(|header| match self.placement {
+            DropdownPlacement::Down => div().w_full().pb(px(4.)).child(header),
+            DropdownPlacement::Up => div().w_full().pt(px(4.)).child(header),
+        });
+        let header_height = if header.is_some() { 36. } else { 0. };
+        let (header_top, header_bottom) = match self.placement {
+            DropdownPlacement::Down => (header, None),
+            DropdownPlacement::Up => (None, header),
+        };
 
         let mut trigger = h_flex()
             .id(self.id)
@@ -231,11 +255,12 @@ impl RenderOnce for Dropdown {
                     .bg(popup_background)
                     .shadow_lg()
                     .occlude()
-                    .max_h(px(208.))
+                    .max_h(px(208. + header_height))
                     .overflow_y_scroll()
                     .when_some(close, |el, handler| {
                         el.on_mouse_down_out(move |_, window, cx| handler(window, cx))
                     })
+                    .children(header_top)
                     .when(self.items.is_empty(), |el| {
                         el.child(
                             div()
@@ -324,7 +349,8 @@ impl RenderOnce for Dropdown {
                             .h(px(list_height))
                             .w_full(),
                         )
-                    }),
+                    })
+                    .children(header_bottom),
             ))
         })
     }

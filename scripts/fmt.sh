@@ -26,7 +26,6 @@ PKGS=(
     -p mezon-updater
     -p mezon-audio
     -p mezon-voice
-    -p mezon-stream
     -p mezon-record
     -p mezon-active-windows
     -p mezon-grammar

@@ -77,6 +77,7 @@ struct MemberRow {
     name: String,
     username: String,
     avatar: String,
+    avatar_src: SharedString,
     member_since: u32,
     joined_mezon: u32,
     role_ids: Vec<RoleId>,
@@ -239,6 +240,7 @@ impl ClanMembersPage {
                     name: member.name().to_string(),
                     username: member.user.username.clone(),
                     avatar: member.avatar().to_string(),
+                    avatar_src: crate::util::imgproxy::avatar_url(cx, member.avatar()).into(),
                     member_since: member.user.join_time_seconds,
                     joined_mezon: member.user.create_time_seconds,
                     role_ids: member.role_ids.clone(),
@@ -602,8 +604,8 @@ impl ClanMembersPage {
                     .min_w_0()
                     .child(
                         Avatar::new()
-                            .src(row.avatar.clone())
-                            .name(row.name.clone())
+                            .src(row.avatar_src.clone())
+                            .fallback_src(row.avatar.clone())
                             .size_px(px(36.)),
                     )
                     .child(

@@ -2086,7 +2086,7 @@ mod tests {
         );
         assert_eq!(
             pin.compact_preview_text().as_deref(),
-            Some("BẢN TÓM TẮT CUỘC HỘI THOẠI — Thursday, Oct 8, 2026")
+            Some("BẢN TÓM TẮT CUỘC HỘI THOẠI Thursday, Oct 8, 2026")
         );
     }
 

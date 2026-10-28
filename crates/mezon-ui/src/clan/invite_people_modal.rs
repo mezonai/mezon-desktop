@@ -707,9 +707,7 @@ fn render_qr_modal(
     entity: Entity<InvitePeopleModal>,
     modal: &InvitePeopleModal,
 ) -> AnyElement {
-    let mut clan_avatar = Avatar::new()
-        .name(SharedString::from(modal.clan_name.clone()))
-        .size_px(px(40.));
+    let mut clan_avatar = Avatar::new().size_px(px(40.));
     if !modal.clan_avatar_src.is_empty() {
         clan_avatar = clan_avatar.src(modal.clan_avatar_src.clone());
         if !modal.clan_avatar_raw.is_empty() && modal.clan_avatar_raw != modal.clan_avatar_src {
@@ -843,7 +841,7 @@ fn render_friend_row(
     sending_label: SharedString,
     entity: Entity<InvitePeopleModal>,
 ) -> AnyElement {
-    let mut avatar = Avatar::new().name(row.label.clone()).size_px(px(36.));
+    let mut avatar = Avatar::new().size_px(px(36.));
     if !row.avatar_src.is_empty() {
         avatar = avatar.src(row.avatar_src.clone());
         if !row.avatar_raw.is_empty() && row.avatar_raw != row.avatar_src {

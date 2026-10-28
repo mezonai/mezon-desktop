@@ -9,7 +9,7 @@ const INTENT_MODEL_BYTES: &[u8] = include_bytes!("../assets/model.onnx");
 const ACCENT_MODEL_BYTES: &[u8] = include_bytes!("../assets/accent_model.onnx");
 const ACCENT_VOCAB_JSON: &str = include_str!("../assets/accent_vocab.json");
 
-pub const INTENT_MIN_CONFIDENCE: f32 = 0.80;
+pub const INTENT_MIN_CONFIDENCE: f32 = 0.90;
 pub const ACCENT_MAX_CHARS: usize = 128;
 pub(crate) const ACCENT_VOCAB_SIZE: usize = 256;
 const INTENT_MAX_SEQ_LEN: usize = 128;
@@ -268,29 +268,56 @@ pub fn quick_replies_with_intent(
     pronoun_override: Option<&str>,
     top_k: usize,
 ) -> Vec<String> {
+    if crate::pronoun::is_unreplyable_or_ack_message(previous_message) {
+        return Vec::new();
+    }
+
     let dual = predict_dual(tokenizer, previous_message);
-    let override_intent = match &dual {
-        Some(d) if d.intent.confidence >= INTENT_MIN_CONFIDENCE => {
-            if matches!(
-                d.intent.intent.as_str(),
-                "other" | "action_no_reply_needed" | "reply_none"
-            ) {
+    let Some(d) = dual else {
+        return Vec::new();
+    };
+
+    // 100% correct suggestion rule: only show suggestions if intent confidence rounds to 100%
+    let conf_100 = (d.intent.confidence * 100.0).round() >= (INTENT_MIN_CONFIDENCE * 100.0).round();
+    if !conf_100
+        || matches!(
+            d.intent.intent.as_str(),
+            "action_no_reply_needed" | "action_general_ack" | "other" | "general" | "reply_none"
+        )
+    {
+        return Vec::new();
+    }
+
+    let override_intent = d.intent.intent.as_str();
+
+    let effective_pronoun = if let Some(p) = pronoun_override {
+        Some(p)
+    } else if let Some(neural_pron) = &d.pronoun {
+        if (neural_pron.confidence * 100.0).round() >= (INTENT_MIN_CONFIDENCE * 100.0).round()
+            && neural_pron.pronoun != "bạn"
+        {
+            Some(neural_pron.pronoun.as_str())
+        } else {
+            let detected = crate::pronoun::extract_target_pronoun(previous_message);
+            if detected != "bạn" {
+                Some(detected)
+            } else {
                 return Vec::new();
             }
-            Some(d.intent.intent.as_str())
         }
-        Some(_) | None => return Vec::new(),
+    } else {
+        let detected = crate::pronoun::extract_target_pronoun(previous_message);
+        if detected != "bạn" {
+            Some(detected)
+        } else {
+            return Vec::new();
+        }
     };
-    let effective_pronoun = pronoun_override.or_else(|| {
-        dual.as_ref()
-            .and_then(|d| d.pronoun.as_ref())
-            .filter(|p| p.confidence >= INTENT_MIN_CONFIDENCE && p.pronoun != "bạn")
-            .map(|p| p.pronoun.as_str())
-    });
+
     crate::pronoun::suggest_quick_replies(
         previous_message,
         effective_pronoun,
         top_k,
-        override_intent,
+        Some(override_intent),
     )
 }

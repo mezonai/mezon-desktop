@@ -172,9 +172,7 @@ impl Render for UserInfoBar {
             );
         settings_btn.interactivity().on_click(on_settings_click());
 
-        let mut avatar = Avatar::new()
-            .name(self.display_name.clone())
-            .size_px(px(32.0));
+        let mut avatar = Avatar::new().size_px(px(32.0));
         if !self.avatar_src.is_empty() {
             avatar = avatar.src(self.avatar_src.clone());
             if !self.avatar_raw.is_empty() && self.avatar_raw != self.avatar_src {

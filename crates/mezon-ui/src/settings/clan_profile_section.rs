@@ -837,7 +837,6 @@ impl ClanProfileSection {
                             .p(px(6.))
                             .child({
                                 let mut avatar = Avatar::new()
-                                    .name(display_label)
                                     .size_px(px(80.))
                                     .image_cache(avatar_image_cache);
                                 if let Some(url) = avatar_url {

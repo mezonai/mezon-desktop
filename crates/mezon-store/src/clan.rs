@@ -460,6 +460,7 @@ pub enum ClanEvent {
     /// A clan was removed (server push).
     Deleted(ClanId),
     Joined(ClanId),
+    Updated(ClanId),
     OwnerChanged {
         clan_id: ClanId,
         new_owner_id: UserId,
@@ -727,23 +728,8 @@ impl ClanList {
                 self.set_clan_creator(ClanId(e.clan_id), UserId(e.curr_owner), cx);
             }
             RealtimeEvent::ClanUpdated(e) => {
-                let name = (!e.clan_name.is_empty()).then_some(e.clan_name.clone());
-                let welcome_channel_id =
-                    (e.welcome_channel_id != 0).then_some(ChannelId(e.welcome_channel_id));
-                let update = ClanUpdate {
-                    name,
-                    logo: e.logo.clone(),
-                    banner: e.banner.clone(),
-                    welcome_channel_id,
-                    status: e.status,
-                    is_onboarding: e.is_onboarding,
-                    is_community: e.is_community,
-                    prevent_anonymous: e.prevent_anonymous,
-                    community: None,
-                };
-                if update_clan(&mut self.clans, ClanId(e.clan_id), update) {
-                    cx.notify();
-                }
+                self.reload(cx);
+                cx.emit(ClanEvent::Updated(ClanId(e.clan_id)));
             }
             RealtimeEvent::AddClanUser(e) => {
                 let id = ClanId(e.clan_id);
@@ -2234,6 +2220,44 @@ mod tests {
             clan_id,
             user_ids: user_ids.to_vec(),
         })
+    }
+
+    #[gpui::test]
+    fn partial_clan_push_preserves_anonymous_and_invalidates_settings(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let updates = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let (clan_list, _sub) = cx.update(|cx| {
+            let list = init_clan_list(cx);
+            let seen = updates.clone();
+            let sub = cx.subscribe(&list, move |_, event: &ClanEvent, _| {
+                if let ClanEvent::Updated(id) = event {
+                    seen.lock().unwrap().push(*id);
+                }
+            });
+            (list, sub)
+        });
+        cx.update(|cx| {
+            clan_list.update(cx, |list, cx| {
+                let mut clan = make_clan(1, "One", Some("logo.png"));
+                clan.prevent_anonymous = true;
+                list.update_clans(vec![clan], cx);
+                list.loading = true;
+                list.handle_event(
+                    &RealtimeEvent::ClanUpdated(mezon_proto::realtime::ClanUpdatedEvent {
+                        clan_id: 1,
+                        ..Default::default()
+                    }),
+                    cx,
+                );
+                let clan = list.clan_by_id(ClanId(1)).unwrap();
+                assert!(clan.prevent_anonymous);
+                assert_eq!(clan.name, "One");
+                assert_eq!(clan.avatar_url.as_deref(), Some("logo.png"));
+                assert!(list.reload_pending);
+            });
+        });
+        assert_eq!(*updates.lock().unwrap(), vec![ClanId(1)]);
     }
 
     #[test]

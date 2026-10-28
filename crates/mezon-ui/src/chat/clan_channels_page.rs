@@ -420,7 +420,7 @@ impl ClanChannelsPage {
             .when(tooltip, |element| {
                 element.tooltip(Tooltip::text(name.clone()))
             })
-            .child(Avatar::new().src(avatar).name(name).size_px(px(size)))
+            .child(Avatar::new().src(avatar).size_px(px(size)))
             .into_any_element()
     }
 

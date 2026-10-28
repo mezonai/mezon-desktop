@@ -129,6 +129,8 @@ pub struct Emoji {
 
 static EMOJI_SOURCES: LazyLock<RwLock<HashMap<String, Arc<str>>>> = LazyLock::new(Default::default);
 static EMOJI_SOURCES_GENERATION: AtomicU64 = AtomicU64::new(0);
+static EMOJI_URL_FALLBACKS: LazyLock<RwLock<HashMap<String, String>>> =
+    LazyLock::new(Default::default);
 
 pub fn emoji_source(emoji_id: &str) -> Option<Arc<str>> {
     EMOJI_SOURCES.read().ok()?.get(emoji_id).cloned()
@@ -136,6 +138,16 @@ pub fn emoji_source(emoji_id: &str) -> Option<Arc<str>> {
 
 pub fn emoji_sources_generation() -> u64 {
     EMOJI_SOURCES_GENERATION.load(Ordering::Acquire)
+}
+
+pub fn set_emoji_url_fallback(url: String, fallback: String) {
+    if let Ok(mut fallbacks) = EMOJI_URL_FALLBACKS.write() {
+        fallbacks.insert(url, fallback);
+    }
+}
+
+pub fn emoji_url_fallback(url: &str) -> Option<String> {
+    EMOJI_URL_FALLBACKS.read().ok()?.get(url).cloned()
 }
 
 pub(crate) fn publish_emoji_sources<'a>(
@@ -1098,6 +1110,20 @@ mod tests {
             known.get("1").map(|src| src.as_ref()),
             Some("https://cdn.komu.vn/emojis/1.webp")
         );
+    }
+
+    #[test]
+    fn emoji_url_fallback_round_trip_and_unknown_is_none() {
+        let primary = "https://imgproxy.komu.vn/sig/plain/https://cdn.mezon.ai/emojis/42.webp@webp";
+        let fallback = "https://imgproxy.komu.vn/sig/plain/https://cdn.komu.vn/emojis/42.webp@webp";
+        assert_eq!(
+            emoji_url_fallback(
+                "https://imgproxy.komu.vn/sig/plain/https://cdn.mezon.ai/emojis/unknown.webp@webp"
+            ),
+            None
+        );
+        set_emoji_url_fallback(primary.to_string(), fallback.to_string());
+        assert_eq!(emoji_url_fallback(primary).as_deref(), Some(fallback));
     }
 
     fn init_emoji_store(cx: &mut gpui::TestAppContext) -> (Arc<AppApi>, Entity<EmojiStore>) {

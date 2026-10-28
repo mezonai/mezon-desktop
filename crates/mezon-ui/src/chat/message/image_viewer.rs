@@ -150,7 +150,6 @@ impl Render for ImageViewer {
                             .items_center()
                             .child(
                                 Avatar::new()
-                                    .name(self.uploader_name.clone())
                                     .src(self.uploader_avatar.clone())
                                     .size_px(px(28.)),
                             )

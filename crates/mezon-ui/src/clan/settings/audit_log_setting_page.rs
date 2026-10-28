@@ -374,9 +374,7 @@ fn render_audit_log_row(
                 .border_color(theme.border)
                 .bg(theme.tokens.bg_tertiary)
                 .child(div().flex_shrink_0().child({
-                    let mut avatar = Avatar::new()
-                        .name(username.clone())
-                        .size_px(px(AVATAR_SIZE));
+                    let mut avatar = Avatar::new().size_px(px(AVATAR_SIZE));
                     if !avatar_src.is_empty() {
                         avatar = avatar.src(avatar_src);
                     }

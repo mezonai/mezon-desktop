@@ -237,6 +237,7 @@ pub fn render_voice_channel(
         _ => None,
     };
 
+    let chat = cx.entity();
     render_pre_join(
         cx.theme(),
         locale,
@@ -247,6 +248,8 @@ pub fn render_voice_channel(
         camera_device_id,
         error,
         window_width,
+        show_chat,
+        &chat,
         cx,
     )
 }
@@ -366,7 +369,7 @@ fn render_meeting_pre_join(
     cx: &App,
 ) -> AnyElement {
     let (name, avatar_url, avatar_raw) = local_voice_identity(cx);
-    let mut avatar = Avatar::new().name(name.clone()).size_px(px(80.));
+    let mut avatar = Avatar::new().size_px(px(80.));
     if !avatar_url.is_empty() {
         avatar = avatar.src(avatar_url);
     }
@@ -912,14 +915,7 @@ fn voice_header<H: CallLayoutHost>(
     host: Option<&Entity<H>>,
     cx: &App,
 ) -> AnyElement {
-    let right = voice.map(|voice| {
-        let is_focused = voice.read(cx).focused_tile().is_some();
-        let layout_icon = if is_focused {
-            IconName::VoiceGridIcon
-        } else {
-            IconName::VoiceFocusIcon
-        };
-        let voice = voice.clone();
+    let right = (voice.is_some() || host.is_some()).then(|| {
         let chat_tooltip = if show_chat {
             mezon_i18n::t(locale, "channelTopbar.tooltips.hideChat")
         } else {
@@ -939,21 +935,28 @@ fn voice_header<H: CallLayoutHost>(
                     cx,
                 ))
             })
-            .child(
-                voice_header_icon_shell("voice-layout-toggle", theme, false)
-                    .tooltip(Tooltip::text(mezon_i18n::t(
-                        locale,
-                        "channelVoice.switchLayout",
-                    )))
-                    .child(
-                        Icon::new(layout_icon)
-                            .size(px(18.))
-                            .text_color(theme.tokens.bg_icon_theme),
-                    )
-                    .on_click(move |_, _, cx| {
-                        voice.update(cx, |store, cx| store.toggle_layout_view(cx));
-                    }),
-            )
+            .when_some(voice.cloned(), |row, voice| {
+                let layout_icon = if voice.read(cx).focused_tile().is_some() {
+                    IconName::VoiceGridIcon
+                } else {
+                    IconName::VoiceFocusIcon
+                };
+                row.child(
+                    voice_header_icon_shell("voice-layout-toggle", theme, false)
+                        .tooltip(Tooltip::text(mezon_i18n::t(
+                            locale,
+                            "channelVoice.switchLayout",
+                        )))
+                        .child(
+                            Icon::new(layout_icon)
+                                .size(px(18.))
+                                .text_color(theme.tokens.bg_icon_theme),
+                        )
+                        .on_click(move |_, _, cx| {
+                            voice.update(cx, |store, cx| store.toggle_layout_view(cx));
+                        }),
+                )
+            })
             .when_some(host.cloned(), |row, chat_toggle| {
                 row.child(
                     voice_header_icon_shell("voice-chat-toggle", theme, show_chat)
@@ -1188,6 +1191,8 @@ fn render_pre_join(
     camera_device_id: Option<String>,
     error: Option<String>,
     window_width: Pixels,
+    show_chat: bool,
+    chat: &Entity<ChatLayout>,
     cx: &App,
 ) -> AnyElement {
     let members = &channel.voice_members;
@@ -1207,8 +1212,8 @@ fn render_pre_join(
             .justify_center()
             .gap_2()
             .children(members.iter().take(max_members).map(|m| {
-                let (name, avatar_url, avatar_raw) = resolve_voice_member(cx, channel.clan_id, m);
-                let mut avatar = Avatar::new().name(name).size_px(px(56.));
+                let (_, avatar_url, avatar_raw) = resolve_voice_member(cx, channel.clan_id, m);
+                let mut avatar = Avatar::new().size_px(px(56.));
                 if !avatar_url.is_empty() {
                     avatar = avatar.src(avatar_url);
                 }
@@ -1316,17 +1321,17 @@ fn render_pre_join(
         .flex_col()
         .flex_1()
         .min_h_0()
-        .child(voice_header::<ChatLayout>(
+        .child(voice_header(
             theme,
             locale,
             &channel.name,
             None,
-            false,
+            show_chat,
             0,
             PopoverMenuHandle::default(),
             channel.clan_id,
             false,
-            None,
+            Some(chat),
             cx,
         ))
         .child(body)
@@ -1812,7 +1817,7 @@ fn raised_hands_overlay(
                 let (name, avatar_url, avatar_raw) =
                     resolve_voice_identity(cx, clan_id, voice_members, user_id, "");
                 let name = SharedString::from(name);
-                let mut avatar = Avatar::new().name(name.clone()).size_px(px(32.));
+                let mut avatar = Avatar::new().size_px(px(32.));
                 if !avatar_url.is_empty() {
                     avatar = avatar.src(avatar_url);
                 }
@@ -3329,7 +3334,7 @@ fn tile_inner(
             .into_any_element();
     }
 
-    let mut avatar = Avatar::new().name(cell.name.clone()).size_px(avatar_size);
+    let mut avatar = Avatar::new().size_px(avatar_size);
     if !cell.avatar_url.is_empty() {
         avatar = avatar.src(cell.avatar_url.clone());
     }

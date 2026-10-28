@@ -82,6 +82,12 @@ pub(crate) struct NotificationRowView {
     pub(crate) profile_dependencies: ProfileDependencies,
 }
 
+impl NotificationRowView {
+    pub(crate) fn needs_sender_profile(&self) -> bool {
+        self.avatar_url.is_none() && self.profile_dependencies.global
+    }
+}
+
 #[derive(Clone, Copy, Default)]
 pub(crate) struct ProfileDependencies {
     pub(crate) clans: [Option<ClanId>; 2],
@@ -90,7 +96,6 @@ pub(crate) struct ProfileDependencies {
 
 #[derive(Clone)]
 pub(crate) struct TopicRowView {
-    avatar_name: SharedString,
     avatar_url: Option<SharedString>,
     reply_preview: TopicReplyPreview,
 }
@@ -562,33 +567,27 @@ pub(crate) fn notification_sender_id(notification: &InboxNotification) -> &str {
 }
 
 pub(crate) fn build_topic_row_view(topic: &TopicDiscussion, cx: &App) -> TopicRowView {
-    let (avatar_name, avatar_url) = TopicsStore::global(cx)
+    let avatar_url = TopicsStore::global(cx)
         .read(cx)
         .inbox_avatar(topic, cx)
-        .map(|(name, avatar)| {
+        .and_then(|(_, avatar)| {
             let avatar = AppConfig::try_global(cx)
                 .map(|cfg| cfg.avatar_proxy(avatar))
                 .unwrap_or_else(|| avatar.to_string());
-            (SharedString::from(name.to_string()), avatar_from(&avatar))
-        })
-        .unwrap_or_default();
+            avatar_from(&avatar)
+        });
     TopicRowView {
-        avatar_name,
         avatar_url,
         reply_preview: topic.reply_preview(),
     }
 }
 
 fn render_avatar(
-    name: &SharedString,
     url: Option<&SharedString>,
     size: Size,
     avatar_cache: Entity<LruImageCache>,
 ) -> impl IntoElement {
-    let mut avatar = Avatar::new()
-        .name(name.clone())
-        .with_size(size)
-        .image_cache(avatar_cache);
+    let mut avatar = Avatar::new().with_size(size).image_cache(avatar_cache);
     if let Some(src) = url.filter(|s| !s.is_empty()) {
         avatar = avatar.src(src.clone());
     }
@@ -1791,7 +1790,6 @@ pub fn render_notification_body(
         .items_start()
         .p_1()
         .child(render_avatar(
-            &view.sender_name,
             view.avatar_url.as_ref(),
             Size::Small,
             avatar_cache.clone(),
@@ -1952,7 +1950,6 @@ pub fn render_topic_body(
         .pt_1()
         .child(
             Avatar::new()
-                .name(view.avatar_name.clone())
                 .src(
                     view.avatar_url
                         .clone()

@@ -56,6 +56,7 @@ pub enum Route {
     SettingsNotifications,
     SettingsLanguage,
     SettingsVoice,
+    SettingsStreaming,
     SettingsServer,
     SettingsAdvanced,
     ClanSettings {
@@ -139,6 +140,7 @@ impl Route {
             Route::SettingsNotifications => "/settings/notifications".to_string(),
             Route::SettingsLanguage => "/settings/language".to_string(),
             Route::SettingsVoice => "/settings/voice".to_string(),
+            Route::SettingsStreaming => "/settings/streaming".to_string(),
             Route::SettingsServer => "/settings/server".to_string(),
             Route::SettingsAdvanced => "/settings/advanced".to_string(),
             Route::ClanSettings { clan_id, page } => {
@@ -248,6 +250,7 @@ impl Route {
             ["settings", "notifications"] => Route::SettingsNotifications,
             ["settings", "language"] => Route::SettingsLanguage,
             ["settings", "voice"] => Route::SettingsVoice,
+            ["settings", "streaming"] => Route::SettingsStreaming,
             ["settings", "server"] => Route::SettingsServer,
             ["settings", "advanced"] => Route::SettingsAdvanced,
             ["chat", "clans", clan_id, "settings"] => Route::ClanSettings {

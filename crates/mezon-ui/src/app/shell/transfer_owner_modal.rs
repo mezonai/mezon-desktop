@@ -101,7 +101,6 @@ impl TransferOwnerModal {
             .child(
                 Avatar::new()
                     .src(party.avatar.clone())
-                    .name(party.name.clone())
                     .size_px(px(AVATAR_PX))
                     .image_cache(self.avatar_cache.clone()),
             )

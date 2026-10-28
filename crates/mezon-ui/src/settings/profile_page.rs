@@ -1385,7 +1385,6 @@ impl ProfilePage {
                                     .into_any_element()
                             } else {
                                 let mut avatar = Avatar::new()
-                                    .name(display_name)
                                     .size_px(px(80.))
                                     .image_cache(self.avatar_image_cache.clone());
                                 if let Some(url) = avatar_display {

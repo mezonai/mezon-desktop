@@ -36,6 +36,7 @@ struct TopicParentEntry {
     parent_channel_id: String,
     unread: bool,
     count: u32,
+    parent_seen: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -158,14 +159,16 @@ impl TopicBadgeStore {
         let clan_key = clan_id.to_string();
         self.topic_parent_map
             .values()
-            .filter(|entry| entry.unread && entry.clan_id == clan_key)
+            .filter(|entry| entry.unread && !entry.parent_seen && entry.clan_id == clan_key)
             .filter_map(|entry| entry.parent_channel_id.parse().ok())
             .collect()
     }
 
     pub fn any_topic_unread(&self, clan_id: ClanId) -> bool {
         let clan_key = clan_id.to_string();
-        self.clan_has_unread_topic(clan_id)
+        self.topic_parent_map
+            .values()
+            .any(|entry| entry.unread && entry.clan_id == clan_key)
             || self
                 .checked_unread
                 .values()
@@ -176,7 +179,34 @@ impl TopicBadgeStore {
         let clan_key = clan_id.to_string();
         self.topic_parent_map
             .values()
-            .any(|entry| entry.unread && entry.clan_id == clan_key)
+            .any(|entry| entry.unread && !entry.parent_seen && entry.clan_id == clan_key)
+    }
+
+    pub fn mark_parent_seen(
+        &mut self,
+        clan_id: ClanId,
+        parent_id: ChannelId,
+        cx: &mut Context<Self>,
+    ) {
+        let clan_key = clan_id.to_string();
+        let parent_key = parent_id.to_string();
+        let mut changed = false;
+        for entry in self.topic_parent_map.values_mut() {
+            if entry.unread
+                && !entry.parent_seen
+                && entry.clan_id == clan_key
+                && entry.parent_channel_id == parent_key
+            {
+                entry.parent_seen = true;
+                changed = true;
+            }
+        }
+        if changed {
+            cx.emit(TopicBadgeEvent::Updated {
+                clan_id: Some(clan_key),
+            });
+            cx.notify();
+        }
     }
 
     pub fn clear_parents(
@@ -513,8 +543,10 @@ impl TopicBadgeStore {
                 parent_channel_id: parent_channel_id.to_string(),
                 unread: false,
                 count: 0,
+                parent_seen: false,
             });
         entry.unread = true;
+        entry.parent_seen = false;
         if increment_badge {
             entry.count = entry.count.saturating_add(1);
         }
@@ -675,6 +707,7 @@ mod tests {
                         parent_channel_id: "5".into(),
                         unread: true,
                         count: 2,
+                        parent_seen: false,
                     },
                 );
                 store.clear_topic("99", cx);
@@ -690,6 +723,7 @@ mod tests {
             parent_channel_id: parent_channel_id.into(),
             unread,
             count: 0,
+            parent_seen: false,
         }
     }
 
@@ -794,6 +828,8 @@ mod tests {
             channel_id: channel_id.into(),
             creator_id: String::new(),
             last_sender_id: String::new(),
+            last_sender_is_authoritative: false,
+            last_message_id: String::new(),
             content: String::new(),
             last_message_content: String::new(),
             last_message_attachments: Vec::new(),
@@ -900,6 +936,53 @@ mod tests {
 
                 store.clear_clan(ClanId(11), cx);
                 assert!(!store.any_topic_unread(ClanId(11)));
+            });
+        });
+    }
+    #[gpui::test]
+    fn a_seen_parent_stops_being_unread_but_its_topic_keeps_the_dot(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            let store = init_store(cx);
+            store.update(cx, |store, cx| {
+                store.topic_parent_map.insert(
+                    "91".into(),
+                    TopicParentEntry {
+                        count: 1,
+                        ..entry("10", "5", true)
+                    },
+                );
+                store
+                    .topic_parent_map
+                    .insert("92".into(), entry("10", "6", true));
+
+                store.mark_parent_seen(ClanId(10), ChannelId(5), cx);
+
+                assert_eq!(
+                    store.unread_parent_ids(ClanId(10)),
+                    HashSet::from([ChannelId(6)])
+                );
+                assert!(store.topic_has_unread("91"));
+                assert!(store.channel_has_unread_topic(ClanId(10), ChannelId(5)));
+                assert_eq!(store.topic_badge_count("91"), 1);
+                assert!(store.any_topic_unread(ClanId(10)));
+                assert!(store.clan_has_unread_topic(ClanId(10)));
+
+                store.mark_parent_seen(ClanId(10), ChannelId(6), cx);
+                assert!(!store.clan_has_unread_topic(ClanId(10)));
+                assert!(store.any_topic_unread(ClanId(10)));
+
+                assert!(store.increment_topic_for_message(
+                    "10",
+                    "5",
+                    "91",
+                    Some("700"),
+                    "5_700",
+                    false,
+                ));
+                assert_eq!(
+                    store.unread_parent_ids(ClanId(10)),
+                    HashSet::from([ChannelId(5)])
+                );
             });
         });
     }

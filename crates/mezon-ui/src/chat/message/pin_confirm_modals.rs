@@ -450,7 +450,6 @@ fn render_preview(
     let sender_color = tokens.text_theme_primary;
 
     let mut avatar = Avatar::new()
-        .name(&preview.sender_label)
         .anonymous(preview.is_anonymous && preview.avatar_src.is_none())
         .with_size(Size::Small)
         .image_cache(avatar_cache);

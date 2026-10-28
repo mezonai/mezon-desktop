@@ -133,7 +133,7 @@ fn member_row_from_profile(user_id: UserId, profile: &ChannelUserProfile) -> Mem
 }
 
 pub(super) fn member_avatar(row: &MemberRow, size: gpui::Pixels) -> Avatar {
-    let mut avatar = Avatar::new().name(row.name.clone()).size_px(size);
+    let mut avatar = Avatar::new().size_px(size);
     if !row.avatar.is_empty() {
         avatar = avatar.src(row.avatar.clone());
     }
@@ -800,8 +800,8 @@ impl PermissionsTab {
         self.everyone_saving = true;
         cx.notify();
         cx.spawn(async move |this, cx| {
-            if going_private {
-                if let Err(error) = api
+            if going_private
+                && let Err(error) = api
                     .set_override_everyone_channel(
                         clan_id.get(),
                         channel_id.get(),
@@ -810,17 +810,14 @@ impl PermissionsTab {
                         Vec::new(),
                     )
                     .await
-                {
-                    tracing::error!(
-                        "set_override_everyone_channel failed for {channel_id}: {error}"
-                    );
-                    let _ = this.update(cx, |this, cx| {
-                        this.everyone_saving = false;
-                        super::permission_overrides::report_acl_failure(&locale, cx);
-                        cx.notify();
-                    });
-                    return;
-                }
+            {
+                tracing::error!("set_override_everyone_channel failed for {channel_id}: {error}");
+                let _ = this.update(cx, |this, cx| {
+                    this.everyone_saving = false;
+                    super::permission_overrides::report_acl_failure(&locale, cx);
+                    cx.notify();
+                });
+                return;
             }
             if let Some((private_enabled, payload, user_ids, role_ids, granted_roles)) =
                 private_payload

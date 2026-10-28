@@ -2,6 +2,7 @@ use crate::ids::{ClanId, RoleId, UserId};
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
+use futures::{FutureExt, future::Shared};
 use gpui::{App, AppContext, Context, Entity, EventEmitter, Global, Task};
 use mezon_client::{AppApi, ConnectionStatus, RealtimeEvent};
 use mezon_proto::{api, realtime};
@@ -117,7 +118,8 @@ const MAX_CACHED_CLANS: usize = 16;
 pub struct ClanMembersStore {
     cache: KeyedCache<ClanId, ClanBucket>,
     self_role_ids: HashMap<ClanId, Vec<i64>>,
-    loading: HashSet<ClanId>,
+    loading: HashMap<ClanId, Shared<Task<bool>>>,
+    reset_generation: u64,
     api: Arc<AppApi>,
     _conn_watch: Task<()>,
 }
@@ -144,6 +146,7 @@ impl ClanMembersStore {
     }
 
     pub fn reset(&mut self, cx: &mut Context<Self>) {
+        self.reset_generation = self.reset_generation.wrapping_add(1);
         self.cache.clear();
         self.self_role_ids.clear();
         self.loading.clear();
@@ -162,7 +165,8 @@ impl ClanMembersStore {
         Self {
             cache: KeyedCache::new(Some(MAX_CACHED_CLANS)),
             self_role_ids: HashMap::new(),
-            loading: HashSet::new(),
+            loading: HashMap::new(),
+            reset_generation: 0,
             api,
             _conn_watch: conn_watch,
         }
@@ -246,24 +250,31 @@ impl ClanMembersStore {
 
     fn refresh_active(&mut self, cx: &mut Context<Self>) {
         if let Some(clan_id) = ClanList::global(cx).read(cx).active_clan_id {
-            self.fetch(clan_id, cx).detach();
+            drop(self.fetch(clan_id, cx));
         }
     }
 
     pub fn ensure_loaded(&mut self, clan_id: ClanId, cx: &mut Context<Self>) {
-        self.ensure_loaded_task(clan_id, cx).detach();
+        drop(self.ensure_loaded_task(clan_id, cx));
     }
 
-    pub fn ensure_loaded_task(&mut self, clan_id: ClanId, cx: &mut Context<Self>) -> Task<()> {
+    pub fn ensure_loaded_task(
+        &mut self,
+        clan_id: ClanId,
+        cx: &mut Context<Self>,
+    ) -> Shared<Task<bool>> {
         self.cache.touch(&clan_id);
+        if let Some(task) = self.loading.get(&clan_id) {
+            return task.clone();
+        }
         if self.cache.is_fresh(&clan_id, crate::CACHE_TTL) {
-            return Task::ready(());
+            return Task::ready(true).shared();
         }
         self.fetch(clan_id, cx)
     }
 
     pub fn refresh(&mut self, clan_id: ClanId, cx: &mut Context<Self>) {
-        self.fetch(clan_id, cx).detach();
+        drop(self.fetch(clan_id, cx));
     }
 
     pub fn kick_member(
@@ -337,18 +348,21 @@ impl ClanMembersStore {
         true
     }
 
-    fn fetch(&mut self, clan_id: ClanId, cx: &mut Context<Self>) -> Task<()> {
-        if !self.loading.insert(clan_id) {
-            return Task::ready(());
+    fn fetch(&mut self, clan_id: ClanId, cx: &mut Context<Self>) -> Shared<Task<bool>> {
+        if let Some(task) = self.loading.get(&clan_id) {
+            return task.clone();
         }
         let api = self.api.clone();
-        cx.spawn(async move |this, cx| {
+        let generation = self.reset_generation;
+        let task = cx.spawn(async move |this, cx| {
             let (users_result, online_result, status_result) = tokio::join!(
                 api.list_clan_users(clan_id.get()),
                 api.list_user_online(clan_id.get(), ONLINE_FETCH_LIMIT, 0),
                 api.list_clan_users_status(clan_id.get()),
             );
-            let _ = this.update(cx, |this, cx| {
+            let loaded = users_result.is_ok();
+            this.update(cx, |this, cx| {
+                if this.reset_generation != generation { return false; }
                 this.loading.remove(&clan_id);
                 match users_result {
                     Ok(users) => {
@@ -421,8 +435,11 @@ impl ClanMembersStore {
                     }
                     Err(e) => tracing::error!("list_clan_users failed for {clan_id}: {e}"),
                 }
-            });
-        })
+                loaded
+            }).unwrap_or(false)
+        }).shared();
+        self.loading.insert(clan_id, task.clone());
+        task
     }
 
     pub(crate) fn profile_clan(&self, user_id: UserId) -> Option<ClanId> {
@@ -706,6 +723,33 @@ pub fn split_members_by_status(
 
 #[cfg(test)]
 mod tests {
+    #[gpui::test]
+    fn roster_waiters_share_the_existing_request(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            let api = Arc::new(AppApi::new(
+                Arc::new(mezon_client::TransportClient::new(String::new())),
+                String::new(),
+            ));
+            RealtimeDispatch::init(api.clone(), cx);
+            let store = ClanMembersStore::init(api, cx);
+            store.update(cx, |store, cx| {
+                let task = cx
+                    .spawn(async |_, _| std::future::pending::<bool>().await)
+                    .shared();
+                store.loading.insert(ClanId(1), task.clone());
+                let first = store.ensure_loaded_task(ClanId(1), cx);
+                let second = store.ensure_loaded_task(ClanId(1), cx);
+                assert!(first.ptr_eq(&task));
+                assert!(second.ptr_eq(&task));
+                assert!(first.now_or_never().is_none());
+                let generation = store.reset_generation;
+                store.reset(cx);
+                assert_ne!(store.reset_generation, generation);
+                assert!(store.loading.is_empty());
+            });
+        });
+    }
+
     #[gpui::test]
     fn confirmed_profile_updates_all_cached_clans_and_preserves_membership(
         cx: &mut gpui::TestAppContext,

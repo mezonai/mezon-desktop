@@ -17,6 +17,7 @@ use crate::components::primitives::{
     TextAreaEvent,
 };
 use crate::theme::ActiveTheme;
+use crate::util::text_utils::normalize_diacritics;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Step {
@@ -126,6 +127,17 @@ fn event_schedule_timestamps(
     Some((timestamp(start_seconds)?, timestamp(end_seconds)?))
 }
 
+fn event_search_matches(keys: &[String], query: &str) -> Option<Vec<usize>> {
+    let query = normalize_diacritics(query.trim());
+    (!query.is_empty()).then(|| {
+        keys.iter()
+            .enumerate()
+            .filter(|(_, key)| key.contains(&query))
+            .map(|(index, _)| index)
+            .collect()
+    })
+}
+
 pub enum EventSelectEvent {
     Change(usize),
 }
@@ -146,6 +158,11 @@ struct EventSelect {
     no_results: SharedString,
     placement: EventSelectPlacement,
     selectable_range: Option<std::ops::Range<usize>>,
+    search: Option<Entity<InputState>>,
+    search_keys: Vec<String>,
+    matches: Option<Vec<usize>>,
+    previous_focus: Option<FocusHandle>,
+    _search_subscription: Option<Subscription>,
 }
 
 impl EventEmitter<EventSelectEvent> for EventSelect {}
@@ -162,7 +179,44 @@ impl EventSelect {
             no_results: SharedString::default(),
             placement: EventSelectPlacement::Down,
             selectable_range: None,
+            search: None,
+            search_keys: Vec::new(),
+            matches: None,
+            previous_focus: None,
+            _search_subscription: None,
         }
+    }
+
+    fn searchable(
+        mut self,
+        placeholder: impl Into<SharedString>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        let search = cx.new(|cx| {
+            InputState::new(window, cx)
+                .placeholder(placeholder)
+                .height(px(32.))
+        });
+        self._search_subscription = Some(cx.subscribe_in(
+            &search,
+            window,
+            |select, _, event: &InputEvent, window, cx| match event {
+                InputEvent::Change => select.refilter(cx),
+                InputEvent::PressEnter => {
+                    if let Some(index) = select.selectable_indices().first().copied() {
+                        select.choose(index, window, cx);
+                    }
+                }
+            },
+        ));
+        self.search_keys = self
+            .items
+            .iter()
+            .map(|item| normalize_diacritics(item))
+            .collect();
+        self.search = Some(search);
+        self
     }
 
     fn placeholder(mut self, value: impl Into<SharedString>) -> Self {
@@ -190,13 +244,50 @@ impl EventSelect {
     }
 
     fn selectable_indices(&self) -> Vec<usize> {
-        (0..self.items.len())
-            .filter(|index| {
-                self.selectable_range
-                    .as_ref()
-                    .is_none_or(|range| range.contains(index))
-            })
-            .collect()
+        let in_range = |index: &usize| {
+            self.selectable_range
+                .as_ref()
+                .is_none_or(|range| range.contains(index))
+        };
+        match &self.matches {
+            Some(matches) => matches.iter().copied().filter(in_range).collect(),
+            None => (0..self.items.len()).filter(in_range).collect(),
+        }
+    }
+
+    fn refilter(&mut self, cx: &mut Context<Self>) {
+        let Some(search) = &self.search else {
+            return;
+        };
+        self.matches = event_search_matches(&self.search_keys, search.read(cx).value());
+        cx.notify();
+    }
+
+    fn set_open(&mut self, open: bool, window: &mut Window, cx: &mut Context<Self>) {
+        if self.open != open
+            && let Some(search) = self.search.clone()
+        {
+            if open {
+                self.previous_focus = window.focused(cx);
+                self.matches = None;
+                search.update(cx, |input, cx| {
+                    input.clear(cx);
+                    input.focus(window, cx);
+                });
+            } else if let Some(previous) = self.previous_focus.take()
+                && search.focus_handle(cx).is_focused(window)
+            {
+                window.focus(&previous, cx);
+            }
+        }
+        self.open = open;
+        cx.notify();
+    }
+
+    fn choose(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
+        self.selected = Some(index);
+        self.set_open(false, window, cx);
+        cx.emit(EventSelectEvent::Change(index));
     }
 
     fn value(&self) -> Option<&SharedString> {
@@ -219,6 +310,14 @@ impl EventSelect {
         if self.selected.is_some_and(|index| index >= self.items.len()) {
             self.selected = None;
         }
+        if self.search.is_some() {
+            self.search_keys = self
+                .items
+                .iter()
+                .map(|item| normalize_diacritics(item))
+                .collect();
+            self.refilter(cx);
+        }
         cx.notify();
     }
 }
@@ -238,7 +337,7 @@ impl Render for EventSelect {
             .value()
             .cloned()
             .unwrap_or_else(|| self.placeholder.clone());
-        let (items, icons) = if self.selectable_range.is_some() {
+        let (items, icons) = if self.selectable_range.is_some() || self.matches.is_some() {
             (
                 Rc::new(
                     indices
@@ -256,10 +355,15 @@ impl Render for EventSelect {
         } else {
             (self.items.clone(), self.icons.clone())
         };
-        Dropdown::new(self.id.clone())
+        let header = self.search.as_ref().map(Input::new);
+        let trigger_icon = self
+            .selected
+            .and_then(|index| self.icons.get(index).copied().flatten());
+        let mut dropdown = Dropdown::new(self.id.clone())
             .shared_items(items)
             .shared_icons(icons)
             .selected(selected)
+            .trigger_icon(trigger_icon)
             .open(self.open)
             .placeholder(placeholder)
             .no_results(self.no_results.clone())
@@ -270,33 +374,26 @@ impl Render for EventSelect {
             .trigger_style(DropdownTriggerStyle::InputPrimary)
             .trigger_background(theme.bg_secondary.into())
             .popup_background(theme.bg_primary.into())
-            .on_toggle(move |_, cx| {
+            .on_toggle(move |window, cx| {
                 toggle_entity
-                    .update(cx, |select, cx| {
-                        select.open = next_open;
-                        cx.notify();
-                    })
+                    .update(cx, |select, cx| select.set_open(next_open, window, cx))
                     .ok();
             })
-            .on_close(move |_, cx| {
+            .on_close(move |window, cx| {
                 close_entity
-                    .update(cx, |select, cx| {
-                        select.open = false;
-                        cx.notify();
-                    })
+                    .update(cx, |select, cx| select.set_open(false, window, cx))
                     .ok();
             })
-            .on_select(move |index, _, cx| {
+            .on_select(move |index, window, cx| {
                 let index = indices[index];
                 select_entity
-                    .update(cx, |select, cx| {
-                        select.selected = Some(index);
-                        select.open = false;
-                        cx.emit(EventSelectEvent::Change(index));
-                        cx.notify();
-                    })
+                    .update(cx, |select, cx| select.choose(index, window, cx))
                     .ok();
-            })
+            });
+        if let Some(header) = header {
+            dropdown = dropdown.header(header);
+        }
+        dropdown
     }
 }
 
@@ -380,7 +477,7 @@ impl CreateEventModal {
         }
         let locale = settings.read(cx).language.clone();
         let t = |key| mezon_i18n::t(&locale, key).to_string();
-        let voice_select = cx.new(|_| {
+        let voice_select = cx.new(|cx| {
             EventSelect::new(
                 "event-voice",
                 voice_channels
@@ -392,8 +489,9 @@ impl CreateEventModal {
             .no_results(t("invitation.noResults"))
             .placement(EventSelectPlacement::Down)
             .icons(vec![Some(IconName::Speaker); voice_channels.len()])
+            .searchable(t("common.search"), window, cx)
         });
-        let audience_select = cx.new(|_| {
+        let audience_select = cx.new(|cx| {
             EventSelect::new(
                 "event-audience",
                 audience_channels
@@ -412,6 +510,7 @@ impl CreateEventModal {
                     })
                     .collect(),
             )
+            .searchable(t("common.search"), window, cx)
         });
         let now = Local::now();
         let repeat_labels = event_repeat_labels(&locale, now.date_naive());
@@ -1822,9 +1921,10 @@ pub fn open_edit_event_modal(
 mod tests {
     use super::{
         EventSelect, event_date_selection_changed, event_default_end_seconds, event_repeat_labels,
-        event_schedule_timestamps, event_selection_changed,
+        event_schedule_timestamps, event_search_matches, event_selection_changed,
     };
     use crate::components::primitives::DatePickerEvent;
+    use crate::util::text_utils::normalize_diacritics;
     use chrono::{Local, NaiveDate, TimeZone};
 
     #[test]
@@ -1884,6 +1984,33 @@ mod tests {
         assert!(select.selectable_indices().is_empty());
         select.selectable_range = Some(41..96);
         assert_eq!(select.selectable_indices().first(), Some(&41));
+    }
+
+    #[test]
+    fn channel_search_ignores_case_and_vietnamese_diacritics() {
+        let keys: Vec<String> = ["Phòng Họp", "general", "Đà Nẵng team", "HOP-1"]
+            .into_iter()
+            .map(normalize_diacritics)
+            .collect();
+        assert_eq!(event_search_matches(&keys, "  "), None);
+        assert_eq!(event_search_matches(&keys, "hop"), Some(vec![0, 3]));
+        assert_eq!(event_search_matches(&keys, "Họp"), Some(vec![0, 3]));
+        assert_eq!(event_search_matches(&keys, "da nang"), Some(vec![2]));
+        assert_eq!(event_search_matches(&keys, "xyz"), Some(vec![]));
+    }
+
+    #[test]
+    fn search_matches_map_back_to_original_item_indices() {
+        let labels = ["alpha", "beta", "gamma"]
+            .into_iter()
+            .map(Into::into)
+            .collect();
+        let mut select = EventSelect::new("test-channel", labels);
+        assert_eq!(select.selectable_indices(), vec![0, 1, 2]);
+        select.matches = Some(vec![2]);
+        assert_eq!(select.selectable_indices(), vec![2]);
+        select.matches = Some(Vec::new());
+        assert!(select.selectable_indices().is_empty());
     }
 
     #[test]

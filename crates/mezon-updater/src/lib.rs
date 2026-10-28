@@ -676,9 +676,10 @@ async fn install_linux_deb(update: &DownloadedUpdate) -> Result<InstallOutcome> 
     };
     let archive = update.archive.as_os_str();
     if tokio::fs::try_exists(APT_GET).await.unwrap_or(false) {
-        let apt_args: [&std::ffi::OsStr; 6] = [
+        let apt_args: [&std::ffi::OsStr; 7] = [
             "install".as_ref(),
             "-y".as_ref(),
+            "--fix-broken".as_ref(),
             "--no-remove".as_ref(),
             "-o".as_ref(),
             "DPkg::Lock::Timeout=120".as_ref(),

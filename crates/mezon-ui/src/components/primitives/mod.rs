@@ -55,7 +55,7 @@ pub mod stack {
 
 pub use avatar::Avatar;
 pub(crate) use avatar::{
-    avatar_color, avatar_text_color, clipped_initials_tile, initials_tile,
+    avatar_color, avatar_text_color, clipped_initials_tile, default_user_avatar, initials_tile,
     initials_tile_identified, name_initials,
 };
 pub use badge::Badge;

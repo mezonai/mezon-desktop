@@ -14,6 +14,7 @@ pub mod image_viewer;
 pub mod invite;
 pub mod meeting;
 pub mod pdf_viewer;
+pub mod phone_util;
 pub mod router;
 pub mod settings;
 pub mod sidebar;

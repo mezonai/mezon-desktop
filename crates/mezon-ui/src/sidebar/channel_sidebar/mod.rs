@@ -36,6 +36,7 @@ const AUTOSCROLL_MAX_STEP: f32 = 18.;
 const AUTOSCROLL_TICK_MS: u64 = 16;
 
 const SORT_LINGER: Duration = Duration::from_secs(3);
+const STREAM_REBUILD_COALESCE: Duration = Duration::from_millis(16);
 
 mod app_list_popover;
 mod drag;
@@ -61,6 +62,7 @@ fn resolve_voice_member_slot(
         avatar_url: resolved.avatar_src,
         avatar_raw: resolved.avatar_raw,
         sharing_screen: m.sharing_screen,
+        viewer_count: 0,
     }
 }
 
@@ -68,6 +70,7 @@ fn resolve_stream_member_slot(
     cx: &App,
     clan_id: Option<ClanId>,
     m: &StreamMember,
+    viewer_count: u32,
 ) -> VoiceMemberSlot {
     let resolved = crate::util::voice_member::resolve_stream_display(cx, clan_id, m);
     VoiceMemberSlot {
@@ -76,7 +79,24 @@ fn resolve_stream_member_slot(
         avatar_url: resolved.avatar_src,
         avatar_raw: resolved.avatar_raw,
         sharing_screen: false,
+        viewer_count,
     }
+}
+
+fn voice_member_items(
+    category_id: &str,
+    channel_id: ChannelId,
+    members: Vec<VoiceMemberSlot>,
+) -> impl Iterator<Item = SidebarItem> {
+    let channel = channel_id.to_string();
+    let id_prefix = format!("voice-member-{category_id}-{channel}");
+    members
+        .into_iter()
+        .map(move |member| SidebarItem::VoiceMember {
+            elem_id: SharedString::from(format!("{id_prefix}-{}", member.user_id)),
+            channel_id: channel.clone(),
+            member,
+        })
 }
 
 fn channel_sidebar_members(
@@ -87,11 +107,20 @@ fn channel_sidebar_members(
     if ch.channel_type == ChannelType::Stream {
         StreamStore::try_global(cx)
             .map(|store| {
+                let store = store.read(cx);
+                let viewer_count = store.viewer_count(ch.id);
                 store
-                    .read(cx)
                     .members_for_channel(ch.id)
                     .iter()
-                    .map(|m| resolve_stream_member_slot(cx, clan_id, m))
+                    .enumerate()
+                    .map(|(index, m)| {
+                        resolve_stream_member_slot(
+                            cx,
+                            clan_id,
+                            m,
+                            if index == 0 { viewer_count } else { 0 },
+                        )
+                    })
                     .collect()
             })
             .unwrap_or_default()
@@ -151,6 +180,8 @@ pub struct ChannelSidebar {
     _members_observe: Subscription,
     _events_observe: Subscription,
     _stream_observe: Subscription,
+    stream_members_revision: u64,
+    _stream_rebuild: Option<Task<()>>,
     _buzz_observe: Subscription,
     _topic_badge_observe: Subscription,
     _permissions_observe: Subscription,
@@ -336,8 +367,10 @@ impl ChannelSidebar {
             },
         );
         let members_observe = cx.observe(&ClanMembersStore::global(cx), |this, _, cx| {
-            let resolves_members = this.items.iter().any(|item| {
-                matches!(item, SidebarItem::Channel { voice_members, .. } if !voice_members.is_empty())
+            let resolves_members = this.items.iter().any(|item| match item {
+                SidebarItem::Channel { voice_members, .. } => !voice_members.is_empty(),
+                SidebarItem::VoiceMember { .. } => true,
+                _ => false,
             });
             if !resolves_members {
                 return;
@@ -347,10 +380,28 @@ impl ChannelSidebar {
             }
         });
         let events_observe = cx.observe(&EventsStore::global(cx), |_, _, cx| cx.notify());
-        let stream_observe = cx.observe(&StreamStore::global(cx), |this, _, cx| {
-            if this.rebuild_items(cx) {
-                cx.notify();
+        let stream_members_revision = StreamStore::global(cx).read(cx).members_revision();
+        let stream_observe = cx.observe(&StreamStore::global(cx), |this, store, cx| {
+            let revision = store.read(cx).members_revision();
+            if revision == this.stream_members_revision {
+                return;
             }
+            this.stream_members_revision = revision;
+            if this._stream_rebuild.is_some() {
+                return;
+            }
+            this._stream_rebuild = Some(cx.spawn(async move |this, cx| {
+                cx.background_executor()
+                    .timer(STREAM_REBUILD_COALESCE)
+                    .await;
+                this.update(cx, |this, cx| {
+                    this._stream_rebuild = None;
+                    if this.rebuild_items(cx) {
+                        cx.notify();
+                    }
+                })
+                .ok();
+            }));
         });
         let buzz_observe = cx.observe(&BuzzStore::global(cx), |this, _, cx| {
             if this.rebuild_items(cx) {
@@ -429,6 +480,8 @@ impl ChannelSidebar {
             _members_observe: members_observe,
             _events_observe: events_observe,
             _stream_observe: stream_observe,
+            stream_members_revision,
+            _stream_rebuild: None,
             _buzz_observe: buzz_observe,
             _topic_badge_observe: topic_badge_observe,
             _permissions_observe: permissions_observe,
@@ -856,14 +909,18 @@ impl ChannelSidebar {
                                 is_favorite: is_favorites,
                                 line_above,
                                 line_below,
-                                voice_members: channel_sidebar_members(cx, new_clan_id, ch),
-                                voice_compact: false,
+                                voice_members: Vec::new(),
                                 reorder: Some(drag::ChannelReorderDrag {
                                     key,
                                     index,
                                     channel_id: ch.id,
                                 }),
                             });
+                            items.extend(voice_member_items(
+                                &category.id,
+                                ch.id,
+                                channel_sidebar_members(cx, new_clan_id, ch),
+                            ));
                         }
                     } else if self.sort_collapsed != Some(*clan_id) {
                         let ch_slice = channels.sidebar_rows(*clan_id, category);
@@ -962,7 +1019,6 @@ impl ChannelSidebar {
                                 line_above: has_prev_sibling[idx],
                                 line_below: has_next_sibling[idx],
                                 voice_members: sidebar_members,
-                                voice_compact: true,
                                 reorder: None,
                             });
                         }
@@ -2774,7 +2830,6 @@ fn render_sidebar_item(
             line_above,
             line_below,
             voice_members,
-            voice_compact,
             reorder,
         } => {
             let ch_id = id.clone();
@@ -3002,106 +3057,38 @@ fn render_sidebar_item(
                 .child(row_content);
 
             if !voice_members.is_empty() {
-                let members_el = if *voice_compact {
-                    let mut cluster = div()
-                        .flex()
-                        .flex_row()
-                        .items_center()
-                        .pl(px(32.))
-                        .py(px(2.));
-                    for (index, m) in voice_members.iter().take(5).enumerate() {
-                        let name_text = m.display_name.clone();
-                        let mut avatar = Avatar::new().name(name_text);
-                        if !m.avatar_url.is_empty() {
-                            avatar = avatar.src(SharedString::from(m.avatar_url.clone()));
-                            if !m.avatar_raw.is_empty() && m.avatar_raw != m.avatar_url {
-                                avatar =
-                                    avatar.fallback_src(SharedString::from(m.avatar_raw.clone()));
-                            }
-                        } else if !m.avatar_raw.is_empty() {
-                            avatar = avatar.src(SharedString::from(m.avatar_raw.clone()));
-                        }
-                        cluster = cluster.child(
-                            div()
-                                .when(index > 0, |el| el.ml(px(-6.)))
-                                .child(avatar.with_size(Size::XSmall)),
-                        );
-                    }
-                    if voice_members.len() > 5 {
-                        let extra = (voice_members.len() - 5).min(99);
-                        cluster = cluster.child(
-                            div()
-                                .ml(px(4.))
-                                .text_xs()
-                                .text_color(theme.text_muted)
-                                .child(format!("+{extra}")),
-                        );
-                    }
-                    cluster
-                } else {
-                    let voice_pl = if *is_thread { px(40.) } else { px(32.) };
-                    div()
-                        .w_full()
-                        .min_w_0()
-                        .flex()
-                        .flex_col()
-                        .pl(voice_pl)
-                        .children(voice_members.iter().map(|m| {
-                            let name_text = m.display_name.clone();
-                            let sharing_screen = m.sharing_screen;
-                            let mut avatar = Avatar::new().name(name_text.clone());
-                            if !m.avatar_url.is_empty() {
-                                avatar = avatar.src(SharedString::from(m.avatar_url.clone()));
-                                if !m.avatar_raw.is_empty() && m.avatar_raw != m.avatar_url {
-                                    avatar = avatar
-                                        .fallback_src(SharedString::from(m.avatar_raw.clone()));
-                                }
-                            } else if !m.avatar_raw.is_empty() {
-                                avatar = avatar.src(SharedString::from(m.avatar_raw.clone()));
-                            }
-                            div()
-                                .w(relative(0.9))
-                                .min_w_0()
-                                .flex()
-                                .flex_row()
-                                .items_center()
-                                .justify_between()
-                                .p(px(4.))
-                                .pr(px(8.))
-                                .gap(px(12.))
-                                .rounded(px(8.))
-                                .child(
-                                    div()
-                                        .min_w_0()
-                                        .flex()
-                                        .flex_row()
-                                        .items_center()
-                                        .gap_2()
-                                        .child(avatar.with_size(Size::XSmall))
-                                        .child(
-                                            div()
-                                                .min_w_0()
-                                                .flex_1()
-                                                .truncate()
-                                                .text_sm()
-                                                .text_color(theme.text_muted)
-                                                .child(name_text),
-                                        ),
-                                )
-                                .when(sharing_screen, |el| {
-                                    el.child(
-                                        Icon::new(IconName::VoiceScreenShareIcon)
-                                            .size(px(16.))
-                                            .text_color(
-                                                crate::util::user_status::in_voice_icon_color(
-                                                    theme,
-                                                ),
-                                            ),
-                                    )
-                                })
-                        }))
-                };
-                channel_col = channel_col.child(members_el);
+                let mut cluster = div()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .pl(px(32.))
+                    .py(px(2.));
+                for (index, m) in voice_members.iter().take(5).enumerate() {
+                    cluster = cluster.child(
+                        div()
+                            .when(index > 0, |el| el.ml(px(-6.)))
+                            .child(voice_member_avatar(m).with_size(Size::XSmall)),
+                    );
+                }
+                if voice_members.len() > 5 {
+                    let extra = (voice_members.len() - 5).min(99);
+                    cluster = cluster.child(
+                        div()
+                            .ml(px(4.))
+                            .text_xs()
+                            .text_color(theme.text_muted)
+                            .child(format!("+{extra}")),
+                    );
+                }
+                let viewer_count = voice_members.first().map_or(0, |m| m.viewer_count);
+                if viewer_count > 0 {
+                    cluster = cluster.child(
+                        div()
+                            .ml(px(8.))
+                            .child(viewer_count_badge(viewer_count, theme)),
+                    );
+                }
+                channel_col = channel_col.child(cluster);
             }
 
             let sidebar_for_reorder = sidebar.clone();
@@ -3162,13 +3149,130 @@ fn render_sidebar_item(
             )
             .into_any_element()
         }
+        SidebarItem::VoiceMember {
+            elem_id,
+            channel_id,
+            member,
+        } => div()
+            .id(elem_id.clone())
+            .w_full()
+            .min_w_0()
+            .pl(px(32.))
+            .on_click(on_channel_click(channel_id.clone(), active_clan_id_for_nav))
+            .child(
+                div()
+                    .w(relative(0.9))
+                    .min_w_0()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .justify_between()
+                    .p(px(4.))
+                    .pr(px(8.))
+                    .gap(px(12.))
+                    .rounded(px(8.))
+                    .child(
+                        div()
+                            .min_w_0()
+                            .flex()
+                            .flex_row()
+                            .items_center()
+                            .gap_2()
+                            .child(voice_member_avatar(member).with_size(Size::XSmall))
+                            .child(
+                                div()
+                                    .min_w_0()
+                                    .flex_1()
+                                    .truncate()
+                                    .text_sm()
+                                    .text_color(theme.text_muted)
+                                    .child(member.display_name.clone()),
+                            ),
+                    )
+                    .when(member.sharing_screen, |el| {
+                        el.child(
+                            Icon::new(IconName::VoiceScreenShareIcon)
+                                .size(px(16.))
+                                .text_color(crate::util::user_status::in_voice_icon_color(theme)),
+                        )
+                    })
+                    .when(member.viewer_count > 0, |el| {
+                        el.child(viewer_count_badge(member.viewer_count, theme))
+                    }),
+            )
+            .into_any_element(),
     }
+}
+
+fn voice_member_avatar(member: &VoiceMemberSlot) -> Avatar {
+    let mut avatar = Avatar::new();
+    if !member.avatar_url.is_empty() {
+        avatar = avatar.src(SharedString::from(member.avatar_url.clone()));
+        if !member.avatar_raw.is_empty() && member.avatar_raw != member.avatar_url {
+            avatar = avatar.fallback_src(SharedString::from(member.avatar_raw.clone()));
+        }
+    } else if !member.avatar_raw.is_empty() {
+        avatar = avatar.src(SharedString::from(member.avatar_raw.clone()));
+    }
+    avatar
+}
+
+fn viewer_count_badge(viewer_count: u32, theme: &Theme) -> gpui::Div {
+    div()
+        .flex_shrink_0()
+        .flex()
+        .flex_row()
+        .items_center()
+        .gap_1()
+        .text_xs()
+        .text_color(theme.text_muted)
+        .child(
+            Icon::new(IconName::EyeOpen)
+                .size(px(14.))
+                .text_color(theme.text_muted),
+        )
+        .child(viewer_count.to_string())
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{ScrollAnchor, SidebarItem, anchor_target, changed_range};
+    use super::{ScrollAnchor, SidebarItem, anchor_target, changed_range, voice_member_items};
+    use crate::sidebar::channel_sidebar::items::VoiceMemberSlot;
     use gpui::{SharedString, px};
+    use mezon_store::ChannelId;
+
+    fn member(user_id: &str, viewer_count: u32) -> VoiceMemberSlot {
+        VoiceMemberSlot {
+            user_id: user_id.to_string(),
+            display_name: user_id.to_string(),
+            avatar_url: String::new(),
+            avatar_raw: String::new(),
+            sharing_screen: false,
+            viewer_count,
+        }
+    }
+
+    #[test]
+    fn every_voice_member_gets_its_own_sidebar_row() {
+        let members: Vec<_> = (0..300)
+            .map(|i| member(&i.to_string(), if i == 0 { 299 } else { 0 }))
+            .collect();
+        let items: Vec<_> = voice_member_items("7", ChannelId(42), members).collect();
+        assert_eq!(items.len(), 300);
+        let ids: std::collections::HashSet<_> = items.iter().map(|item| item.anchor_id()).collect();
+        assert_eq!(ids.len(), 300);
+        let SidebarItem::VoiceMember {
+            elem_id,
+            channel_id,
+            member,
+        } = &items[0]
+        else {
+            panic!("expected a voice member row");
+        };
+        assert_eq!(elem_id.as_ref(), "voice-member-7-42-0");
+        assert_eq!(channel_id, "42");
+        assert_eq!(member.viewer_count, 299);
+    }
 
     fn cat(id: &str) -> SidebarItem {
         SidebarItem::Category {

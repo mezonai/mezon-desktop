@@ -12,7 +12,7 @@ use mezon_store::{ChannelList, ClanId, ClanList, NotificationSettingStore};
 use super::{ClanMenuArgs, ClanSidebar};
 use crate::app::shell::Shell;
 use crate::components::primitives::{
-    ContextMenu, SubmenuOption, avatar_color, avatar_text_color, clipped_initials_tile,
+    ContextMenu, SubmenuOption, Tooltip, avatar_color, avatar_text_color, clipped_initials_tile,
     initials_tile, initials_tile_identified, mention_count_badge, name_initials,
 };
 use crate::router::{Route, Router};
@@ -347,6 +347,10 @@ pub(super) fn render_clan_row(
         .items_center()
         .justify_center()
         .cursor_pointer()
+        .when(!suppress_hover && !clan.name.is_empty(), {
+            let name = clan.name.clone();
+            move |el| el.tooltip(Tooltip::prominent_text(name))
+        })
         .child(render_pill(is_active, clan.group_name.clone(), pill_color))
         .when(show_nub, |el| {
             el.child(

@@ -10,9 +10,13 @@ use gpui::{
 };
 use mezon_store::{AccountEvent, AccountStore, PasswordSaveError};
 
+const PASSWORD_SPECIAL_CHARS: &str = "!@#$%^&*()_+~`|}{[]:;?><,./-=";
+const PASSWORD_MAX_BYTES: usize = 64;
+
 #[derive(Clone, Copy)]
 enum PasswordValidationError {
     Characters,
+    TooLong,
     Uppercase,
     Lowercase,
     Number,
@@ -28,13 +32,15 @@ enum CurrentPasswordError {
 fn validate_password(password: &str) -> Option<PasswordValidationError> {
     if password.chars().count() < 8 {
         Some(PasswordValidationError::Characters)
+    } else if password.len() > PASSWORD_MAX_BYTES {
+        Some(PasswordValidationError::TooLong)
     } else if !password.chars().any(|c| c.is_ascii_uppercase()) {
         Some(PasswordValidationError::Uppercase)
     } else if !password.chars().any(|c| c.is_ascii_lowercase()) {
         Some(PasswordValidationError::Lowercase)
     } else if !password.chars().any(|c| c.is_ascii_digit()) {
         Some(PasswordValidationError::Number)
-    } else if !password.chars().any(|c| !c.is_ascii_alphanumeric()) {
+    } else if !password.chars().any(|c| PASSWORD_SPECIAL_CHARS.contains(c)) {
         Some(PasswordValidationError::Symbol)
     } else {
         None
@@ -171,7 +177,7 @@ impl PasswordModal {
                         }
                     };
                     Shell::global(cx).update(cx, |shell, cx| {
-                        shell.error(mezon_i18n::t(&this.locale, key), cx)
+                        shell.error_replace(key, mezon_i18n::t(&this.locale, key), cx)
                     });
                     cx.notify();
                 }
@@ -227,13 +233,8 @@ impl PasswordModal {
             .is_some_and(|input| input.read(cx).value() == self.password_input.read(cx).value());
         if same_password {
             Shell::global(cx).update(cx, |shell, cx| {
-                shell.error(
-                    mezon_i18n::t(
-                        &self.locale,
-                        "accountSetting.setPasswordAccount.error.samePass",
-                    ),
-                    cx,
-                )
+                let key = "accountSetting.setPasswordAccount.error.samePass";
+                shell.error_replace(key, mezon_i18n::t(&self.locale, key), cx)
             });
             return;
         }
@@ -264,6 +265,7 @@ impl PasswordModal {
             PasswordValidationError::Characters => {
                 "accountSetting.setPasswordAccount.error.characters"
             }
+            PasswordValidationError::TooLong => "accountSetting.setPasswordAccount.error.tooLong",
             PasswordValidationError::Uppercase => {
                 "accountSetting.setPasswordAccount.error.uppercase"
             }
@@ -506,7 +508,25 @@ mod tests {
             validate_password("Password1"),
             Some(PasswordValidationError::Symbol)
         ));
+        assert!(matches!(
+            validate_password("Password1 "),
+            Some(PasswordValidationError::Symbol)
+        ));
+        assert!(matches!(
+            validate_password("Password1'"),
+            Some(PasswordValidationError::Symbol)
+        ));
+        assert!(matches!(
+            validate_password("Password1đ"),
+            Some(PasswordValidationError::Symbol)
+        ));
         assert!(validate_password("Password1!").is_none());
+        assert!(validate_password("Password1~").is_none());
+        assert!(validate_password(&format!("Aa1!{}", "a".repeat(60))).is_none());
+        assert!(matches!(
+            validate_password(&format!("Aa1!{}", "a".repeat(61))),
+            Some(PasswordValidationError::TooLong)
+        ));
         assert!(matches!(
             validate_password("É1password!"),
             Some(PasswordValidationError::Uppercase)

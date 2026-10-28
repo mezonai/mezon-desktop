@@ -12,14 +12,15 @@ use mezon_store::{
 
 use super::native::{NativeRect, NativeWindow, ShareTarget, native_window};
 use crate::app::window_controls::linux_app_id;
-use crate::chat::screen_draw::{cursor_for_tool, paint_draw_state, text_width};
+use crate::chat::screen_draw::{
+    cursor_for_tool, draw_preview_background, paint_draw_state, text_width,
+};
 use crate::components::primitives::{Input, InputEvent, InputState};
 
 const WINDOW_TRACK_INTERVAL: Duration = Duration::from_millis(120);
 const DISPLAY_TRACK_INTERVAL: Duration = Duration::from_millis(1000);
 const HOVER_POLL_INTERVAL: Duration = Duration::from_millis(33);
 const TEXT_EDITOR_MIN_WIDTH: f32 = 220.;
-const TEXT_EDITOR_BACKGROUND: u32 = 0x000000b3;
 
 pub(super) struct OpenedOverlay {
     pub handle: AnyWindowHandle,
@@ -422,7 +423,7 @@ impl AnnotationOverlay {
                 .text_size(px(font_size))
                 .font_weight(FontWeight::BOLD)
                 .text_color(gpui::rgba(color))
-                .bg(gpui::rgba(TEXT_EDITOR_BACKGROUND));
+                .bg(draw_preview_background(color));
             if !content.is_empty() {
                 input.set_value(content, window, cx);
             }

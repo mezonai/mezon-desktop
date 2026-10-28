@@ -220,7 +220,6 @@ pub struct RichTextRenderPlan {
     pub edited: bool,
     pub text: SharedString,
     pub highlights: Arc<[(Range<usize>, HighlightStyle)]>,
-    pub font_overrides: Arc<[(Range<usize>, SharedString)]>,
     pub click_ranges: Arc<[Range<usize>]>,
     pub actions: Arc<[RichClick]>,
     pub locale: SharedString,

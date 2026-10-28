@@ -257,6 +257,10 @@ impl PlayerImpl {
         self.drain_bus();
         self.failed.get()
     }
+
+    pub fn set_live_offset(&self, _seconds: f64) {}
+
+    pub fn set_audio_output_device(&self, _uid: Option<&str>) {}
 }
 
 impl Drop for PlayerImpl {

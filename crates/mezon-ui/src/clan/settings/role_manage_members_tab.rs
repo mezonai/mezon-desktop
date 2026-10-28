@@ -411,7 +411,7 @@ impl RoleSettingPage {
     ) -> impl IntoElement {
         let user_id = member.user_id;
         let row_group = SharedString::from(format!("role-member-row-{}", user_id.get()));
-        let mut avatar = Avatar::new().name(member.name.clone()).size_px(px(24.0));
+        let mut avatar = Avatar::new().size_px(px(24.0));
         if !member.avatar.is_empty() {
             avatar = avatar.src(member.avatar.clone());
         }
@@ -469,7 +469,7 @@ impl RoleSettingPage {
     ) -> impl IntoElement {
         let user_id = member.user_id;
         let checked = self.add_member_selection.contains(&user_id);
-        let mut avatar = Avatar::new().name(member.name.clone()).size_px(px(20.0));
+        let mut avatar = Avatar::new().size_px(px(20.0));
         if !member.avatar.is_empty() {
             avatar = avatar.src(member.avatar.clone());
         }

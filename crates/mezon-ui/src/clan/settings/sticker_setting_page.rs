@@ -450,9 +450,7 @@ fn render_sticker_card(
                 .justify_center()
                 .gap_1()
                 .child({
-                    let mut avatar = Avatar::new()
-                        .name(sticker.creator_name.clone())
-                        .size_px(px(16.0));
+                    let mut avatar = Avatar::new().size_px(px(16.0));
                     if let Some(src) = sticker.creator_avatar.clone() {
                         avatar = avatar.src(src);
                     }

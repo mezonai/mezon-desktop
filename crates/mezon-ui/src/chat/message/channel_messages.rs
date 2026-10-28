@@ -24,7 +24,7 @@ use mezon_store::{
     PERMISSION_MANAGE_THREAD, PERMISSION_SEND_MESSAGE, PermissionStore, ProfileContext,
     QUICK_MENU_TYPE_QUICK, QuickMenuStore, RolesEvent, RolesStore, Settings, SpriteAtlas,
     TopicBadgeEvent, TopicBadgeStore, TopicsEvent, TopicsStore, UserId, UsersByUserStore,
-    message::{Message, markdown_edit_source},
+    message::{Message, composer_edit_source},
 };
 
 use super::audio_player::{AudioActivation, AudioPlayerView};
@@ -2562,11 +2562,7 @@ impl ChannelMessages {
         self.selection_autoscroll_scheduled = false;
         let (initial_content, initial_spans) = self
             .find_local_message(message_id, cx)
-            .map(|m| {
-                let source =
-                    markdown_edit_source(&m.content, &m.spans).unwrap_or_else(|| m.content.clone());
-                (source, m.spans)
-            })
+            .map(|m| (composer_edit_source(&m.content, &m.spans), m.spans))
             .unwrap_or_default();
         let settings = self.settings.clone();
         let input = cx.new(|cx| {
@@ -2631,9 +2627,10 @@ impl ChannelMessages {
             return;
         };
 
-        let original = local.map(|m| m.content);
-
-        if original.as_deref() == Some(text.as_str()) {
+        if local
+            .as_ref()
+            .is_some_and(|m| composer_edit_source(&m.content, &m.spans) == text)
+        {
             store.update(cx, |store, cx| store.cancel_edit(cx));
             cx.emit(ChannelMessagesEvent::EditClosed);
             cx.notify();

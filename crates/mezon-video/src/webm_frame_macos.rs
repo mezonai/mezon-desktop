@@ -27,6 +27,7 @@ unsafe extern "C" {
     fn CVPixelBufferGetBytesPerRowOfPlane(buffer: CVPixelBufferRef, plane: usize) -> usize;
 }
 
+#[allow(dead_code)]
 pub fn pixel_buffer_from_i420(
     width: u32,
     height: u32,

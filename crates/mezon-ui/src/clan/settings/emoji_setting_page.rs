@@ -413,9 +413,7 @@ fn render_emoji_row(
                 .gap(px(6.0))
                 .items_center()
                 .child({
-                    let mut avatar = Avatar::new()
-                        .name(row.creator_name.clone())
-                        .size_px(px(24.0));
+                    let mut avatar = Avatar::new().size_px(px(24.0));
                     if let Some(src) = row.creator_avatar.clone() {
                         avatar = avatar.src(src);
                     }

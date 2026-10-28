@@ -245,20 +245,73 @@ pub static FOREIGN_AND_TECH_WORDS: LazyLock<HashSet<&'static str>> = LazyLock::n
         "openkey",
         "telex",
         "vni",
+        "chip",
+        "system",
     ];
     words.into_iter().collect()
 });
 
-static ENGLISH_MARKERS: LazyLock<HashSet<&'static str>> = LazyLock::new(|| {
+pub static UNAMBIGUOUS_ENGLISH_MARKERS: LazyLock<HashSet<&'static str>> = LazyLock::new(|| {
     let markers = [
-        "the", "is", "are", "was", "were", "this", "that", "these", "those", "with", "from",
-        "have", "has", "had", "will", "would", "could", "should", "you", "your", "we", "our",
-        "they", "their", "it", "its", "for", "and", "or", "but", "not", "what", "when", "where",
-        "which", "who", "how", "why", "on", "in", "at", "to", "of", "by", "as", "an", "a", "be",
-        "been", "being", "all", "any", "some", "no", "yes", "good", "great", "day", "running",
-        "run", "exit", "than", "less", "more", "small", "big", "much", "many", "just",
+        "is", "are", "was", "were", "this", "that", "these", "those", "with", "from", "have",
+        "has", "had", "will", "would", "could", "should", "you", "your", "they", "their", "what",
+        "when", "where", "which", "been", "being", "does", "did", "doing", "about", "between",
+        "through",
     ];
     markers.into_iter().collect()
+});
+
+pub static ENGLISH_COLLOCATIONS: LazyLock<HashSet<(&'static str, &'static str)>> =
+    LazyLock::new(|| {
+        let pairs = [
+            ("the", "model"),
+            ("on", "client"),
+            ("good", "day"),
+            ("have", "a"),
+            ("in", "the"),
+            ("of", "the"),
+            ("to", "the"),
+            ("for", "the"),
+            ("with", "the"),
+            ("on", "the"),
+            ("at", "the"),
+            ("from", "the"),
+            ("thank", "you"),
+            ("thanks", "for"),
+            ("let", "me"),
+            ("see", "you"),
+        ];
+        pairs.into_iter().collect()
+    });
+
+static RE_VN_DIACRITICS: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(?i)[àáảãạăằắẳẵặâầấẩẫậèéẻẽẹêềếểễệìíỉĩịòóỏõọôồốổỗộơờớởỡợùúủũụưừứửữựỳýỷỹỵđ]")
+        .unwrap()
+});
+
+static RE_MULTISYLLABIC: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(?i)[aeiouyàáảãạăằắẳẵặâầấẩẫậèéẻẽẹêềếểễệìíỉĩịòóỏõọôồốổỗộơờớởỡợùúủũụưừứửữựỳýỷỹỵ]+[^aeiouyàáảãạăằắẳẵặâầấẩẫậèéẻẽẹêềếểễệìíỉĩịòóỏõọôồốổỗộơờớởỡợùúủũụưừứửữựỳýỷỹỵ\s]+[aeiouyàáảãạăằắẳẵặâầấẩẫậèéẻẽẹêềếểễệìíỉĩịòóỏõọôồốổỗộơờớởỡợùúủũụưừứửữựỳýỷỹỵ]+").unwrap()
+});
+
+fn has_double_consonant(w: &str) -> bool {
+    let bytes = w.as_bytes();
+    for i in 0..bytes.len().saturating_sub(1) {
+        if bytes[i].is_ascii_alphabetic() && bytes[i] == bytes[i + 1] {
+            return true;
+        }
+    }
+    false
+}
+
+static RE_INVALID_VN_ENDING: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"[bdfgklrsvxz]$").unwrap());
+
+static RE_CONSONANT_CODA_CLUSTER: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(st|sk|sh|ct|pt|ft|lt|rt|ld|nd|rd|mp|nk|rk|ck|nt|ce|de|te|ge)$").unwrap()
+});
+
+static RE_CONSONANT_ONSET_CLUSTER: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"^(gr|cl|cr|pr|pl|fr|fl|br|bl|dr|st|sp|sk|sc|sm|sn|sw|str|spr|scr)").unwrap()
 });
 
 /// Vietnamese teencode and shorthand normalization mapping.
@@ -873,15 +926,66 @@ pub fn match_case(original: &str, replacement: &str) -> String {
 }
 
 pub fn is_foreign_or_tech_word(word: &str) -> bool {
-    FOREIGN_AND_TECH_WORDS.contains(word.to_lowercase().as_str())
+    let w = word.trim().to_lowercase();
+    if w.is_empty() {
+        return false;
+    }
+    // 1. Known Vietnamese teencode abbreviations (t2, t3, mik, bik, thik, zui, etc.)
+    if TEENCODE_MAP.contains_key(w.as_str()) {
+        return false;
+    }
+    // 2. Alphanumeric / units (e.g. 447kb, v2, 100%)
+    if w.chars().any(|c| c.is_ascii_digit()) {
+        return true;
+    }
+    // 3. Contains Vietnamese diacritics
+    if RE_VN_DIACRITICS.is_match(&w) {
+        return false;
+    }
+    // 4. Known dictionary
+    if FOREIGN_AND_TECH_WORDS.contains(w.as_str()) {
+        return true;
+    }
+    // 4b. Common confusables or endings
+    if w.ends_with("bg") {
+        return false;
+    }
+    // 5. Non-Vietnamese alphabet letters
+    if w.chars().any(|c| matches!(c, 'f' | 'j' | 'w' | 'z'))
+        && !matches!(w.as_str(), "zui" | "wa" | "j" | "z")
+    {
+        return true;
+    }
+    // 5b. Double consonants (except oo, ee, uu)
+    if has_double_consonant(&w)
+        && !w.starts_with("oo")
+        && !w.starts_with("ee")
+        && !w.starts_with("uu")
+    {
+        return true;
+    }
+    // 6. Syllable endings
+    if RE_INVALID_VN_ENDING.is_match(&w) && !w.ends_with("ng") {
+        return true;
+    }
+    // 7. Coda cluster
+    if RE_CONSONANT_CODA_CLUSTER.is_match(&w) {
+        return true;
+    }
+    // 8. Onset cluster
+    if RE_CONSONANT_ONSET_CLUSTER.is_match(&w) {
+        return true;
+    }
+    // 9. Multisyllabic
+    if RE_MULTISYLLABIC.is_match(&w) {
+        return true;
+    }
+    false
 }
 
 pub fn is_predominantly_english_sentence(text: &str) -> bool {
     let lower = text.to_lowercase();
-    let vn_diacritics =
-        Regex::new(r"[àáảãạăằắẳẵặâầấẩẫậèéẻẽẹêềếểễệìíỉĩịòóỏõọôồốổỗộơờớởỡợùúủũụưừứửữựỳýỷỹỵđ]")
-            .unwrap();
-    if vn_diacritics.is_match(&lower) {
+    if RE_VN_DIACRITICS.is_match(&lower) {
         return false;
     }
 
@@ -891,19 +995,46 @@ pub fn is_predominantly_english_sentence(text: &str) -> bool {
         return false;
     }
 
-    let mut eng_markers = 0;
-    let mut foreign_count = 0;
-    for &w in &words {
-        let w_lower = w.to_lowercase();
-        if ENGLISH_MARKERS.contains(w_lower.as_str()) {
-            eng_markers += 1;
-        }
-        if is_foreign_or_tech_word(w) || ENGLISH_MARKERS.contains(w_lower.as_str()) {
-            foreign_count += 1;
+    let tokens_lower: Vec<String> = words.iter().map(|w| w.to_lowercase()).collect();
+    let mut unambig_eng = 0;
+    for w in &tokens_lower {
+        if UNAMBIGUOUS_ENGLISH_MARKERS.contains(w.as_str()) {
+            unambig_eng += 1;
         }
     }
 
-    eng_markers >= 2 || (foreign_count as f32 / words.len() as f32) >= 0.75
+    let mut bigram_match = false;
+    for i in 0..tokens_lower.len().saturating_sub(1) {
+        if ENGLISH_COLLOCATIONS.contains(&(tokens_lower[i].as_str(), tokens_lower[i + 1].as_str()))
+        {
+            bigram_match = true;
+            break;
+        }
+    }
+
+    let mut foreign_count = 0;
+    for &w in &words {
+        let w_lower = w.to_lowercase();
+        if is_foreign_or_tech_word(w) || UNAMBIGUOUS_ENGLISH_MARKERS.contains(w_lower.as_str()) {
+            foreign_count += 1;
+        }
+    }
+    let ratio = foreign_count as f32 / words.len() as f32;
+
+    if unambig_eng >= 2 {
+        return true;
+    }
+    if unambig_eng >= 1 && (bigram_match || (foreign_count >= 2 && ratio >= 0.5)) {
+        return true;
+    }
+    if bigram_match && words.len() <= 5 {
+        return true;
+    }
+    if foreign_count >= 2 && ratio >= 0.65 {
+        return true;
+    }
+
+    false
 }
 
 /// Normalizes spacing around punctuation marks.
@@ -1050,7 +1181,6 @@ pub static COMMON_CANDIDATES: LazyLock<HashMap<&'static str, &'static str>> = La
     let pairs = [
         ("noi", "nói"),
         ("tieng", "tiếng"),
-        ("viet", "Việt"),
         ("dau", "dấu"),
         ("co", "có"),
         ("hieu", "hiểu"),

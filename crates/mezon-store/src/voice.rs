@@ -1726,12 +1726,11 @@ impl VoiceStore {
         self.noise_suppression_started = None;
         let status = match result {
             Ok(()) => {
-                let status = if self.noise_suppression_enabled {
+                if self.noise_suppression_enabled {
                     NoiseSuppressionStatus::Applied
                 } else {
                     NoiseSuppressionStatus::Disabled
-                };
-                status
+                }
             }
             Err(error) => {
                 tracing::warn!(generation, "Mezon-NS unavailable: {error}");
@@ -3888,11 +3887,13 @@ impl VoiceStore {
         if !active {
             self.screen_draw_editor = None;
         }
-        if active && self.fullscreen_screen.is_none() && self.focused_tile.is_none() {
-            if let Some(p) = self.participants.iter().find(|p| p.screenshare.is_some()) {
-                self.focused_tile = Some(screen_tile_id(&p.session_id));
-                self.sync_screen_full_res();
-            }
+        if active
+            && self.fullscreen_screen.is_none()
+            && self.focused_tile.is_none()
+            && let Some(p) = self.participants.iter().find(|p| p.screenshare.is_some())
+        {
+            self.focused_tile = Some(screen_tile_id(&p.session_id));
+            self.sync_screen_full_res();
         }
         cx.notify();
     }
@@ -6329,8 +6330,7 @@ fn validate_sound_bytes(
         return Err("size_limit".into());
     }
     let extension = extension.to_ascii_lowercase();
-    let mime =
-        mezon_audio::sniff_sound_mime(&data).ok_or_else(|| "unsupported_type".to_string())?;
+    let mime = mezon_audio::sniff_sound_mime(data).ok_or_else(|| "unsupported_type".to_string())?;
     let filetype = match extension.as_str() {
         "wav" if mime == "audio/wav" => "audio/wav",
         "mp3" | "mpeg" if mime == "audio/mpeg" => "audio/mpeg",

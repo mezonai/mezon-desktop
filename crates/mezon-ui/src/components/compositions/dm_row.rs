@@ -283,7 +283,7 @@ impl DmRow {
                 )
                 .into_any_element()
         } else {
-            let mut avatar = Avatar::new().name(self.label.clone()).size_px(size);
+            let mut avatar = Avatar::new().size_px(size);
             if let Some(cache) = self.image_cache.clone() {
                 avatar = avatar.image_cache(cache);
             }

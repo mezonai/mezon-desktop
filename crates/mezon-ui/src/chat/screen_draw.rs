@@ -42,9 +42,7 @@ const IN_APP_TOOLS: &[DrawTool] = &[
 #[derive(Clone)]
 pub(crate) enum DrawTarget {
     InApp(Entity<VoiceStore>),
-    Desktop {
-        draw: Entity<DesktopDraw>,
-    },
+    Desktop { draw: Entity<DesktopDraw> },
 }
 
 impl DrawTarget {
@@ -85,6 +83,24 @@ pub(crate) fn cursor_for_tool(tool: DrawTool) -> CursorStyle {
         DrawTool::Pointer | DrawTool::Select => CursorStyle::Arrow,
         DrawTool::Text => CursorStyle::IBeam,
         _ => CursorStyle::Crosshair,
+    }
+}
+
+pub(crate) fn draw_preview_background(color: u32) -> Rgba {
+    let linear = |shift: u32| {
+        let channel = ((color >> shift) & 0xff_u32) as f32 / 255.;
+        if channel <= 0.04045 {
+            channel / 12.92
+        } else {
+            ((channel + 0.055) / 1.055).powf(2.4)
+        }
+    };
+    let luminance = 0.2126 * linear(24) + 0.7152 * linear(16) + 0.0722 * linear(8);
+    // Keep the editing surface opaque so shared content cannot reduce contrast.
+    if luminance < 0.2 {
+        gpui::rgb(0xffffff)
+    } else {
+        gpui::rgb(0x18181b)
     }
 }
 
@@ -314,13 +330,17 @@ fn width_row(
                 .id(SharedString::from(format!("draw-width-{w:.0}")))
                 .size(px(24.))
                 .rounded_md()
+                .bg(draw_preview_background(stroke_color))
+                .border_2()
+                .border_color(gpui::rgba(0x00000000))
                 .flex()
                 .items_center()
                 .justify_center()
-                .when(enabled, |s| {
-                    s.cursor_pointer().hover(|s| s.bg(gpui::rgba(0xffffff20)))
+                .when(enabled, |s| s.cursor_pointer())
+                .when(enabled && !is_active, |s| {
+                    s.hover(|s| s.border_color(gpui::rgba(0x5865f280)))
                 })
-                .when(is_active, |s| s.bg(gpui::rgba(0xffffff30)))
+                .when(is_active, |s| s.border_color(gpui::rgb(ACCENT_BLUE)))
                 .child(
                     div()
                         .size(dot_size)
@@ -625,7 +645,8 @@ impl DrawTextEditor {
                 .borderless()
                 .text_size(px(14.))
                 .font_weight(FontWeight::BOLD)
-                .text_color(gpui::rgba(text.color));
+                .text_color(gpui::rgba(text.color))
+                .bg(draw_preview_background(text.color));
             if !content.is_empty() {
                 input.set_value(content, window, cx);
             }
@@ -669,7 +690,7 @@ impl Render for DrawTextEditor {
             .px_3()
             .py_2()
             .rounded_lg()
-            .bg(gpui::rgba(0x18181bf5))
+            .bg(draw_preview_background(self.color))
             .border_2()
             .border_color(gpui::rgba(self.color))
             .shadow_xl()

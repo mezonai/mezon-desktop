@@ -664,7 +664,7 @@ fn render_sound_card(
                     .gap(px(4.0))
                     .mt(px(4.0))
                     .child({
-                        let mut avatar_el = Avatar::new().name(name.clone()).size_px(px(16.0));
+                        let mut avatar_el = Avatar::new().size_px(px(16.0));
                         if !avatar.is_empty() {
                             avatar_el = avatar_el.src(avatar);
                         }

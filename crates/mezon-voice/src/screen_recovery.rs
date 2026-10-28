@@ -185,10 +185,10 @@ impl ScreenRecovery {
                 source.visible
                     && source.attempts <= RETRIES.len()
                     && now >= source.ready
-                    && !source
+                    && source
                         .receipt
                         .last_frame()
-                        .is_some_and(|frame| frame >= source.since)
+                        .is_none_or(|frame| frame < source.since)
                     && !self
                         .last_by_publisher
                         .get(&source.publisher)

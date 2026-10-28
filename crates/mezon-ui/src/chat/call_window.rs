@@ -170,7 +170,7 @@ impl Render for CallOverlay {
                     .p_6()
                     .rounded_xl()
                     .bg(card_bg)
-                    .child(avatar_element(&name, avatar.as_deref(), px(96.)))
+                    .child(avatar_element(avatar.as_deref(), px(96.)))
                     .child(div().text_color(title_color).text_xl().child(name))
                     .child(div().text_color(subtitle_color).child(incoming_label))
                     .child(
@@ -332,13 +332,7 @@ impl CallPanelView {
     ) -> gpui::AnyElement {
         let name = display_name(&peer);
         let avatar = peer.avatar.clone();
-        let (self_name, self_avatar) = {
-            let store = self.call.read(cx);
-            (
-                store.self_name().to_string(),
-                store.self_avatar().to_string(),
-            )
-        };
+        let self_avatar = self.call.read(cx).self_avatar().to_string();
         let two_tile = local.cam_on || remote.cam_on;
 
         let (remote_frame, self_frame) = if two_tile {
@@ -372,7 +366,6 @@ impl CallPanelView {
                 CallTile::Remote,
                 remote_frame,
                 &name,
-                &name,
                 avatar.as_deref(),
                 remote.mic_on,
                 tile_layout(enlarged, CallTile::Remote),
@@ -382,7 +375,6 @@ impl CallPanelView {
                 CallTile::Local,
                 self_frame,
                 you_label,
-                &self_name,
                 self_avatar_opt,
                 local.mic_on,
                 tile_layout(enlarged, CallTile::Local),
@@ -407,7 +399,7 @@ impl CallPanelView {
                 .flex()
                 .items_center()
                 .justify_center()
-                .child(avatar_element(&name, avatar.as_deref(), px(72.)))
+                .child(avatar_element(avatar.as_deref(), px(72.)))
                 .when(
                     !remote.mic_on && matches!(phase, CallPhase::Connected),
                     |el| {
@@ -847,8 +839,8 @@ fn display_name(peer: &CallPeer) -> String {
     }
 }
 
-fn avatar_element(name: &str, avatar: Option<&str>, size: Pixels) -> gpui::AnyElement {
-    let mut element = Avatar::new().name(name.to_string()).size_px(size);
+fn avatar_element(avatar: Option<&str>, size: Pixels) -> gpui::AnyElement {
+    let mut element = Avatar::new().size_px(size);
     if let Some(url) = avatar
         && !url.is_empty()
     {
@@ -859,7 +851,6 @@ fn avatar_element(name: &str, avatar: Option<&str>, size: Pixels) -> gpui::AnyEl
 
 fn frame_element(
     frame: Option<VoiceRenderFrame>,
-    name: &str,
     avatar: Option<&str>,
     avatar_size: Pixels,
     fit: ObjectFit,
@@ -873,7 +864,7 @@ fn frame_element(
             .size_full()
             .object_fit(fit)
             .into_any_element(),
-        _ => avatar_element(name, avatar, avatar_size),
+        _ => avatar_element(avatar, avatar_size),
     }
 }
 
@@ -882,7 +873,6 @@ fn video_tile(
     tile: CallTile,
     frame: Option<VoiceRenderFrame>,
     label: &str,
-    avatar_name: &str,
     avatar: Option<&str>,
     mic_on: bool,
     layout: TileLayout,
@@ -938,7 +928,7 @@ fn video_tile(
             .shadow_lg(),
     };
     tile_box
-        .child(frame_element(frame, avatar_name, avatar, avatar_size, fit))
+        .child(frame_element(frame, avatar, avatar_size, fit))
         .child(
             div()
                 .absolute()

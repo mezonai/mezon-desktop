@@ -895,39 +895,6 @@ fn waveform_amplitudes(pcm: &DecodedPcm) -> Vec<f32> {
         .collect()
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn waveform_peaks_are_cached_at_a_bounded_height() {
-        let pcm = DecodedPcm {
-            samples: vec![2.0, -3.0, 0.0, 0.5].into(),
-            channels: 1,
-            sample_rate: 4,
-        };
-        let peaks = waveform_amplitudes(&pcm);
-        assert_eq!(peaks.len(), WAVEFORM_BARS);
-        assert!(peaks.iter().all(|peak| (0.08..=1.0).contains(peak)));
-        assert_eq!(peaks[0], 1.0);
-    }
-
-    #[test]
-    fn untouched_audio_bypasses_processing() {
-        assert!(!audio_needs_processing(0.0, 100.0, 100.0));
-        assert!(audio_needs_processing(1.0, 100.0, 100.0));
-        assert!(audio_needs_processing(0.0, 99.0, 100.0));
-        assert!(audio_needs_processing(0.0, 100.0, 80.0));
-    }
-
-    #[test]
-    fn volume_defaults_to_eighty_percent_of_unity_gain() {
-        assert_eq!(DEFAULT_VOLUME_PERCENT, 80.0);
-        assert_eq!(DEFAULT_VOLUME_PERCENT / UNITY_VOLUME_PERCENT, 0.8);
-        assert_eq!(MAX_VOLUME_PERCENT, 100.0);
-    }
-}
-
 fn sound_error_message(locale: &str, code: &str) -> String {
     match code {
         "size_limit" => mezon_i18n::t(locale, "clanSoundSetting.toast.errorSizeLimit").to_string(),
@@ -1297,5 +1264,38 @@ impl Render for SoundPicker {
                         submit_btn.on_click(cx.listener(|this, _, _, cx| this.submit(cx)))
                     }),
             )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn waveform_peaks_are_cached_at_a_bounded_height() {
+        let pcm = DecodedPcm {
+            samples: vec![2.0, -3.0, 0.0, 0.5].into(),
+            channels: 1,
+            sample_rate: 4,
+        };
+        let peaks = waveform_amplitudes(&pcm);
+        assert_eq!(peaks.len(), WAVEFORM_BARS);
+        assert!(peaks.iter().all(|peak| (0.08..=1.0).contains(peak)));
+        assert_eq!(peaks[0], 1.0);
+    }
+
+    #[test]
+    fn untouched_audio_bypasses_processing() {
+        assert!(!audio_needs_processing(0.0, 100.0, 100.0));
+        assert!(audio_needs_processing(1.0, 100.0, 100.0));
+        assert!(audio_needs_processing(0.0, 99.0, 100.0));
+        assert!(audio_needs_processing(0.0, 100.0, 80.0));
+    }
+
+    #[test]
+    fn volume_defaults_to_eighty_percent_of_unity_gain() {
+        assert_eq!(DEFAULT_VOLUME_PERCENT, 80.0);
+        assert_eq!(DEFAULT_VOLUME_PERCENT / UNITY_VOLUME_PERCENT, 0.8);
+        assert_eq!(MAX_VOLUME_PERCENT, 100.0);
     }
 }

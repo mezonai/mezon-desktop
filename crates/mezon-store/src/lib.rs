@@ -156,8 +156,9 @@ pub use emoji::{
     EMOJI_SHORTNAME_MAX, EMOJI_UPLOAD_MAX_PX, EMOTICON_ALLOWED_EXTENSIONS, EMOTICON_SHORTNAME_MAX,
     EMOTICON_SHORTNAME_MIN, Emoji, EmojiEvent, EmojiStore, EmoticonError, EmoticonErrorKind,
     MAX_EMOJI_BYTES, MAX_STICKER_BYTES, STICKER_UPLOAD_MAX_PX, emoji_sources_generation,
-    generate_snowflake_id, is_valid_emoticon_shortname, normalize_emoji_shortname,
-    strip_emoji_colons, validate_emoji_create_shortname, validate_emoticon_file,
+    emoji_url_fallback, generate_snowflake_id, is_valid_emoticon_shortname,
+    normalize_emoji_shortname, set_emoji_url_fallback, strip_emoji_colons,
+    validate_emoji_create_shortname, validate_emoticon_file,
 };
 pub use events::{ClanEventItem, CreateEventDraft, EventsEvent, EventsStore, UpdateEventDraft};
 pub use files::{
@@ -270,7 +271,10 @@ pub use screen_draw::{
 };
 pub use sprite_atlas::{SpriteAtlas, SpriteFrame, fetch_sprite_atlas, parse_sprite_atlas};
 pub use sticker::{ClanSound, Sticker, StickerEvent, StickerStore};
-pub use stream::{StreamMember, StreamPhase, StreamStore};
+pub use stream::{
+    HlsVariant, STREAM_QUALITIES, StreamMember, StreamPhase, StreamQuality, StreamStore,
+    auto_step_down_target, coreaudio_device_uid, parse_hls_variants, variant_index,
+};
 pub use threads::{
     GroupedThreadIndexes, THREAD_STATUS_ARCHIVED, THREAD_STATUS_JOINED, ThreadCreateFailReason,
     ThreadSummary, ThreadsEvent, ThreadsStore, group_threads, thread_preview_display,
@@ -389,6 +393,23 @@ pub fn set_output_device(output_device_id: Option<String>, cx: &mut gpui::App) {
         stream.update(cx, |stream, cx| {
             stream.set_output_device(output_device_id, cx)
         });
+    }
+}
+
+pub fn set_stream_default_quality(quality: StreamQuality, cx: &mut gpui::App) {
+    let Some(settings) = Settings::try_global(cx) else {
+        return;
+    };
+    let changed = settings.update(cx, |settings, cx| {
+        if settings.stream_default_quality == quality {
+            return false;
+        }
+        settings.stream_default_quality = quality;
+        cx.notify();
+        true
+    });
+    if changed {
+        schedule_settings_save(&settings, cx);
     }
 }
 
@@ -529,6 +550,8 @@ pub struct Settings {
     pub quick_replies_enabled: bool,
     #[serde(default)]
     pub grammar_correction_enabled: bool,
+    #[serde(default)]
+    pub stream_default_quality: StreamQuality,
 }
 
 impl Default for Settings {
@@ -565,6 +588,7 @@ impl Default for Settings {
             agent_hint_dismissed: false,
             quick_replies_enabled: false,
             grammar_correction_enabled: false,
+            stream_default_quality: StreamQuality::default(),
         }
     }
 }
@@ -693,8 +717,10 @@ impl gpui::Global for GlobalSettings {}
 /// Which login method is currently shown in the `LoginView`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum LoginMethod {
-    /// Email OTP — two-step flow (default).
+    /// Phone SMS OTP — two-step flow (default).
     #[default]
+    Sms,
+    /// Email OTP — two-step flow.
     Otp,
     /// Email + password — single-step form.
     Password,
@@ -734,13 +760,14 @@ pub enum AuthState {
     /// No session — show login form.
     #[default]
     NotAuthenticated,
-    /// OTP email was sent; waiting for the user to enter the code.
+    /// OTP was sent; waiting for the user to enter the code.
     OtpRequested {
-        /// Server-issued request ID — required for the confirm-OTP call.
         req_id: String,
-        /// The email address the OTP was sent to.
-        email: String,
+        email: Option<String>,
+        phone: Option<String>,
     },
+    /// A new account signed in by phone must choose a username before the transport connects.
+    UsernameRequired(Session),
     /// OAuth2 browser was opened; waiting for the `mezonapp://callback` deep link.
     /// Kept for future OAuth integration.
     AwaitingCallback,

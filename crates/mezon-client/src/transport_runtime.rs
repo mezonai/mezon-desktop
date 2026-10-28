@@ -183,6 +183,42 @@ pub(crate) async fn fetch_prefix(
         .flatten()
 }
 
+pub(crate) async fn fetch_text_unsigned(
+    url: &str,
+    max_bytes: usize,
+    timeout: std::time::Duration,
+) -> Option<String> {
+    let url = url.to_string();
+    runtime()
+        .spawn(async move {
+            tokio::time::timeout(timeout, async move {
+                let request = http::Request::builder()
+                    .method(http::Method::GET)
+                    .uri(&url)
+                    .body(AsyncBody::empty())
+                    .ok()?;
+                let mut response = http_client().send(request).await.ok()?;
+                if !response.status().is_success() {
+                    return None;
+                }
+                let mut bytes = Vec::new();
+                response
+                    .body_mut()
+                    .take(max_bytes as u64)
+                    .read_to_end(&mut bytes)
+                    .await
+                    .ok()?;
+                String::from_utf8(bytes).ok()
+            })
+            .await
+            .ok()
+            .flatten()
+        })
+        .await
+        .ok()
+        .flatten()
+}
+
 /// HEAD the object and report whether it is already readable.
 ///
 /// The presign_finish patch is a single realtime event: lose it — the sender's
@@ -1007,6 +1043,26 @@ impl TransportClient {
         let transport = self.inner.clone();
         runtime()
             .spawn(async move { transport.write_voice_reaction(emojis, channel_id).await })
+            .await
+            .map_err(|e| anyhow::anyhow!("transport task failed: {e}"))?
+    }
+
+    pub async fn get_stream_playback(
+        &self,
+        channel_id: i64,
+        publish: bool,
+    ) -> Result<mezon_proto::api::GetStreamPlaybackResponse> {
+        let transport = self.inner.clone();
+        runtime()
+            .spawn(async move { transport.get_stream_playback(channel_id, publish).await })
+            .await
+            .map_err(|e| anyhow::anyhow!("transport task failed: {e}"))?
+    }
+
+    pub async fn write_streaming_watch(&self, channel_id: i64, watching: bool) -> Result<()> {
+        let transport = self.inner.clone();
+        runtime()
+            .spawn(async move { transport.write_streaming_watch(channel_id, watching).await })
             .await
             .map_err(|e| anyhow::anyhow!("transport task failed: {e}"))?
     }

@@ -946,6 +946,11 @@ impl App {
         self.platform.is_cursor_visible()
     }
 
+    #[allow(missing_docs)]
+    pub fn hide_cursor_until_mouse_moves(&self) {
+        self.platform.hide_cursor_until_mouse_moves();
+    }
+
     /// Schedules all windows in the application to be redrawn. This can be called
     /// multiple times in an update cycle and still result in a single redraw.
     pub fn refresh_windows(&mut self) {

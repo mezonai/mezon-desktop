@@ -129,6 +129,8 @@ pub struct Session {
     pub user_id: String,
     /// Username
     pub username: String,
+    #[serde(default)]
+    pub username_pending: bool,
 }
 
 impl Session {

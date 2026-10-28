@@ -126,9 +126,13 @@ static COLLOCATIONS: LazyLock<Collocations> = LazyLock::new(|| {
         ("anh", "di", "ngay", "anh", "đi", "ngay"),
         ("em", "se", "lam", "em", "sẽ", "làm"),
         ("se", "lam", "ngay", "sẽ", "làm", "ngay"),
+        ("nay", "to", "qua", "này", "to", "quá"),
     ];
     for (u1, u2, u3, w1, w2, w3) in priority_trigrams {
-        trigram.insert(pair_key(u1, u2, Some(u3)), (w1.to_string(), w2.to_string(), w3.to_string()));
+        trigram.insert(
+            pair_key(u1, u2, Some(u3)),
+            (w1.to_string(), w2.to_string(), w3.to_string()),
+        );
     }
     Collocations { trigram, bigram }
 });

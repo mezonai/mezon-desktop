@@ -455,14 +455,13 @@ impl Membership {
         if assignment.mids().is_none() {
             return false;
         }
-        if let Some(previous) = self.slots.get(&assignment.slot) {
-            if previous.generation > assignment.generation
+        if let Some(previous) = self.slots.get(&assignment.slot)
+            && (previous.generation > assignment.generation
                 || (membership && previous.generation == assignment.generation)
                 || (previous.generation == assignment.generation
-                    && previous.assignment.as_ref().map(|a| a.peer_id) != Some(assignment.peer_id))
-            {
-                return false;
-            }
+                    && previous.assignment.as_ref().map(|a| a.peer_id) != Some(assignment.peer_id)))
+        {
+            return false;
         }
         if !membership {
             self.fixed_pool = true;
@@ -526,14 +525,13 @@ impl Membership {
             return false;
         }
         let key = (assignment.kind, assignment.slot);
-        if let Some(previous) = self.pool_slots.get(&key) {
-            if previous.generation > assignment.generation
+        if let Some(previous) = self.pool_slots.get(&key)
+            && (previous.generation > assignment.generation
                 || (membership && previous.generation == assignment.generation)
                 || (previous.generation == assignment.generation
-                    && previous.assignment.as_ref().map(|a| a.peer_id) != Some(assignment.peer_id))
-            {
-                return false;
-            }
+                    && previous.assignment.as_ref().map(|a| a.peer_id) != Some(assignment.peer_id)))
+        {
+            return false;
         }
         let member = self
             .by_peer
@@ -2585,14 +2583,13 @@ fn log_media_stats(stats: &[RtcStats]) -> Option<ScreenStats> {
     if let Some(screen) = screen_stats.as_mut() {
         screen.bwe_kbps = bwe_kbps;
         for stat in stats {
-            if let RtcStats::OutboundRtp(out) = stat {
-                if out.outbound.mid != MID_SCREEN
-                    && Some(out.stream.transport_id.as_str()) == screen_transport_id
-                {
-                    screen.other_target_kbps = screen
-                        .other_target_kbps
-                        .saturating_add((out.outbound.target_bitrate / 1000.0) as u32);
-                }
+            if let RtcStats::OutboundRtp(out) = stat
+                && out.outbound.mid != MID_SCREEN
+                && Some(out.stream.transport_id.as_str()) == screen_transport_id
+            {
+                screen.other_target_kbps = screen
+                    .other_target_kbps
+                    .saturating_add((out.outbound.target_bitrate / 1000.0) as u32);
             }
         }
     }
@@ -3591,7 +3588,8 @@ mod tests {
 
     #[test]
     fn normal_closure_ends_the_call() {
-        for code in [1000] {
+        {
+            let code = 1000;
             assert_eq!(
                 classify_close(Some(CloseCode::Library(code))),
                 CloseVerdict::Removed(RemovalCause::Disconnected),

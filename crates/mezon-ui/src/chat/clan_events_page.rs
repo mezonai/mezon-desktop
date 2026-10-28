@@ -169,10 +169,6 @@ impl ClanEventsModal {
             .read(cx)
             .member(self.clan_id, event.creator_id)
             .cloned();
-        let creator_name = creator
-            .as_ref()
-            .map(|member| member.name().to_string())
-            .unwrap_or_else(|| tr("eventCreator.eventDetail.createdBy").to_string());
         let creator_avatar = creator
             .as_ref()
             .map(|member| member.avatar().to_string())
@@ -277,12 +273,7 @@ impl ClanEventsModal {
                     .flex()
                     .items_center()
                     .gap_3()
-                    .child(
-                        Avatar::new()
-                            .name(creator_name)
-                            .src(creator_avatar)
-                            .size_px(px(28.)),
-                    )
+                    .child(Avatar::new().src(creator_avatar).size_px(px(28.)))
                     .child(
                         div()
                             .flex()
@@ -967,12 +958,7 @@ impl ClanEventsModal {
                         .flex()
                         .items_center()
                         .gap_3()
-                        .child(
-                            Avatar::new()
-                                .name(clan_name.to_string())
-                                .src(clan_avatar.to_string())
-                                .size_px(px(22.)),
-                        )
+                        .child(Avatar::new().src(clan_avatar.to_string()).size_px(px(22.)))
                         .child(clan_name.to_string()),
                 )
                 .child(
@@ -1017,7 +1003,6 @@ impl ClanEventsModal {
                         .gap_3()
                         .child(
                             Avatar::new()
-                                .name(creator_name.to_string())
                                 .src(creator_avatar.to_string())
                                 .size_px(px(22.)),
                         )
@@ -1046,7 +1031,6 @@ impl ClanEventsModal {
                             .bg(theme.surfaces.secondary)
                             .child(
                                 Avatar::new()
-                                    .name(member.name().to_string())
                                     .src(member.avatar().to_string())
                                     .size_px(px(28.)),
                             )

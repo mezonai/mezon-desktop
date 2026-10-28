@@ -36,6 +36,7 @@ use items::{
 };
 
 pub(crate) const FILTER_DEBOUNCE_MS: u64 = 300;
+pub(crate) const SEARCH_CTRLK_DEBOUNCE_MS: u64 = 500;
 pub(crate) const KEY_CONTEXT: &str = "CommandPalette";
 
 actions!(mezon_command_palette, [PaletteMoveUp, PaletteMoveDown]);
@@ -268,8 +269,21 @@ impl CommandPaletteModal {
             cx.background_executor()
                 .timer(Duration::from_millis(FILTER_DEBOUNCE_MS))
                 .await;
+            if this
+                .update(cx, |this, cx| {
+                    this.apply_debounced_query(cx);
+                })
+                .is_err()
+            {
+                return;
+            }
+            cx.background_executor()
+                .timer(Duration::from_millis(
+                    SEARCH_CTRLK_DEBOUNCE_MS - FILTER_DEBOUNCE_MS,
+                ))
+                .await;
             let _ = this.update(cx, |this, cx| {
-                this.apply_debounced_query(cx);
+                this.request_server_search(cx);
             });
         });
     }
@@ -279,16 +293,21 @@ impl CommandPaletteModal {
         if self.debounced_query != next {
             self.debounced_query.clone_from(&next);
         }
-        let (text, search_type) = parse_ctrlk_query(&self.debounced_query);
+        let (text, _) = parse_ctrlk_query(&self.debounced_query);
         if text.is_empty() {
             CtrlKSearchStore::global(cx).update(cx, |store, cx| store.clear(cx));
-        } else {
+        }
+        self.recompute_filtered(RecomputeMode::QueryChanged, cx);
+        cx.notify();
+    }
+
+    fn request_server_search(&mut self, cx: &mut Context<Self>) {
+        let (text, search_type) = parse_ctrlk_query(&self.debounced_query);
+        if !text.is_empty() {
             CtrlKSearchStore::global(cx).update(cx, |store, cx| {
                 store.search(text, search_type, cx);
             });
         }
-        self.recompute_filtered(RecomputeMode::QueryChanged, cx);
-        cx.notify();
     }
 
     fn recompute_filtered(&mut self, mode: RecomputeMode, cx: &App) {

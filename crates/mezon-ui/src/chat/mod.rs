@@ -45,6 +45,7 @@ pub mod screen_draw;
 pub mod screen_share_modal;
 pub mod screen_share_pip;
 pub mod stream;
+pub mod stream_video;
 pub mod threads_popover;
 pub mod user_profile_modal;
 pub mod user_profile_popover;

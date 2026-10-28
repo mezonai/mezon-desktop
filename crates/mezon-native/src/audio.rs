@@ -39,6 +39,7 @@ fn non_linux_audio_device_snapshot() -> AudioDeviceSnapshot {
     let host = cpal::default_host();
     let inputs = match host.input_devices() {
         Ok(devices) => {
+            #[cfg_attr(not(target_os = "windows"), allow(unused_mut))]
             let mut devices = collect_devices(devices);
             #[cfg(target_os = "windows")]
             append_windows_communications_input(&mut devices);

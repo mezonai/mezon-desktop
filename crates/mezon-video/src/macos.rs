@@ -255,6 +255,20 @@ impl PlayerImpl {
             PlayerBackend::Webm(player) => player.failed(),
         }
     }
+
+    pub fn set_live_offset(&self, seconds: f64) {
+        match &self.inner {
+            PlayerBackend::AvFoundation(player) => player.set_live_offset(seconds),
+            PlayerBackend::Webm(_) => {}
+        }
+    }
+
+    pub fn set_audio_output_device(&self, uid: Option<&str>) {
+        match &self.inner {
+            PlayerBackend::AvFoundation(player) => player.set_audio_output_device(uid),
+            PlayerBackend::Webm(_) => {}
+        }
+    }
 }
 
 impl AvFoundationPlayer {
@@ -535,6 +549,53 @@ impl AvFoundationPlayer {
             let status: isize = msg_send![item, status];
             status == AV_PLAYER_ITEM_STATUS_FAILED
         }
+    }
+
+    fn set_live_offset(&self, seconds: f64) {
+        let item = self.current_item();
+        if item.is_null() {
+            return;
+        }
+        unsafe {
+            let has_offset: BOOL = msg_send![
+                item,
+                respondsToSelector: sel!(setConfiguredTimeOffsetFromLive:)
+            ];
+            if has_offset != NO {
+                let offset = seconds_to_cm_time(seconds);
+                let _: () = msg_send![item, setConfiguredTimeOffsetFromLive: offset];
+            }
+            let has_preserve: BOOL = msg_send![
+                item,
+                respondsToSelector: sel!(setAutomaticallyPreservesTimeOffsetFromLive:)
+            ];
+            if has_preserve != NO {
+                let _: () = msg_send![item, setAutomaticallyPreservesTimeOffsetFromLive: YES];
+            }
+        }
+    }
+
+    fn set_audio_output_device(&self, uid: Option<&str>) {
+        objc::rc::autoreleasepool(|| unsafe {
+            let has_selector: BOOL = msg_send![
+                *self.player,
+                respondsToSelector: sel!(setAudioOutputDeviceUniqueID:)
+            ];
+            if has_selector == NO {
+                return;
+            }
+            let ns_uid: *mut Object = match uid
+                .filter(|s| !s.is_empty())
+                .and_then(|s| CString::new(s).ok())
+            {
+                Some(c_uid) => {
+                    let ns_string = class!(NSString);
+                    msg_send![ns_string, stringWithUTF8String: c_uid.as_ptr()]
+                }
+                None => ptr::null_mut(),
+            };
+            let _: () = msg_send![*self.player, setAudioOutputDeviceUniqueID: ns_uid];
+        });
     }
 }
 

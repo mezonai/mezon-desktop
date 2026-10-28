@@ -499,7 +499,7 @@ fn chat_list_change(
 
 fn render_chat_message(message: &MeetingChatMessage, locale: &str, cx: &App) -> AnyElement {
     let theme = cx.theme();
-    let mut avatar = Avatar::new().name(message.name.clone()).size_px(px(28.));
+    let mut avatar = Avatar::new().size_px(px(28.));
     let avatar_url = guest_avatar_url(cx, &message.avatar, 64);
     if !avatar_url.is_empty() {
         avatar = avatar.src(avatar_url);

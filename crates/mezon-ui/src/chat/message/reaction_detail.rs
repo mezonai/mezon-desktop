@@ -166,7 +166,7 @@ impl Render for UserReactionPanel {
             } else {
                 crate::util::imgproxy::avatar_url(cx, &avatar)
             };
-            let mut avatar_el = Avatar::new().size_px(px(32.)).name(display_name.clone());
+            let mut avatar_el = Avatar::new().size_px(px(32.));
             if !avatar_url.is_empty() {
                 avatar_el = avatar_el.src(avatar_url);
             }

@@ -1,10 +1,7 @@
 use super::context::RowCtx;
-use super::parts::resolve_message_display_name;
 use super::time::format_relative_time_from_seconds;
-use crate::components::primitives::{
-    Icon, IconName, avatar_color, avatar_text_color, initials_tile, name_initials, unread_dot,
-};
-use gpui::{AnyElement, App, ObjectFit, SharedString, div, img, prelude::*, px};
+use crate::components::primitives::{Icon, IconName, default_user_avatar, unread_dot};
+use gpui::{AnyElement, ObjectFit, SharedString, div, img, prelude::*, px};
 use mezon_store::{ClanMembersStore, Message, TopicBadgeStore, TopicsStore};
 
 const AVATAR_SIZE: f32 = 28.0;
@@ -14,8 +11,7 @@ const MIN_WIDTH: f32 = 250.0;
 pub fn render_topic_view_button(msg: &Message, ctx: &RowCtx) -> AnyElement {
     let theme = ctx.theme;
 
-    let display_name = resolve_message_display_name(msg, ctx, ctx.app);
-    let (creator_name, creator_avatar) = msg
+    let creator_avatar = msg
         .topic_creator_id
         .zip(ctx.clan_id)
         .and_then(|(user_id, clan_id)| {
@@ -23,19 +19,9 @@ pub fn render_topic_view_button(msg: &Message, ctx: &RowCtx) -> AnyElement {
             let store = store.read(ctx.app);
             store
                 .member(clan_id, user_id)
-                .map(|member| (member.name().to_string(), member.avatar().to_string()))
-        })
-        .unwrap_or_default();
-    let creator_name = if creator_name.is_empty() {
-        display_name.to_string()
-    } else {
-        creator_name
-    };
-    let creator_avatar = if creator_avatar.is_empty() {
-        msg.avatar_url.to_string()
-    } else {
-        creator_avatar
-    };
+                .map(|member| member.avatar().to_string())
+        });
+    let (creator_avatar, creator_proxy) = creator_avatar_sources(msg, creator_avatar);
 
     let (reply_count, last_reply_timestamp) = msg
         .topic_id
@@ -81,13 +67,7 @@ pub fn render_topic_view_button(msg: &Message, ctx: &RowCtx) -> AnyElement {
         .flex_1()
         .min_w_0()
         .text_size(px(14.))
-        .child(creator_avatar_element(
-            &creator_name,
-            &creator_avatar,
-            msg,
-            ctx,
-            ctx.app,
-        ))
+        .child(creator_avatar_element(&creator_avatar, creator_proxy, ctx))
         .child(meta);
 
     let message_id = msg.id;
@@ -135,12 +115,30 @@ fn format_topic_reply_count(rpl: i32, locale: &str) -> String {
     mezon_i18n::t(locale, key).replace("{{number}}", &number)
 }
 
-fn creator_avatar_element(
-    name: &str,
-    avatar_url: &str,
+fn creator_avatar_sources(
     msg: &Message,
+    member_avatar: Option<String>,
+) -> (String, Option<SharedString>) {
+    if let Some(avatar) = member_avatar.filter(|avatar| !avatar.is_empty()) {
+        return (avatar, None);
+    }
+    let sender_id = msg.sender_user_id.or_else(|| msg.sender_id.parse().ok());
+    if msg
+        .topic_creator_id
+        .is_some_and(|creator| !creator.is_zero() && Some(creator) == sender_id)
+    {
+        return (
+            msg.avatar_url.to_string(),
+            (!msg.avatar_proxied.is_empty()).then(|| msg.avatar_proxied.clone()),
+        );
+    }
+    (String::new(), None)
+}
+
+fn creator_avatar_element(
+    avatar_url: &str,
+    cached_proxy: Option<SharedString>,
     ctx: &RowCtx,
-    cx: &App,
 ) -> AnyElement {
     let size = px(AVATAR_SIZE);
     let base = div()
@@ -149,32 +147,100 @@ fn creator_avatar_element(
         .rounded(px(AVATAR_ROUNDING))
         .overflow_hidden();
 
-    let proxied = if !avatar_url.is_empty() {
-        Some(crate::util::imgproxy::avatar_url(cx, avatar_url))
-    } else if !msg.avatar_proxied.is_empty() {
-        Some(msg.avatar_proxied.to_string())
-    } else {
-        None
-    };
+    let proxied = cached_proxy.or_else(|| {
+        (!avatar_url.is_empty())
+            .then(|| crate::util::imgproxy::avatar_url(ctx.app, avatar_url).into())
+    });
+    let fallback = move || default_user_avatar(size, px(AVATAR_ROUNDING));
 
     if let Some(proxied) = proxied {
+        let raw = SharedString::from(avatar_url.to_string());
         base.image_cache(ctx.avatar_cache.clone())
             .child(
-                img(SharedString::from(proxied))
+                img(proxied.clone())
+                    .id(("topic-creator-avatar", gpui::hash(&proxied)))
                     .size(size)
                     .rounded(px(AVATAR_ROUNDING))
-                    .object_fit(ObjectFit::Cover),
+                    .object_fit(ObjectFit::Cover)
+                    .with_loading(fallback)
+                    .with_fallback(move || {
+                        if !raw.is_empty() && raw != proxied {
+                            return img(raw.clone())
+                                .id(("topic-creator-avatar-raw", gpui::hash(&raw)))
+                                .size(size)
+                                .rounded(px(AVATAR_ROUNDING))
+                                .object_fit(ObjectFit::Cover)
+                                .with_loading(fallback)
+                                .with_fallback(fallback)
+                                .into_any_element();
+                        }
+                        fallback()
+                    }),
             )
             .into_any_element()
     } else {
-        let bg = avatar_color(name);
-        base.child(initials_tile(
-            size,
-            Some(px(AVATAR_ROUNDING)),
-            bg,
-            avatar_text_color(bg),
-            name_initials(name),
-        ))
-        .into_any_element()
+        base.child(fallback()).into_any_element()
+    }
+}
+
+#[cfg(test)]
+mod avatar_tests {
+    use super::creator_avatar_sources;
+    use mezon_store::{ChannelId, Message, MessageId, UserId};
+
+    fn topic(creator: Option<UserId>) -> Message {
+        Message::new(MessageId(1), "hello", "10", "sender", 0)
+            .with_avatar("https://cdn.example/sender.jpg")
+            .with_avatar_proxied("https://proxy.example/sender.webp")
+            .with_topic(Some(ChannelId(2)), creator)
+    }
+
+    #[test]
+    fn another_creators_missing_avatar_never_uses_the_sender() {
+        for member in [None, Some(String::new())] {
+            let (raw, proxy) = creator_avatar_sources(&topic(Some(UserId(20))), member);
+            assert!(raw.is_empty());
+            assert!(proxy.is_none());
+        }
+    }
+
+    #[test]
+    fn unknown_creator_never_uses_the_sender() {
+        for creator in [None, Some(UserId(0))] {
+            assert_eq!(
+                creator_avatar_sources(&topic(creator), None),
+                (String::new(), None)
+            );
+        }
+    }
+
+    #[test]
+    fn sender_avatar_is_used_when_sender_is_the_creator() {
+        let message = topic(Some(UserId(10)));
+        let (raw, proxy) = creator_avatar_sources(&message, None);
+        assert_eq!(raw, message.avatar_url.as_ref());
+        assert_eq!(proxy.as_ref(), Some(&message.avatar_proxied));
+    }
+
+    #[test]
+    fn creator_profile_avatar_takes_priority_over_message_avatar() {
+        for creator in [UserId(10), UserId(20)] {
+            let avatar = "https://cdn.example/creator.jpg";
+            let (raw, proxy) = creator_avatar_sources(&topic(Some(creator)), Some(avatar.into()));
+            assert_eq!(raw, avatar);
+            assert!(proxy.is_none());
+        }
+    }
+
+    #[test]
+    fn proxy_only_message_is_used_only_for_its_own_creator() {
+        let mut message = topic(Some(UserId(20)));
+        message.avatar_url = "".into();
+        assert!(creator_avatar_sources(&message, None).1.is_none());
+        message.topic_creator_id = Some(UserId(10));
+        assert_eq!(
+            creator_avatar_sources(&message, None).1,
+            Some(message.avatar_proxied)
+        );
     }
 }

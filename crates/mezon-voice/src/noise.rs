@@ -14,10 +14,12 @@ const MODEL_INPUT_TARGET_DBFS: f32 = -20.0;
 const MAX_ATTENUATION_DB: f32 = 15.0;
 
 fn create_filter(model: &[u8]) -> Result<Mezon48k, String> {
-    let mut config = MezonNSConfig::default();
-    config.suppression_intensity = SUPPRESSION_INTENSITY;
-    config.enable_noise_gate = 0;
-    config.attenuation_limit_db = MAX_ATTENUATION_DB;
+    let config = MezonNSConfig {
+        suppression_intensity: SUPPRESSION_INTENSITY,
+        enable_noise_gate: 0,
+        attenuation_limit_db: MAX_ATTENUATION_DB,
+        ..MezonNSConfig::default()
+    };
     MezonNSEngine::create_from_memory(model, Some(config))
         .and_then(|mut engine| {
             let input = [0i16; mezon_ns::FRAME_SIZE];
@@ -175,7 +177,7 @@ impl NoiseProcessor {
                                         output_window_drops = 0;
                                     }
                                     output_window_drops += 1;
-                                    if output_overruns == 1 || output_overruns % 20 == 0 {
+                                    if output_overruns == 1 || output_overruns.is_multiple_of(20) {
                                         tracing::warn!(
                                             generation = active_generation,
                                             output_overruns,

@@ -143,7 +143,7 @@ mod sni {
                 }
                 .into(),
                 StandardItem {
-                    label: "Check for Updates".into(),
+                    label: "Check for updates".into(),
                     activate: Box::new(|this: &mut Self| (this.on_check_updates)()),
                     ..Default::default()
                 }
@@ -289,7 +289,7 @@ mod desktop {
         let menu = Menu::new();
 
         let item_show = MenuItem::with_id(SHOW_ID, "Show Mezon", true, None);
-        let item_update = MenuItem::with_id(UPDATE_ID, "Check for Updates", true, None);
+        let item_update = MenuItem::with_id(UPDATE_ID, "Check for updates", true, None);
         let item_quit = MenuItem::with_id(QUIT_ID, "Quit Mezon", true, None);
 
         menu.append(&item_show)?;

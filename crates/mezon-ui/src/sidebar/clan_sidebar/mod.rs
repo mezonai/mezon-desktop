@@ -91,6 +91,7 @@ pub struct ClanSidebar {
     discover_title: SharedString,
     create_clan_title: SharedString,
     image_cache: Entity<crate::image_cache::LruImageCache>,
+    dm_icon_menu_position: Option<Point<Pixels>>,
     clan_menu: Option<ClanPanelMenu>,
     _clan_sub: Subscription,
     _clan_removed_sub: Subscription,
@@ -222,6 +223,7 @@ impl ClanSidebar {
                     cx,
                 )
             }),
+            dm_icon_menu_position: None,
             clan_menu: None,
             _clan_sub: clan_sub,
             _clan_removed_sub: clan_removed_sub,
@@ -244,6 +246,7 @@ impl ClanSidebar {
         position: Point<Pixels>,
         cx: &mut Context<Self>,
     ) {
+        self.dm_icon_menu_position = None;
         self.clan_menu = Some(ClanPanelMenu {
             position,
             clan_id,
@@ -309,6 +312,9 @@ impl ClanSidebar {
             .as_ref()
             .and_then(|account| account.logo.clone())
             .filter(|logo| !logo.is_empty());
+        if custom_logo.is_none() {
+            self.dm_icon_menu_position = None;
+        }
         let default_logo =
             crate::util::imgproxy::cdn_asset_url(cx, "landing-page-mezon/logodefault.webp");
         self.home_logo = SharedString::from(crate::util::imgproxy::clan_logo_url(
@@ -523,6 +529,21 @@ impl Render for ClanSidebar {
                             .items_center()
                             .justify_center()
                             .cursor_pointer()
+                            .on_mouse_down(
+                                gpui::MouseButton::Right,
+                                cx.listener(|this, event: &gpui::MouseDownEvent, _, cx| {
+                                    this.clan_menu = None;
+                                    this.dm_icon_menu_position = AccountStore::global(cx)
+                                        .read(cx)
+                                        .account
+                                        .as_ref()
+                                        .and_then(|account| account.logo.as_ref())
+                                        .filter(|logo| !logo.is_empty())
+                                        .map(|_| event.position);
+                                    cx.stop_propagation();
+                                    cx.notify();
+                                }),
+                            )
                             .on_click(|_, _, cx| {
                                 let target = DirectMessageStore::global(cx)
                                     .read(cx)
@@ -587,6 +608,48 @@ impl Render for ClanSidebar {
                 el.child(context_menu_at(
                     args.position,
                     build_clan_rail_menu(sidebar_for_menu.clone(), &args),
+                ))
+            })
+            .when_some(self.dm_icon_menu_position, |el, position| {
+                let dismiss = cx.entity().downgrade();
+                let remove = cx.entity().downgrade();
+                let locale = self.settings.read(cx).language.clone();
+                el.child(context_menu_at(
+                    position,
+                    ContextMenu::new()
+                        .on_dismiss(move |_, cx| {
+                            let _ = dismiss.update(cx, |this, cx| {
+                                this.dm_icon_menu_position = None;
+                                cx.notify();
+                            });
+                        })
+                        .item(
+                            mezon_i18n::t(&locale, "contextMenu.removeLogo").to_string(),
+                            move |_, cx| {
+                                let _ = remove.update(cx, |this, cx| {
+                                    this.dm_icon_menu_position = None;
+                                    cx.notify();
+                                });
+                                AccountStore::global(cx).update(cx, |store, cx| {
+                                    if let Some(account) = store.account.as_ref()
+                                        && account
+                                            .logo
+                                            .as_ref()
+                                            .is_some_and(|logo| !logo.is_empty())
+                                    {
+                                        let avatar = account.avatar_url.clone();
+                                        let about_me = account.about_me.clone().unwrap_or_default();
+                                        store.save_account(
+                                            None,
+                                            avatar,
+                                            about_me,
+                                            Some(String::new()),
+                                            cx,
+                                        );
+                                    }
+                                });
+                            },
+                        ),
                 ))
             })
     }

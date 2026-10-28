@@ -726,7 +726,6 @@ impl Render for UserProfilePopover {
             SharedString::from(crate::util::imgproxy::avatar_url(cx, &avatar_raw))
         };
         let mut avatar = Avatar::new()
-            .name(display_name.clone())
             .size_px(px(AVATAR_SIZE))
             .image_cache(self.avatar_image_cache.clone());
         if !avatar_proxied.is_empty() {

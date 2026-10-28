@@ -176,12 +176,13 @@ impl WebmPlayerImpl {
             self.play_offset_ns.load(Ordering::SeqCst)
         };
         let mut state = self.state.lock();
-        if playing && !state.eos {
-            if let Err(error) = advance_to(&mut state, target_ns, self.max_size) {
-                tracing::warn!(target: "mezon_video", ?error, "webm play advance failed");
-                self.failed.store(true, Ordering::SeqCst);
-                return None;
-            }
+        if playing
+            && !state.eos
+            && let Err(error) = advance_to(&mut state, target_ns, self.max_size)
+        {
+            tracing::warn!(target: "mezon_video", ?error, "webm play advance failed");
+            self.failed.store(true, Ordering::SeqCst);
+            return None;
         }
         take_frame(&mut state)
     }
@@ -535,7 +536,7 @@ fn take_frame(state: &mut DemuxState) -> Option<VideoFrame> {
     {
         let frame = state.cached.clone()?;
         state.last_emitted_ns = Some(state.last_frame_ns);
-        return Some(frame);
+        Some(frame)
     }
     #[cfg(not(any(windows, target_os = "macos")))]
     {
@@ -641,7 +642,7 @@ fn present_raw(state: &mut DemuxState, max_size: Option<(u32, u32)>) -> bool {
             return false;
         }
         state.cached = Some(buffer.clone());
-        return true;
+        true
     }
     #[cfg(not(any(windows, target_os = "macos")))]
     {

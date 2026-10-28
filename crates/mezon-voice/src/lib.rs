@@ -22,7 +22,6 @@ mod screen_previews;
 pub mod screen_recovery;
 mod screen_targets;
 mod sfu;
-mod stream_playback;
 mod video;
 
 use std::collections::HashMap;
@@ -67,7 +66,6 @@ pub use record::{
 pub use sfu::messages::MEDIA_POOL_VERSION;
 pub use sfu::sdp::stabilize_inactive_video_sections;
 pub use sfu::{MediaRefusal, RemovalCause, SfuRole};
-pub use stream_playback::StreamAudioOutput;
 
 pub fn microphone_denied() -> bool {
     media_permission(MediaDevice::Microphone) == MediaPermission::Denied
@@ -1335,7 +1333,7 @@ impl NoiseOverload {
             self.window_drops = 0;
         }
         self.window_drops += 1;
-        if self.total_drops == 1 || self.total_drops % 20 == 0 {
+        if self.total_drops == 1 || self.total_drops.is_multiple_of(20) {
             tracing::warn!(
                 generation,
                 stage,
@@ -1367,7 +1365,7 @@ fn queue_uplink_frame(
 ) -> bool {
     if tx.try_send(frame).is_err() {
         *overruns += 1;
-        if *overruns == 1 || *overruns % 20 == 0 {
+        if *overruns == 1 || (*overruns).is_multiple_of(20) {
             tracing::warn!(
                 uplink_overruns = *overruns,
                 queued_uplink_frames = tx.len(),

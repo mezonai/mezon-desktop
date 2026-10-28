@@ -91,6 +91,24 @@ impl LoginStore {
         keychain::save_session(session)
     }
 
+    pub async fn update_username(&self, previous: &Session, username: &str) -> Result<Session> {
+        self.client.update_username(previous, username).await
+    }
+
+    pub fn discard_pending_signup(&self, cx: &mut Context<Self>) {
+        cx.background_executor()
+            .spawn(async {
+                if let Err(e) = keychain::clear_session() {
+                    tracing::warn!("Failed to clear the pending signup session: {e}");
+                }
+            })
+            .detach();
+        self.auth_state.update(cx, |state, cx| {
+            *state = AuthState::NotAuthenticated;
+            cx.notify();
+        });
+    }
+
     pub fn logout(&self, cx: &mut Context<Self>) {
         let credentials = cx.read_entity(&self.auth_state, |state, _| session_credentials(state));
 

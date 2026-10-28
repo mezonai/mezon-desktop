@@ -39,6 +39,7 @@ use crate::channel::{
     ChannelEvent, ChannelList, ChannelType, STREAM_MODE_THREAD, joins_through_clan_stream,
 };
 use crate::channel_members::ChannelMembersStore;
+use crate::clan::ClanList;
 use crate::clan_members::ClanMembersStore;
 use crate::direct::{DirectChannel, DirectKind, DirectMessageStore};
 use crate::group_members::GroupMembersStore;
@@ -672,6 +673,7 @@ pub struct MessagesStore {
     counted_topic_reply_order: std::collections::VecDeque<(i64, MessageId)>,
     api: Arc<AppApi>,
     _channel_sub: Subscription,
+    _clan_sub: Option<Subscription>,
     _conn_watch: Task<()>,
     _cdn_access_sub: Option<Subscription>,
     pending_last_seen: HashMap<ChannelId, PendingLastSeen>,
@@ -1184,6 +1186,11 @@ impl MessagesStore {
         });
 
         let conn_watch = Self::spawn_connection_watch(api.clone(), cx);
+        let clan_sub = ClanList::try_global(cx).map(|clans| {
+            cx.observe(&clans, |this, _, cx| {
+                this.sync_anonymous_mode(cx);
+            })
+        });
         let cdn_access_sub = crate::CdnAccess::try_global(cx)
             .map(|access| cx.observe(&access, |this, _, cx| this.refresh_private_source_media(cx)));
 
@@ -1225,6 +1232,7 @@ impl MessagesStore {
             counted_topic_reply_order: std::collections::VecDeque::new(),
             api,
             _channel_sub: channel_sub,
+            _clan_sub: clan_sub,
             _conn_watch: conn_watch,
             _cdn_access_sub: cdn_access_sub,
             pending_last_seen: HashMap::new(),
@@ -1656,6 +1664,69 @@ impl MessagesStore {
         };
         self.set_last_read_message(topic_id, message_id);
         self.set_pending_last_seen(pending, cx);
+    }
+
+    fn mark_parent_topics_seen(
+        &mut self,
+        clan_id: ClanId,
+        channel_id: ChannelId,
+        cx: &mut Context<Self>,
+    ) {
+        if clan_id.is_zero() {
+            return;
+        }
+        if let Some(store) = TopicBadgeStore::try_global(cx) {
+            store.update(cx, |store, cx| {
+                store.mark_parent_seen(clan_id, channel_id, cx)
+            });
+        }
+        let topic_badge = ChannelList::global(cx).update(cx, |cl, cx| {
+            cl.apply_parent_topics_seen(clan_id, channel_id, cx)
+        });
+        if topic_badge > 0 {
+            self.clear_parent_topic_badge(clan_id, channel_id, topic_badge, cx);
+        }
+    }
+
+    fn clear_parent_topic_badge(
+        &mut self,
+        clan_id: ClanId,
+        channel_id: ChannelId,
+        topic_badge: u32,
+        cx: &mut Context<Self>,
+    ) {
+        let channels = ChannelList::global(cx).read(cx);
+        if channels
+            .own_unread(clan_id, channel_id)
+            .is_none_or(|(_, unread)| unread)
+        {
+            return;
+        }
+        let Some((message_id, create_time)) = channels
+            .channel(clan_id, channel_id)
+            .map(|ch| (ch.last_sent_message_id, ch.last_sent_timestamp))
+        else {
+            return;
+        };
+        self.last_seen_fingerprint.remove(&channel_id);
+        self.set_pending_last_seen(
+            PendingLastSeen {
+                clan_id,
+                channel_id,
+                message_id,
+                create_time,
+                mode: self.mode,
+                badge_count: topic_badge,
+            },
+            cx,
+        );
+    }
+
+    #[cfg(test)]
+    pub(crate) fn pending_last_seen_message(&self, channel_id: ChannelId) -> Option<MessageId> {
+        self.pending_last_seen
+            .get(&channel_id)
+            .map(|p| p.message_id)
     }
 
     fn known_last_seen_id(&self, channel_id: ChannelId, cx: &App) -> Option<MessageId> {
@@ -2664,15 +2735,46 @@ impl MessagesStore {
     }
 
     pub(crate) fn sync_anonymous_mode(&mut self, cx: &mut Context<Self>) {
+        if let Some(clans) = ClanList::try_global(cx) {
+            let clans = clans.read(cx);
+            self.anonymous_clans.retain(|id| {
+                !clans
+                    .clan_by_id(*id)
+                    .is_some_and(|clan| clan.prevent_anonymous)
+            });
+            if self.active_clan_id.is_some_and(|id| {
+                clans
+                    .clan_by_id(id)
+                    .is_some_and(|clan| clan.prevent_anonymous)
+            }) {
+                self.topic_anonymous_mode = false;
+            }
+        }
         let next = (self.is_anonymous_mode(), self.topic_anonymous_mode());
         if self.last_anonymous_mode == next {
             return;
         }
         self.last_anonymous_mode = next;
         cx.emit(MessagesEvent::AnonymousModeChanged);
+        cx.notify();
+    }
+
+    fn anonymous_prevented(&self, cx: &App) -> bool {
+        ClanList::try_global(cx).is_some_and(|clans| {
+            self.active_clan_id.is_some_and(|id| {
+                clans
+                    .read(cx)
+                    .clan_by_id(id)
+                    .is_some_and(|clan| clan.prevent_anonymous)
+            })
+        })
     }
 
     pub fn toggle_anonymous_mode(&mut self, in_topic: bool, cx: &mut Context<Self>) {
+        if self.anonymous_prevented(cx) {
+            self.sync_anonymous_mode(cx);
+            return;
+        }
         if in_topic && self.active_topic_id.is_some() {
             self.topic_anonymous_mode = !self.topic_anonymous_mode;
             self.sync_anonymous_mode(cx);
@@ -2791,6 +2893,9 @@ impl MessagesStore {
             edit_content_spans(&content, content_tokens, message_code, |tokens| {
                 channel_link_metas(&content, tokens, cx)
             });
+        let display_text = serde_json::from_str::<ApiMessageContent>(&raw_content)
+            .map(|parsed| parsed.t)
+            .unwrap_or_else(|_| content.clone());
         let Some(channel) = self.cache.get_mut(&storage_id) else {
             return;
         };
@@ -2800,14 +2905,14 @@ impl MessagesStore {
         patch_reply_previews_after_update(
             &mut channel.messages,
             message_id,
-            &content,
+            &display_text,
             &spans,
             AppConfig::try_global(cx),
         );
         let Some(msg) = channel.messages.get_mut_by_id(message_id) else {
             return;
         };
-        msg.content = content.clone();
+        msg.content = display_text;
         msg.rich_layout = crate::message::build_rich_layout(&spans);
         msg.is_only_emoji = crate::message::spans_only_emoji(&spans);
         msg.spans = spans;
@@ -5889,6 +5994,8 @@ impl MessagesStore {
         message_code: i32,
         cx: &mut Context<Self>,
     ) {
+        self.sync_anonymous_mode(cx);
+        let anonymous = anonymous && !self.anonymous_prevented(cx);
         let Some(channel_id) = self.active_channel_id else {
             return;
         };
@@ -6414,6 +6521,8 @@ impl MessagesStore {
         reply_override: Option<ReplyDraft>,
         cx: &mut Context<Self>,
     ) {
+        self.sync_anonymous_mode(cx);
+        let anonymous = anonymous && !self.anonymous_prevented(cx);
         if url.is_empty() {
             return;
         }
@@ -6834,6 +6943,9 @@ impl MessagesStore {
         }
 
         self.seed_last_read_from_channel(channel_id, cx);
+        if !is_dm {
+            self.mark_parent_topics_seen(clan_id, channel_id, cx);
+        }
 
         if self.cache.is_fresh(&channel_id, crate::CACHE_TTL) {
             self.cache.touch(&channel_id);
@@ -10372,15 +10484,14 @@ fn edit_content_spans(
         &transport_emojis,
         message_code,
     );
-    let transport_hashtags = transport_hashtags.tokens;
     let raw_content = sent.json;
     let tokens: ApiMessageContent = serde_json::from_str(&raw_content).unwrap_or_default();
     let spans = parse_spans(&tokens);
     (
         spans,
-        transport_mentions,
-        transport_hashtags,
-        transport_emojis,
+        sent.mentions,
+        sent.hashtags,
+        sent.emojis,
         raw_content,
     )
 }
@@ -13894,6 +14005,51 @@ mod tests {
     }
 
     #[test]
+    fn edit_remaps_a_role_mention_after_stripping_bold_markers() {
+        let content = "hi **bold** @STAFF\n**Link form:** https://x.test";
+        let mention_start = content[..content.find("@STAFF").expect("@STAFF")]
+            .encode_utf16()
+            .count() as i32;
+        let content_tokens = OutgoingContent {
+            mentions: vec![OutgoingMention {
+                user_id: String::new(),
+                role_id: "9".into(),
+                display: "@STAFF".into(),
+                s: mention_start,
+                e: mention_start + 6,
+            }],
+            hashtags: Vec::new(),
+            emojis: Vec::new(),
+        };
+        let (spans, transport_mentions, _, _, raw_content) =
+            edit_content_spans(content, content_tokens, 0, |_| Vec::new());
+        let parsed: ApiMessageContent =
+            serde_json::from_str(&raw_content).expect("edit raw content is the wire JSON");
+        let staff = parsed.t.find("@STAFF").expect("stripped @STAFF");
+        let expected_s = parsed.t[..staff].encode_utf16().count() as i32;
+        assert_eq!(parsed.mentions.len(), 1);
+        assert_eq!(parsed.mentions[0].s, Some(i64::from(expected_s)));
+        assert_eq!(parsed.mentions[0].e, Some(i64::from(expected_s + 6)));
+        assert_eq!(transport_mentions[0].s, expected_s);
+        assert_eq!(transport_mentions[0].e, expected_s + 6);
+        assert_eq!(transport_mentions[0].role_id, "9");
+        let mention_display = spans.iter().find_map(|span| match span {
+            MessageSpan::Mention {
+                display, role_id, ..
+            } if role_id.as_deref() == Some("9") => Some(display.as_ref()),
+            _ => None,
+        });
+        assert_eq!(mention_display, Some("@STAFF"));
+        assert!(
+            spans.iter().all(|span| !matches!(
+                span,
+                MessageSpan::Mention { display, .. } if display.as_ref() == "Link f"
+            )),
+            "edit must not slide the role mention onto Link f: {spans:?}"
+        );
+    }
+
+    #[test]
     fn buzz_edit_keeps_markers_links_and_mentions() {
         let content = "```jb``` https://a.com @bob #room :wave:";
         let content_tokens = OutgoingContent {
@@ -14523,6 +14679,7 @@ mod tests {
     fn komu_base_config() -> AppConfig {
         AppConfig {
             base_img_url: "https://cdn.komu.vn".into(),
+            mezon_cdn_url: "https://cdn.mezon.ai".into(),
             ..AppConfig::dev_defaults()
         }
     }
@@ -14561,11 +14718,11 @@ mod tests {
     #[test]
     fn an_emoji_stored_on_a_new_cdn_renders_from_its_source_once_the_catalog_arrives() {
         let cfg = komu_base_config();
-        let source = "https://cdn.mezon.ai/emojis/990011.webp";
+        let source = "https://cdn.komu.vn/emojis/990011.webp";
         let mut message = emoji_message(1, "990011", &cfg);
         assert_eq!(
             first_emoji_src(&message).as_ref(),
-            cfg.imgproxy_url("https://cdn.komu.vn/emojis/990011.webp", 96, 96, "fit")
+            cfg.imgproxy_url("https://cdn.mezon.ai/emojis/990011.webp", 96, 96, "fit")
         );
 
         let changed = crate::emoji::publish_emoji_sources(&[catalog_emoji("990011", source)]);
@@ -14621,13 +14778,13 @@ mod tests {
                 store.active_channel_id = Some(shown);
 
                 let changed = crate::emoji::publish_emoji_sources(&[
-                    catalog_emoji("990031", "https://cdn.mezon.ai/emojis/990031.webp"),
-                    catalog_emoji("990032", "https://cdn.komu.vn/emojis/990032.webp"),
+                    catalog_emoji("990031", "https://cdn.komu.vn/emojis/990031.webp"),
+                    catalog_emoji("990032", "https://cdn.mezon.ai/emojis/990032.webp"),
                 ]);
                 store.refresh_emoji_sources(&changed, cx);
 
                 let moved =
-                    cfg.imgproxy_url("https://cdn.mezon.ai/emojis/990031.webp", 96, 96, "fit");
+                    cfg.imgproxy_url("https://cdn.komu.vn/emojis/990031.webp", 96, 96, "fit");
                 for (bucket, id) in [(shown, 5), (hidden, 7)] {
                     let message = store.message_in_channel(bucket, MessageId(id)).unwrap();
                     assert_eq!(first_emoji_src(message).as_ref(), moved);
@@ -17526,6 +17683,94 @@ mod tests {
         ChannelList::init(api.clone(), cx);
         crate::account::AccountStore::init(api.clone(), cx);
         MessagesStore::init(api, cx)
+    }
+
+    fn set_anonymous_policy(prevent: bool, cx: &mut App) {
+        ClanList::global(cx).update(cx, |clans, cx| {
+            clans.update_clans(
+                vec![crate::clan::Clan::from(
+                    mezon_client::transport::ApiClanDesc {
+                        clan_id: 1,
+                        prevent_anonymous: prevent,
+                        ..Default::default()
+                    },
+                )],
+                cx,
+            );
+        });
+    }
+
+    #[gpui::test]
+    fn preventing_anonymous_clears_channel_and_topic_mode_realtime(cx: &mut gpui::TestAppContext) {
+        let store = cx.update(test_store);
+        cx.update(|cx| {
+            set_anonymous_policy(false, cx);
+            store.update(cx, |store, cx| {
+                anonymous_test_channel(store, cx);
+                store.set_active_topic(Some(77), cx);
+                store.toggle_anonymous_mode(false, cx);
+                store.toggle_anonymous_mode(true, cx);
+                store.anonymous_clans.insert(ClanId(2));
+                assert!(store.is_anonymous_mode());
+                assert!(store.topic_anonymous_mode());
+            });
+        });
+        cx.update(|cx| set_anonymous_policy(true, cx));
+        cx.update(|cx| {
+            store.update(cx, |store, cx| {
+                assert!(!store.is_anonymous_mode());
+                assert!(!store.topic_anonymous_mode());
+                assert_eq!(store.last_anonymous_mode, (false, false));
+                assert!(store.anonymous_clans.contains(&ClanId(2)));
+                store.toggle_anonymous_mode(false, cx);
+                store.toggle_anonymous_mode(true, cx);
+                assert!(!store.is_anonymous_mode());
+                assert!(!store.topic_anonymous_mode());
+            });
+            set_anonymous_policy(false, cx);
+            store.update(cx, |store, cx| {
+                assert!(!store.is_anonymous_mode());
+                store.toggle_anonymous_mode(false, cx);
+                assert!(store.is_anonymous_mode());
+            });
+        });
+    }
+
+    #[gpui::test]
+    fn prevented_anonymous_send_matches_the_normal_server_echo(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            let store = test_store(cx);
+            set_anonymous_policy(true, cx);
+            store.update(cx, |store, cx| {
+                let channel = anonymous_test_channel(store, cx);
+                store.anonymous_clans.insert(ClanId(1));
+                send_anonymous(store, "hello", cx);
+                let optimistic = last_row(store, channel);
+                assert!(!store.is_anonymous_mode());
+                assert!(!optimistic.anonymous_sender);
+                assert_eq!(optimistic.sender_id, "42");
+                store.apply_incoming_message(
+                    channel,
+                    Message::new(MessageId(100), "hello", "42", "Alice", unix_now_seconds()),
+                    cx,
+                );
+                let messages = &store.cache.get(&channel).unwrap().messages;
+                assert_eq!(messages.len(), 1);
+                assert_eq!(messages.last().unwrap().id, MessageId(100));
+                store.anonymous_clans.insert(ClanId(1));
+                store.send_sticker(
+                    "https://cdn.example/sticker.webp".into(),
+                    "sticker.webp".into(),
+                    "42".into(),
+                    "Alice".into(),
+                    cx,
+                );
+                let sticker = last_row(store, channel);
+                assert!(!sticker.anonymous_sender);
+                assert_eq!(sticker.sender_id, "42");
+                assert!(!store.is_anonymous_mode());
+            });
+        });
     }
 
     fn anonymous_test_channel(store: &mut MessagesStore, cx: &mut App) -> ChannelId {

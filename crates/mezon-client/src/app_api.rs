@@ -3331,6 +3331,31 @@ impl AppApi {
             .await
     }
 
+    pub async fn get_stream_playback(
+        &self,
+        channel_id: i64,
+        publish: bool,
+    ) -> Result<mezon_proto::api::GetStreamPlaybackResponse> {
+        self.transport
+            .get_stream_playback(channel_id, publish)
+            .await
+    }
+
+    pub async fn write_streaming_watch(&self, channel_id: i64, watching: bool) -> Result<()> {
+        self.transport
+            .write_streaming_watch(channel_id, watching)
+            .await
+    }
+
+    pub async fn fetch_stream_playlist(&self, url: &str) -> Option<String> {
+        crate::transport_runtime::fetch_text_unsigned(
+            url,
+            64 * 1024,
+            std::time::Duration::from_secs(5),
+        )
+        .await
+    }
+
     pub async fn write_voice_reaction(&self, emojis: Vec<String>, channel_id: i64) -> Result<()> {
         self.transport
             .write_voice_reaction(emojis, channel_id)

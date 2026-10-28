@@ -1069,7 +1069,7 @@ fn render_palette_avatar(item: &PaletteItem) -> AnyElement {
             .into_any_element();
     }
 
-    let mut avatar = Avatar::new().name(item.label.clone()).size_px(px(20.));
+    let mut avatar = Avatar::new().size_px(px(20.));
     if !item.avatar.is_empty() {
         avatar = avatar.src(item.avatar.clone());
         if !item.avatar_raw.is_empty() && item.avatar_raw != item.avatar {

@@ -399,7 +399,6 @@ impl ChannelHeader {
                     })
                     .children(dm_header.as_ref().map(|info| {
                         let mut avatar = Avatar::new()
-                            .name(info.label.clone())
                             .size_px(px(32.))
                             .group_default(info.is_group && info.avatar_raw.is_empty());
                         if !info.avatar_src.is_empty() {

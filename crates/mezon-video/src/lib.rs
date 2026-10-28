@@ -257,6 +257,14 @@ impl VideoPlayer {
         self.inner.failed()
     }
 
+    pub fn set_live_offset(&self, seconds: f64) {
+        self.inner.set_live_offset(seconds);
+    }
+
+    pub fn set_audio_output_device(&self, uid: Option<&str>) {
+        self.inner.set_audio_output_device(uid);
+    }
+
     pub fn missing_plugin(&self) -> bool {
         #[cfg(target_os = "linux")]
         {

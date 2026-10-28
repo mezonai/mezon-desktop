@@ -266,7 +266,7 @@ version = "1.1.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "40c48f72fd53cd289104fc64099abca73db4166ad86ea0b4341abe65af83dadc"
 dependencies = [
- "windows-sys 0.61.2",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]
@@ -277,7 +277,7 @@ checksum = "291e6a250ff86cd4a820112fb8898808a366d8f9f58ce16d1f538353ad55747d"
 dependencies = [
  "anstyle",
  "once_cell_polyfill",
- "windows-sys 0.61.2",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]
@@ -2363,7 +2363,7 @@ dependencies = [
  "libc",
  "option-ext",
  "redox_users 0.5.2",
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -2622,7 +2622,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -3321,7 +3321,7 @@ dependencies = [
  "libc",
  "log",
  "rustversion",
- "windows-link 0.2.1",
+ "windows-link 0.1.3",
  "windows-result 0.4.1",
 ]
 
@@ -5513,7 +5513,7 @@ dependencies = [
 
 [[package]]
 name = "mezon-active-windows"
-version = "2.1.14"
+version = "2.1.15"
 dependencies = [
  "anyhow",
  "core-foundation 0.10.0",
@@ -5526,7 +5526,7 @@ dependencies = [
 
 [[package]]
 name = "mezon-app"
-version = "2.1.14"
+version = "2.1.15"
 dependencies = [
  "anyhow",
  "dirs 5.0.1",
@@ -5557,7 +5557,7 @@ dependencies = [
 
 [[package]]
 name = "mezon-audio"
-version = "2.1.14"
+version = "2.1.15"
 dependencies = [
  "anyhow",
  "flume",
@@ -5572,7 +5572,7 @@ dependencies = [
 
 [[package]]
 name = "mezon-call"
-version = "2.1.14"
+version = "2.1.15"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -5590,7 +5590,7 @@ dependencies = [
 
 [[package]]
 name = "mezon-canvas"
-version = "2.1.14"
+version = "2.1.15"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -5612,7 +5612,7 @@ dependencies = [
 
 [[package]]
 name = "mezon-cli"
-version = "2.1.14"
+version = "2.1.15"
 dependencies = [
  "anyhow",
  "clap",
@@ -5628,7 +5628,7 @@ dependencies = [
 
 [[package]]
 name = "mezon-client"
-version = "2.1.14"
+version = "2.1.15"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -5659,13 +5659,13 @@ dependencies = [
  "tokio-tungstenite",
  "tracing",
  "url",
- "webpki-roots 1.0.8",
+ "webpki-roots 1.0.11",
  "windows 0.61.3",
 ]
 
 [[package]]
 name = "mezon-grammar"
-version = "2.1.14"
+version = "2.1.15"
 dependencies = [
  "openssl-sys",
  "ort",
@@ -5676,14 +5676,14 @@ dependencies = [
 
 [[package]]
 name = "mezon-i18n"
-version = "2.1.14"
+version = "2.1.15"
 dependencies = [
  "serde_json",
 ]
 
 [[package]]
 name = "mezon-mcp"
-version = "2.1.14"
+version = "2.1.15"
 dependencies = [
  "anyhow",
  "axum",
@@ -5704,7 +5704,7 @@ dependencies = [
 
 [[package]]
 name = "mezon-native"
-version = "2.1.14"
+version = "2.1.15"
 dependencies = [
  "anyhow",
  "auto-launch",
@@ -5741,7 +5741,7 @@ dependencies = [
 
 [[package]]
 name = "mezon-pdf"
-version = "2.1.14"
+version = "2.1.15"
 dependencies = [
  "anyhow",
  "core-graphics 0.24.0",
@@ -5754,7 +5754,7 @@ dependencies = [
 
 [[package]]
 name = "mezon-proto"
-version = "2.1.14"
+version = "2.1.15"
 dependencies = [
  "prost",
  "prost-build",
@@ -5765,7 +5765,7 @@ dependencies = [
 
 [[package]]
 name = "mezon-record"
-version = "2.1.14"
+version = "2.1.15"
 dependencies = [
  "anyhow",
  "core-foundation 0.10.0",
@@ -5788,7 +5788,7 @@ dependencies = [
 
 [[package]]
 name = "mezon-store"
-version = "2.1.14"
+version = "2.1.15"
 dependencies = [
  "anyhow",
  "chrono",
@@ -5804,8 +5804,8 @@ dependencies = [
  "mezon-client",
  "mezon-i18n",
  "mezon-proto",
- "mezon-stream",
  "mezon-updater",
+ "mezon-video",
  "mezon-voice",
  "mmn-client",
  "parking_lot",
@@ -5821,25 +5821,8 @@ dependencies = [
 ]
 
 [[package]]
-name = "mezon-stream"
-version = "2.1.14"
-dependencies = [
- "anyhow",
- "flume",
- "futures",
- "libwebrtc",
- "mezon-voice",
- "parking_lot",
- "serde_json",
- "tokio",
- "tokio-tungstenite",
- "tracing",
- "url",
-]
-
-[[package]]
 name = "mezon-theme"
-version = "2.1.14"
+version = "2.1.15"
 dependencies = [
  "gpui",
  "theme",
@@ -5847,7 +5830,7 @@ dependencies = [
 
 [[package]]
 name = "mezon-ui"
-version = "2.1.14"
+version = "2.1.15"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -5895,7 +5878,7 @@ dependencies = [
 
 [[package]]
 name = "mezon-updater"
-version = "2.1.14"
+version = "2.1.15"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -5916,7 +5899,7 @@ dependencies = [
 
 [[package]]
 name = "mezon-video"
-version = "2.1.14"
+version = "2.1.15"
 dependencies = [
  "anyhow",
  "core-foundation 0.10.0",
@@ -5945,7 +5928,7 @@ dependencies = [
 
 [[package]]
 name = "mezon-voice"
-version = "2.1.14"
+version = "2.1.15"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -5991,7 +5974,7 @@ dependencies = [
 
 [[package]]
 name = "mezon-widgets"
-version = "2.1.14"
+version = "2.1.15"
 dependencies = [
  "gpui",
  "mezon-store",
@@ -6056,7 +6039,7 @@ dependencies = [
 
 [[package]]
 name = "mmn-client"
-version = "2.1.14"
+version = "2.1.15"
 dependencies = [
  "base64 0.22.1",
  "bs58",
@@ -6416,7 +6399,7 @@ version = "0.50.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7957b9740744892f114936ab4a57b3f487491bbeafaf8083688b16841a4240e5"
 dependencies = [
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -8517,14 +8500,14 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys 0.12.1",
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
 name = "rustls"
-version = "0.23.45"
+version = "0.23.46"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0d41d731c7d2f962d1ccc364cec258de3c0e93b38c2fb3ba97ac74513048d634"
+checksum = "48e13bd8c0e9365c43cfa5c9e8f9ad49d3c8444926c9aac819e0e4dc503c8fdf"
 dependencies = [
  "aws-lc-rs",
  "log",
@@ -8596,9 +8579,9 @@ checksum = "f87165f0995f63a9fbeea62b64d10b4d9d8e78ec6d7d51fb2125fda7bb36788f"
 
 [[package]]
 name = "rustls-webpki"
-version = "0.103.15"
+version = "0.103.16"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f3c3cf1d8b1e7d4927e2d154c3fcb02979afb9939629c62cd9048d4f07b60ac2"
+checksum = "4443b1b6d39d7c663139942cc4558262562d2c84123bb6282ef177009ca8b281"
 dependencies = [
  "aws-lc-rs",
  "ring",
@@ -9157,7 +9140,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "52d1cfed4120b4d927bf7c0f86d2087a4a7d6027c906d9f9d525a80573b9be51"
 dependencies = [
  "libc",
- "windows-sys 0.61.2",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]
@@ -9237,7 +9220,7 @@ dependencies = [
  "cfg-if 1.0.4",
  "libc",
  "psm",
- "windows-sys 0.61.2",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]
@@ -9791,7 +9774,7 @@ dependencies = [
  "getrandom 0.4.3",
  "once_cell",
  "rustix 1.1.4",
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -9989,9 +9972,9 @@ checksum = "1f3ccbac311fea05f86f61904b462b55fb3df8837a366dfc601a0161d0532f20"
 
 [[package]]
 name = "tokio"
-version = "1.52.3"
+version = "1.54.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8fc7f01b389ac15039e4dc9531aa973a135d7a4135281b12d7c1bc79fd57fffe"
+checksum = "b52fd3255258d26fac7264ab5a76b53c13367136dc011d3d6ad4f8ed070396a3"
 dependencies = [
  "bytes",
  "libc",
@@ -10341,7 +10324,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c5f7c95348f20c1c913d72157b3c6dee6ea3e30b3d19502c5a7f6d3f160dacbf"
 dependencies = [
  "cc",
- "windows-targets 0.52.6",
+ "windows-targets 0.48.5",
 ]
 
 [[package]]
@@ -10427,7 +10410,7 @@ checksum = "f2f6fb2847f6742cd76af783a2a2c49e9375d0a111c7bef6f71cd9e738c72d6e"
 dependencies = [
  "memoffset",
  "tempfile",
- "windows-sys 0.61.2",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]
@@ -10582,8 +10565,8 @@ dependencies = [
  "socks",
  "ureq-proto",
  "utf8-zero",
- "webpki-root-certs 1.0.8",
- "webpki-roots 1.0.8",
+ "webpki-root-certs 1.0.11",
+ "webpki-roots 1.0.11",
 ]
 
 [[package]]
@@ -11077,14 +11060,14 @@ version = "0.26.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "75c7f0ef91146ebfb530314f5f1d24528d7f0767efbfd31dce919275413e393e"
 dependencies = [
- "webpki-root-certs 1.0.8",
+ "webpki-root-certs 1.0.11",
 ]
 
 [[package]]
 name = "webpki-root-certs"
-version = "1.0.8"
+version = "1.0.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0d46a5a140e6f7afeccd8eae97eff335163939eac8b929834875168b29b3d267"
+checksum = "e49d0e65abc00c142e8f9428da991da9f1a250c39be97459901eb12b9b49f62a"
 dependencies = [
  "rustls-pki-types",
 ]
@@ -11095,14 +11078,14 @@ version = "0.26.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "521bc38abb08001b01866da9f51eb7c5d647a19260e00054a8c7fd5f9e57f7a9"
 dependencies = [
- "webpki-roots 1.0.8",
+ "webpki-roots 1.0.11",
 ]
 
 [[package]]
 name = "webpki-roots"
-version = "1.0.8"
+version = "1.0.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "bf85cb06032201fa7c6f829d7db5a7e5aa45bcc0655327713065f6f0576731bf"
+checksum = "f5f280bbb2b287bc8e7de7e3852945a0ff50d1bbcb5ed42b6c7a568c546df171"
 dependencies = [
  "rustls-pki-types",
 ]
@@ -11355,7 +11338,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.61.2",
+ "windows-sys 0.48.0",
 ]
 
 [[package]]
@@ -12687,9 +12670,9 @@ dependencies = [
 
 [[package]]
 name = "zstd-sys"
-version = "2.0.16+zstd.1.5.7"
+version = "2.1.2+zstd.1.5.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "91e19ebc2adc8f83e43039e79776e3fda8ca919132d68a1fed6a5faca2683748"
+checksum = "481ada9c543b2323cbb7bbdbb5249177fbf0188ed959ed2c15e4b22421c84ed3"
 dependencies = [
  "cc",
  "pkg-config",

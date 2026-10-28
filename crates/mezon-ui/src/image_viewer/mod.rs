@@ -1496,7 +1496,6 @@ impl ImageViewer {
             att.is_some_and(|a| mezon_store::is_anonymous_user_id(a.uploader_id, cx));
         let avatar_widget = {
             let mut avatar = Avatar::new()
-                .name(uploader.clone())
                 .size_px(px(32.))
                 .anonymous(is_anonymous)
                 .image_cache(self.image_cache.clone());

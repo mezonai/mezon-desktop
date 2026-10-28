@@ -13,47 +13,12 @@ use crate::components::primitives::{
     Button as GpuiButton, ButtonVariants, Dropdown, DropdownTriggerStyle, Input, InputEvent,
     InputState, h_flex, v_flex,
 };
+use crate::phone_util::{COUNTRIES, is_valid_phone_vn, mask_phone, parse_phone_vn};
 use crate::theme::ActiveTheme;
 
 const OTP_TTL_SECONDS: u32 = 60;
-const COUNTRIES: [(&str, &str); 3] = [("Vietnam", "+84"), ("Japan", "+81"), ("US", "+1")];
 const LINK_COLOR: u32 = 0x5865f2;
 const ERROR_LINE_HEIGHT: Pixels = px(20.);
-
-fn parse_phone_vn(phone: &str) -> String {
-    if let Some(rest) = phone.strip_prefix('0') {
-        format!("+84{rest}")
-    } else if phone.starts_with("+84") {
-        phone.to_string()
-    } else {
-        format!("+84{phone}")
-    }
-}
-
-fn is_valid_phone_vn(phone: &str) -> bool {
-    let parsed = parse_phone_vn(phone);
-    let Some(national) = parsed.strip_prefix("+84") else {
-        return false;
-    };
-    let mut chars = national.chars();
-    let Some(first) = chars.next() else {
-        return false;
-    };
-    if !matches!(first, '3' | '5' | '7' | '8' | '9') {
-        return false;
-    }
-    let rest: Vec<char> = chars.collect();
-    rest.len() == 8 && rest.iter().all(|c| c.is_ascii_digit())
-}
-
-fn mask_phone(phone: &str) -> String {
-    let count = phone.chars().count();
-    if count < 3 {
-        return phone.to_string();
-    }
-    let tail: String = phone.chars().skip(count - 2).collect();
-    format!("xxx-xxx{tail}")
-}
 
 pub(super) struct PhoneModal {
     focus_handle: FocusHandle,
@@ -507,7 +472,7 @@ impl Render for PhoneModal {
 
 #[cfg(test)]
 mod tests {
-    use super::{is_valid_phone_vn, mask_phone, parse_phone_vn};
+    use crate::phone_util::{is_valid_phone_vn, mask_phone, parse_phone_vn};
 
     #[test]
     fn parses_local_and_international_forms() {

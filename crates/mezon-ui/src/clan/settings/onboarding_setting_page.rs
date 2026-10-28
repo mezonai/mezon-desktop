@@ -1586,9 +1586,7 @@ impl OnboardingSettingPage {
                                     .gap_3()
                                     .items_center()
                                     .child({
-                                        let mut avatar = Avatar::new()
-                                            .name(owner_name.clone())
-                                            .size_px(px(48.0));
+                                        let mut avatar = Avatar::new().size_px(px(48.0));
                                         if let Some(src) = owner_avatar {
                                             avatar = avatar.src(src);
                                         }

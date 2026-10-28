@@ -1007,7 +1007,6 @@ impl IntegrationsTab {
                                     .child(
                                         Avatar::new()
                                             .src(edit_avatar)
-                                            .name(draft_name.clone())
                                             .size_px(px(100.0))
                                             .image_cache(avatar_cache),
                                     )
@@ -1328,7 +1327,6 @@ fn render_webhook_row(
                     div().flex_shrink_0().child(
                         Avatar::new()
                             .src(header_avatar)
-                            .name(row.name.clone())
                             .size_px(px(50.0))
                             .image_cache(avatar_cache.clone()),
                     ),

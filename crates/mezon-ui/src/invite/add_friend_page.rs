@@ -200,13 +200,9 @@ impl Render for AddFriendPage {
         let adding = FriendStore::global(cx).read(cx).is_adding();
 
         let avatar = if self.avatar_url.is_empty() {
-            Avatar::new()
-                .name(self.display_name.clone())
-                .size_px(px(80.))
-                .into_any_element()
+            Avatar::new().size_px(px(80.)).into_any_element()
         } else {
             Avatar::new()
-                .name(self.display_name.clone())
                 .src(self.avatar_url.clone())
                 .size_px(px(80.))
                 .into_any_element()

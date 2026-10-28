@@ -297,7 +297,6 @@ impl Render for EditGroupModal {
             String::new()
         };
         let mut avatar = Avatar::new()
-            .name(self.original_label.clone())
             .size_px(px(80.))
             .group_default(!has_custom_avatar);
         if !avatar_src.is_empty() {

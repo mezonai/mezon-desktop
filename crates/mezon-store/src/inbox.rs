@@ -4,8 +4,8 @@ use std::time::Instant;
 
 use gpui::{App, AppContext, Context, Entity, EventEmitter, Global, Task};
 use mezon_client::{
-    AppApi, ConnectionStatus, DIRECTION_BEFORE_TIMESTAMP, INBOX_PAGE_LIMIT, InboxCategory,
-    InboxNotification, RealtimeEvent, inbox_notification_from_api,
+    AppApi, ConnectionStatus, DIRECTION_BEFORE_TIMESTAMP, INBOX_MESSAGE_MARK_CODE,
+    INBOX_PAGE_LIMIT, InboxCategory, InboxNotification, RealtimeEvent, inbox_notification_from_api,
     is_pending_inbox_notification_id,
 };
 
@@ -13,8 +13,9 @@ use crate::CACHE_TTL;
 use crate::badge::BadgeService;
 use crate::channel::ChannelList;
 use crate::clan_members::ClanMembersStore;
-use crate::ids::{ChannelId, ClanId};
+use crate::ids::{ChannelId, ClanId, MessageId};
 use crate::message::MessageCode;
+use crate::messages::MessagesStore;
 use crate::realtime::{RealtimeDispatch, RealtimeKind};
 
 const REALTIME_BUCKET_CAP: usize = (INBOX_PAGE_LIMIT as usize) * 4;
@@ -51,6 +52,33 @@ fn message_key(notification: &InboxNotification) -> Option<(String, String)> {
 fn remember_key(notification: &InboxNotification) -> Option<String> {
     message_key(notification)
         .map(|(channel_id, message_id)| topic_remember_key(&channel_id, &message_id))
+}
+
+fn copy_local_message_author(local: &InboxNotification, fetched: &mut InboxNotification) {
+    if fetched.category != InboxCategory::Messages {
+        return;
+    }
+    let Some(local_msg) = local.message.as_ref() else {
+        return;
+    };
+    let Some(fetched_msg) = fetched.message.as_mut() else {
+        return;
+    };
+    let local_has_name = !local_msg.display_name.is_empty() || !local_msg.username.is_empty();
+    let fetched_missing_name =
+        fetched_msg.display_name.is_empty() && fetched_msg.username.is_empty();
+    if !local_has_name || !fetched_missing_name {
+        return;
+    }
+    fetched_msg.display_name.clone_from(&local_msg.display_name);
+    fetched_msg.username.clone_from(&local_msg.username);
+    if !local_msg.sender_id.is_empty() && local_msg.sender_id != "0" {
+        fetched_msg.sender_id.clone_from(&local_msg.sender_id);
+        fetched.sender_id.clone_from(&local_msg.sender_id);
+    }
+    if fetched_msg.avatar.is_empty() && !local_msg.avatar.is_empty() {
+        fetched_msg.avatar.clone_from(&local_msg.avatar);
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -252,6 +280,65 @@ impl InboxStore {
             .or_default()
     }
 
+    fn enrich_messages_tab_sender(item: &mut InboxNotification, cx: &App) {
+        if item.category != InboxCategory::Messages || item.code != INBOX_MESSAGE_MARK_CODE {
+            return;
+        }
+        if item
+            .message
+            .as_ref()
+            .is_none_or(|preview| !preview.display_name.is_empty() || !preview.username.is_empty())
+        {
+            return;
+        }
+        let Some(channel_id) = item
+            .effective_channel_id()
+            .and_then(|id| id.parse::<ChannelId>().ok())
+        else {
+            return;
+        };
+        let Some(message_id) = item
+            .effective_message_id()
+            .and_then(|id| id.parse::<i64>().ok())
+            .map(MessageId)
+        else {
+            return;
+        };
+        let topic_id = item
+            .effective_topic_id()
+            .and_then(|id| id.parse::<ChannelId>().ok());
+        let Some(msg) = MessagesStore::try_global(cx).and_then(|store| {
+            let store = store.read(cx);
+            store
+                .message_in_channel(channel_id, message_id)
+                .cloned()
+                .or_else(|| {
+                    topic_id.and_then(|topic_id| {
+                        store.message_in_channel(topic_id, message_id).cloned()
+                    })
+                })
+        }) else {
+            return;
+        };
+        let sender_id = msg.sender_id.clone();
+        let sender_name = msg.sender_name.to_string();
+        let avatar = msg.avatar_url.to_string();
+        if !sender_id.is_empty() && sender_id != "0" {
+            item.sender_id.clone_from(&sender_id);
+        }
+        let Some(preview) = item.message.as_mut() else {
+            return;
+        };
+        preview.display_name = sender_name.clone();
+        preview.username = sender_name;
+        if !sender_id.is_empty() && sender_id != "0" {
+            preview.sender_id = sender_id;
+        }
+        if preview.avatar.is_empty() && !avatar.is_empty() {
+            preview.avatar = avatar;
+        }
+    }
+
     fn is_here_only_for_current_user(&self, notification: &InboxNotification, cx: &App) -> bool {
         let Some(user_id) =
             BadgeService::try_global(cx).and_then(|badges| badges.read(cx).current_user_id(cx))
@@ -385,23 +472,8 @@ impl InboxStore {
         cx: &mut Context<Self>,
     ) -> bool {
         if category == InboxCategory::Mentions
-            && self.is_here_only_for_current_user(&notification, cx)
+            && self.skip_here_mentions_notification(&notification, cx)
         {
-            tracing::debug!(
-                target: "inbox_mentions",
-                notification_id = %notification.id,
-                "skip @here notification from Mentions inbox"
-            );
-            let key = notification
-                .effective_message_id()
-                .unwrap_or_else(|| notification.id.clone());
-            self.note_filtered_here_badge(
-                &notification.clan_id,
-                &notification.channel_id,
-                &key,
-                notification.message_timestamp(),
-                cx,
-            );
             return false;
         }
         self.prepend_local_unfiltered(category, notification, cx)
@@ -467,9 +539,47 @@ impl InboxStore {
         if notification.category != InboxCategory::Mentions {
             return;
         }
-        // BadgeService already classified this ChannelMessage. Do not read it
-        // again while its entity update is still active.
+        if notification.is_here_only_mention() {
+            self.record_filtered_here_mention(&notification, cx);
+            return;
+        }
         self.prepend_local_unfiltered(InboxCategory::Mentions, notification, cx);
+    }
+
+    fn skip_here_mentions_notification(
+        &mut self,
+        notification: &InboxNotification,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        if !notification.is_here_only_mention()
+            && !self.is_here_only_for_current_user(notification, cx)
+        {
+            return false;
+        }
+        self.record_filtered_here_mention(notification, cx);
+        true
+    }
+
+    fn record_filtered_here_mention(
+        &mut self,
+        notification: &InboxNotification,
+        cx: &mut Context<Self>,
+    ) {
+        tracing::debug!(
+            target: "inbox_mentions",
+            notification_id = %notification.id,
+            "skip @here notification from Mentions inbox"
+        );
+        let key = notification
+            .effective_message_id()
+            .unwrap_or_else(|| notification.id.clone());
+        self.note_filtered_here_badge(
+            &notification.clan_id,
+            &notification.channel_id,
+            &key,
+            notification.message_timestamp(),
+            cx,
+        );
     }
 
     fn remember_topic_id(&mut self, notification: &InboxNotification) {
@@ -524,9 +634,22 @@ impl InboxStore {
         local: Vec<InboxNotification>,
         fetched: Vec<InboxNotification>,
     ) -> Vec<InboxNotification> {
+        let local_authors: HashMap<(String, String), InboxNotification> = local
+            .iter()
+            .filter(|item| item.category == InboxCategory::Messages)
+            .filter_map(|item| message_key(item).map(|key| (key, item.clone())))
+            .collect();
         let fetched_ids: HashSet<String> = fetched.iter().map(|n| n.id.clone()).collect();
         let fetched_keys: HashSet<(String, String)> =
             fetched.iter().filter_map(message_key).collect();
+        let mut fetched = fetched;
+        for item in &mut fetched {
+            if let Some(key) = message_key(item)
+                && let Some(local_item) = local_authors.get(&key)
+            {
+                copy_local_message_author(local_item, item);
+            }
+        }
         let mut merged: Vec<InboxNotification> = local
             .into_iter()
             .filter(|item| {
@@ -726,7 +849,8 @@ impl InboxStore {
             let mut visible = Vec::with_capacity(items.len());
             for item in items {
                 if category == InboxCategory::Mentions
-                    && self.is_here_only_for_current_user(&item, cx)
+                    && (item.is_here_only_mention()
+                        || self.is_here_only_for_current_user(&item, cx))
                 {
                     let message_id = item
                         .effective_message_id()
@@ -747,6 +871,8 @@ impl InboxStore {
                         );
                     }
                 } else {
+                    let mut item = item;
+                    Self::enrich_messages_tab_sender(&mut item, cx);
                     visible.push(item);
                 }
             }
@@ -1224,6 +1350,27 @@ mod tests {
     }
 
     #[test]
+    fn first_page_keeps_local_author_when_server_mark_row_is_missing_names() {
+        let mut pending = notification_with_message("pending-7-99", "99", 100);
+        pending.category = InboxCategory::Messages;
+        pending.message.as_mut().expect("preview").display_name = "huy.buidoanquang".into();
+        pending.message.as_mut().expect("preview").username = "huy.buidoanquang".into();
+        pending.message.as_mut().expect("preview").sender_id = "7".into();
+        let mut fetched = notification_with_message("500", "99", 200);
+        fetched.category = InboxCategory::Messages;
+        fetched.sender_id = "99".into();
+        fetched.message.as_mut().expect("preview").sender_id = "99".into();
+        let merged = InboxStore::merge_server_page(vec![pending], vec![fetched]);
+        assert_eq!(merged.len(), 1);
+        assert_eq!(merged[0].id, "500");
+        let message = merged[0].message.as_ref().expect("preview");
+        assert_eq!(message.display_name, "huy.buidoanquang");
+        assert_eq!(message.username, "huy.buidoanquang");
+        assert_eq!(message.sender_id, "7");
+        assert_eq!(merged[0].sender_id, "7");
+    }
+
+    #[test]
     fn first_page_replaces_pending_when_server_has_same_message() {
         let pending = notification_with_message("pending-99", "99", 200);
         let saved = notification_with_message("500", "99", 200);
@@ -1278,8 +1425,50 @@ mod tests {
         assert!(skip_inbox_mention_code(1));
         assert!(skip_inbox_mention_code(6));
         assert!(skip_inbox_mention_code(10));
+        assert!(skip_inbox_mention_code(13));
         assert!(!skip_inbox_mention_code(0));
         assert!(!skip_inbox_mention_code(9));
+    }
+
+    #[test]
+    fn realtime_here_mention_notification_is_not_kept_in_mentions() {
+        use prost::Message as _;
+
+        let here_id: i64 = crate::MENTION_HERE_USER_ID.parse().unwrap();
+        let mentions = mezon_proto::api::MessageMentionList {
+            mentions: vec![mezon_proto::api::MessageMention {
+                user_id: here_id,
+                username: "here".into(),
+                s: 0,
+                e: 5,
+                ..Default::default()
+            }],
+        }
+        .encode_to_vec();
+        let message = mezon_proto::api::ChannelMessage {
+            message_id: 99,
+            channel_id: 7,
+            clan_id: 1,
+            sender_id: 0,
+            username: "System".into(),
+            content: r#"{"t": "@here Event Daily has started."}"#.into(),
+            mentions,
+            create_time_seconds: 1_700_000_000,
+            ..Default::default()
+        };
+        let notification = inbox_notification_from_api(mezon_proto::api::Notification {
+            id: 1,
+            category: InboxCategory::Mentions as i32,
+            code: mezon_client::INBOX_USER_MENTIONED_CODE,
+            content: message.encode_to_vec(),
+            channel_id: 7,
+            clan_id: 1,
+            ..Default::default()
+        })
+        .expect("notification");
+
+        assert!(notification.is_here_only_mention());
+        assert!(notification.contains_here_mention());
     }
 
     #[test]

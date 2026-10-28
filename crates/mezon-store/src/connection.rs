@@ -1966,6 +1966,10 @@ pub fn resolve_initial_auth_state() -> AuthState {
             tracing::info!("No stored session — showing login");
             AuthState::NotAuthenticated
         }
+        Some(session) if session.username_pending => {
+            tracing::info!("Stored session still needs a username — asking for one");
+            AuthState::UsernameRequired(session)
+        }
         Some(session) => {
             tracing::info!(
                 "Restored stored session for user_id={} — connecting",

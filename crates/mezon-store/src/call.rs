@@ -861,12 +861,11 @@ impl CallStore {
             WEBRTC_SDP_QUIT => {
                 self.on_remote_end(caller_id, channel_id, EndReason::RemoteQuit, cx);
             }
-            WEBRTC_CLEAR_CALL => {
+            WEBRTC_CLEAR_CALL
                 if matches!(self.phase, CallPhase::Incoming)
-                    && self.matches_ring_sync(&fwd.json_data)
-                {
-                    self.on_remote_end(caller_id, channel_id, EndReason::RemoteQuit, cx);
-                }
+                    && self.matches_ring_sync(&fwd.json_data) =>
+            {
+                self.on_remote_end(caller_id, channel_id, EndReason::RemoteQuit, cx);
             }
             WEBRTC_SDP_TIMEOUT => {
                 if let Some(started) = self.started_at

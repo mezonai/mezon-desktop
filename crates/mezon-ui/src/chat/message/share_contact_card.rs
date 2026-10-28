@@ -64,7 +64,6 @@ pub fn render_share_contact_card(
     };
 
     let mut avatar_view = Avatar::new()
-        .name(name.to_string())
         .size_px(px(AVATAR_SIZE))
         .border_color(rgba(AVATAR_BORDER))
         .image_cache(ctx.avatar_cache.clone());

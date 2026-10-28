@@ -21,6 +21,7 @@ use super::language_page::LanguagePage;
 use super::notifications_page::NotificationsPage;
 use super::profile_page::ProfilePage;
 use super::server_page::ServerPage;
+use super::streaming_page::StreamingPage;
 use super::voice_page::VoicePage;
 use crate::theme::{ActiveTheme, Theme};
 
@@ -35,6 +36,7 @@ pub enum SettingsPage {
     Notifications,
     Language,
     Voice,
+    Streaming,
     Server,
     Advanced,
 }
@@ -51,6 +53,7 @@ impl SettingsPage {
             Self::Notifications => "setting.appSettings.notifications",
             Self::Language => "setting.language.title",
             Self::Voice => "setting.appSettings.voice",
+            Self::Streaming => "setting.appSettings.streaming",
             Self::Server => "setting.appSettings.server",
             Self::Advanced => "setting.appSettings.advanced",
         }
@@ -71,6 +74,7 @@ pub struct SettingsScreen {
     notifications_page: Option<Entity<NotificationsPage>>,
     language_page: Option<Entity<LanguagePage>>,
     voice_page: Option<Entity<VoicePage>>,
+    streaming_page: Option<Entity<StreamingPage>>,
     server_page: Option<Entity<ServerPage>>,
     advanced_page: Option<Entity<AdvancedPage>>,
     prev_page: SettingsPage,
@@ -107,6 +111,7 @@ impl SettingsScreen {
             notifications_page: None,
             language_page: None,
             voice_page: None,
+            streaming_page: None,
             server_page: None,
             advanced_page: None,
             prev_page: SettingsPage::Account,
@@ -225,6 +230,15 @@ impl SettingsScreen {
                     self.voice_page = Some(cx.new(|cx| VoicePage::new(s, cx)));
                 }
             }
+            SettingsPage::Streaming => match &self.streaming_page {
+                Some(page) => {
+                    page.update(cx, |page, cx| page.ensure_channels_loaded(cx));
+                }
+                None => {
+                    let s = self.settings.clone();
+                    self.streaming_page = Some(cx.new(|cx| StreamingPage::new(s, cx)));
+                }
+            },
             SettingsPage::Server => {
                 if self.server_page.is_none() {
                     let s = self.settings.clone();
@@ -278,6 +292,10 @@ impl SettingsScreen {
                 .voice_page
                 .as_ref()
                 .map(|p| p.clone().into_any_element()),
+            SettingsPage::Streaming => self
+                .streaming_page
+                .as_ref()
+                .map(|p| p.clone().into_any_element()),
             SettingsPage::Server => self
                 .server_page
                 .as_ref()
@@ -329,6 +347,7 @@ impl Render for SettingsScreen {
         let is_notifications = page == SettingsPage::Notifications;
         let is_language = page == SettingsPage::Language;
         let is_voice = page == SettingsPage::Voice;
+        let is_streaming = page == SettingsPage::Streaming;
         let is_server = page == SettingsPage::Server;
         let server_choice_offered = RealtimeServer::is_offered(cx);
         let is_advanced = page == SettingsPage::Advanced;
@@ -606,6 +625,13 @@ impl Render for SettingsScreen {
                 is_voice,
                 &theme,
                 "/settings/voice",
+            ))
+            .child(nav_item(
+                "streaming-page",
+                mezon_i18n::t(&locale, "setting.appSettings.streaming"),
+                is_streaming,
+                &theme,
+                "/settings/streaming",
             ))
             .when(server_choice_offered, |nav| {
                 nav.child(nav_item(

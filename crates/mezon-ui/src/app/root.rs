@@ -2,6 +2,7 @@ use crate::app::shell::Shell;
 use crate::app::title_bar::TitleBar;
 use crate::app::window_controls;
 use crate::auth::login_view::LoginView;
+use crate::auth::update_username_view::UpdateUsernameView;
 use crate::chat::call_window::CallOverlay;
 use crate::chat::channel_settings::ChannelSettingScreen;
 use crate::chat::layout::ChatLayout;
@@ -31,6 +32,7 @@ pub struct RootView {
     title_bar: Entity<TitleBar>,
     auth_state: Entity<AuthState>,
     login_view: Entity<LoginView>,
+    update_username_view: Entity<UpdateUsernameView>,
     chat_layout: Entity<ChatLayout>,
     settings_screen: Entity<SettingsScreen>,
     clan_setting_screen: Entity<ClanSettingScreen>,
@@ -212,6 +214,12 @@ impl RootView {
             let auth_state = auth_state.clone();
             let settings = settings.clone();
             move |cx| LoginView::new(auth_state, settings, cx)
+        });
+
+        let update_username_view = cx.new({
+            let auth_state = auth_state.clone();
+            let settings = settings.clone();
+            move |cx| UpdateUsernameView::new(auth_state, settings, cx)
         });
 
         cx.observe(&Router::global(cx), |this, _router, cx| {
@@ -411,6 +419,7 @@ impl RootView {
             title_bar,
             auth_state,
             login_view,
+            update_username_view,
             chat_layout,
             settings_screen,
             invite_page,
@@ -496,6 +505,7 @@ impl RootView {
             Route::SettingsNotifications => crate::settings::SettingsPage::Notifications,
             Route::SettingsLanguage => crate::settings::SettingsPage::Language,
             Route::SettingsVoice => crate::settings::SettingsPage::Voice,
+            Route::SettingsStreaming => crate::settings::SettingsPage::Streaming,
             Route::SettingsServer if mezon_store::RealtimeServer::is_offered(cx) => {
                 crate::settings::SettingsPage::Server
             }
@@ -591,6 +601,7 @@ impl Render for RootView {
             AuthState::NotAuthenticated | AuthState::OtpRequested { .. } => {
                 cached_fill(self.login_view.clone())
             }
+            AuthState::UsernameRequired(_) => cached_fill(self.update_username_view.clone()),
             AuthState::AwaitingCallback => render_awaiting_callback(theme, locale),
             AuthState::Connecting(_) => {
                 let (attempt, online) = {
@@ -628,6 +639,7 @@ impl Render for RootView {
                     | Route::SettingsNotifications
                     | Route::SettingsLanguage
                     | Route::SettingsVoice
+                    | Route::SettingsStreaming
                     | Route::SettingsServer
                     | Route::SettingsAdvanced => uncached_fill(self.settings_screen.clone()),
                     Route::ClanSettings { .. } => cached_fill(self.clan_setting_screen.clone()),

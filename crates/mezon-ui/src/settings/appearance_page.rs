@@ -69,7 +69,6 @@ fn message_row(
         .child(
             Avatar::new()
                 .size_px(px(45.0))
-                .name(display_name.clone())
                 .image_cache(avatar_image_cache)
                 .when(!avatar_src.is_empty(), |avatar| avatar.src(avatar_src)),
         )

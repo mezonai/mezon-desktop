@@ -28,7 +28,8 @@ use crate::chat::message_search::{
     MessageSearchPanel, apply_search_dropdown_item, register_chat_layout,
 };
 use crate::chat::pinned_popover::PinnedPopoverPanel;
-use crate::chat::stream::StreamOutputMenu;
+use crate::chat::stream::{StreamOutputMenu, StreamQualityMenu};
+use crate::chat::stream_video::StreamVideoView;
 use crate::chat::threads_popover::ThreadsPopoverPanel;
 use crate::chat::voice_sound_picker::{VoiceSoundPicker, VoiceSoundPickerEvent};
 use crate::chat::{CanvasPopoverPanel, CanvasView};
@@ -121,6 +122,8 @@ pub struct ChatLayout {
     _voice_sound_picker_dismiss_sub: Option<Subscription>,
     stream_volume_slider: Entity<SliderState>,
     _stream_volume_slider_sub: Subscription,
+    stream_video: Entity<StreamVideoView>,
+    stream_quality_menu: PopoverMenuHandle<StreamQualityMenu>,
     stream_output_menu: PopoverMenuHandle<StreamOutputMenu>,
 }
 
@@ -499,6 +502,7 @@ impl ChatLayout {
                 });
             },
         );
+        let stream_video = cx.new(|cx| StreamVideoView::new(stream_store.clone(), cx));
         let ui_state = UiState::load_sync();
         let show_member_list = ui_state.show_member_list;
         let mut this = Self {
@@ -581,6 +585,8 @@ impl ChatLayout {
             _voice_sound_picker_dismiss_sub: None,
             stream_volume_slider,
             _stream_volume_slider_sub: stream_volume_slider_sub,
+            stream_video,
+            stream_quality_menu: PopoverMenuHandle::default(),
             stream_output_menu: PopoverMenuHandle::default(),
         };
         this.sync_active_from_route(cx);
@@ -1909,6 +1915,9 @@ impl Render for ChatLayout {
                 self.stream_store.read(cx),
                 self.stream_store.clone(),
                 &self.stream_volume_slider,
+                &self.stream_video,
+                &self.stream_quality_menu,
+                &self.stream_output_menu,
                 &self.stream_fullscreen_focus,
                 cx,
             )
@@ -2537,8 +2546,10 @@ impl ChatLayout {
             _ => None,
         };
         if self.voice_session_key != key {
-            self.voice_session_key = key;
-            self.voice_show_chat = false;
+            let previous = std::mem::replace(&mut self.voice_session_key, key);
+            if previous.is_some() {
+                self.voice_show_chat = false;
+            }
             self.voice_grid_page = 0;
             self.voice_grid_wheel_accum = 0.;
             self.voice_visual = Default::default();
@@ -3077,7 +3088,6 @@ impl ChatLayout {
                 let channel = ch.clone();
                 let show_chat = self.stream_store.read(cx).show_chat();
                 let layout_entity = cx.entity();
-                let output_device_id = self.settings.read(cx).output_device_id.clone();
                 let stream_view = crate::chat::stream::render_stream_channel(
                     window,
                     &theme,
@@ -3087,8 +3097,9 @@ impl ChatLayout {
                     &self.auth_state,
                     &layout_entity,
                     &self.stream_volume_slider,
+                    &self.stream_video,
+                    &self.stream_quality_menu,
                     &self.stream_output_menu,
-                    output_device_id,
                     f32::from(window_width),
                     cx,
                 );
@@ -3312,6 +3323,7 @@ impl ChatLayout {
             | Route::SettingsNotifications
             | Route::SettingsLanguage
             | Route::SettingsVoice
+            | Route::SettingsStreaming
             | Route::SettingsServer
             | Route::SettingsAdvanced
             | Route::ClanSettings { .. }

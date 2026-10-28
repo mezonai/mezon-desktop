@@ -1198,7 +1198,6 @@ fn render_member(
     panel: WeakEntity<MemberListPanel>,
 ) -> AnyElement {
     let mut avatar = Avatar::new()
-        .name(member.name.clone())
         .size_px(px(32.))
         .image_cache(small_avatar_image_cache.clone());
     if !member.avatar_src.is_empty() {
@@ -1981,7 +1980,7 @@ mod permission_tests {
             cx,
         );
         assert!(!items.is_empty());
-        assert!(!items.iter().any(|item| item == &profile));
+        assert!(!items.iter().any(|item| item == profile));
     }
 
     #[gpui::test]
@@ -1995,7 +1994,7 @@ mod permission_tests {
             },
             cx,
         );
-        assert!(items.iter().any(|item| item == &profile));
+        assert!(items.iter().any(|item| item == profile));
     }
 
     #[gpui::test]

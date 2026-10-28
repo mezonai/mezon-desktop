@@ -1,3 +1,4 @@
+use crate::clan::ClanList;
 use crate::ids::UserId;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -5,10 +6,10 @@ use std::sync::Arc;
 use gpui::{App, AppContext, Context, Entity, EventEmitter, Global, Task};
 use mezon_client::{AppApi, ConnectionStatus, RealtimeEvent};
 
-use crate::Freshness;
-use crate::clan_members::{User, user_from_api};
+use crate::clan_members::{ClanMembersStore, User, user_from_api};
 use crate::ctrlk_search::CtrlKSearchType;
 use crate::realtime::{RealtimeDispatch, RealtimeKind};
+use crate::{Freshness, KeyedCache};
 
 #[derive(Debug, Clone)]
 pub enum UsersByUserEvent {
@@ -88,6 +89,9 @@ pub struct UsersByUserStore {
     confirmed_profiles: HashSet<UserId>,
     profile_task: Option<Task<()>>,
     reset_generation: u64,
+    missing_profile_ids: HashSet<UserId>,
+    profile_lookup_results: KeyedCache<UserId, Result<(), ()>>,
+    missing_profile_task: Option<Task<()>>,
     _search_task: Task<()>,
     _conn_watch: Task<()>,
 }
@@ -140,6 +144,11 @@ impl UsersByUserStore {
             confirmed_profiles: HashSet::new(),
             profile_task: None,
             reset_generation: 0,
+            missing_profile_ids: HashSet::new(),
+            profile_lookup_results: KeyedCache::new(Some(
+                mezon_client::INBOX_PAGE_LIMIT as usize * 4,
+            )),
+            missing_profile_task: None,
             _search_task: Task::ready(()),
             _conn_watch: conn_watch,
         }
@@ -185,6 +194,128 @@ impl UsersByUserStore {
         self.by_id.get(&user_id)
     }
 
+    pub fn ensure_user_profiles(&mut self, user_ids: Vec<UserId>, cx: &mut Context<Self>) {
+        let cached = ClanMembersStore::try_global(cx);
+        let mut changed = false;
+        for id in user_ids {
+            if !self.by_id.contains_key(&id)
+                && let Some(user) = cached
+                    .as_ref()
+                    .and_then(|store| store.read(cx).find_user(id))
+                    .cloned()
+            {
+                self.by_id.insert(id, user);
+                changed = true;
+            }
+            if id.get() > 0
+                && !self.profile_lookup_results.is_fresh(&id, crate::CACHE_TTL)
+                && self.user(id).is_none()
+            {
+                self.missing_profile_ids.insert(id);
+            }
+        }
+        if changed {
+            cx.emit(UsersByUserEvent::Changed);
+            cx.notify();
+        }
+        if self.missing_profile_ids.is_empty() || self.missing_profile_task.is_some() {
+            return;
+        }
+        let Some(clans) = ClanList::try_global(cx).map(|store| {
+            store
+                .read(cx)
+                .clans
+                .iter()
+                .map(|clan| clan.id)
+                .collect::<Vec<_>>()
+        }) else {
+            return;
+        };
+        if clans.is_empty() {
+            return;
+        }
+        let generation = self.reset_generation;
+        let targets = self.missing_profile_ids.clone();
+        self.missing_profile_task = Some(cx.spawn(async move |this, cx| {
+            let mut failed = false;
+            for clan in clans {
+                let pending = this
+                    .update(cx, |this, _| {
+                        if generation != this.reset_generation {
+                            return false;
+                        }
+                        let users = &this.by_id;
+                        this.missing_profile_ids
+                            .retain(|id| !users.contains_key(id));
+                        targets
+                            .iter()
+                            .any(|id| this.missing_profile_ids.contains(id))
+                    })
+                    .unwrap_or(false);
+                if !pending {
+                    break;
+                }
+                let roster = cx.update(|cx| {
+                    ClanMembersStore::global(cx)
+                        .update(cx, |store, cx| store.ensure_loaded_task(clan, cx))
+                });
+                let loaded = roster.await;
+                failed |= !loaded;
+                let _ = this.update(cx, |this, cx| {
+                    if generation != this.reset_generation {
+                        return;
+                    }
+                    let members = ClanMembersStore::global(cx);
+                    let members = members.read(cx);
+                    let mut changed = false;
+                    for id in &targets {
+                        if this.missing_profile_ids.contains(id)
+                            && let Some(user) = members.find_user(*id)
+                        {
+                            if !this.confirmed_profiles.contains(id) && !this.by_id.contains_key(id)
+                            {
+                                this.by_id.insert(*id, user.clone());
+                                changed = true;
+                            }
+                            this.missing_profile_ids.remove(id);
+                            this.profile_lookup_results.insert(*id, Ok(()), None);
+                        }
+                    }
+                    if changed {
+                        cx.emit(UsersByUserEvent::Changed);
+                        cx.notify();
+                    }
+                });
+            }
+            let _ = this.update(cx, |this, cx| {
+                if generation == this.reset_generation {
+                    for id in targets {
+                        if this.missing_profile_ids.remove(&id) {
+                            this.profile_lookup_results.insert(
+                                id,
+                                if failed { Err(()) } else { Ok(()) },
+                                None,
+                            );
+                        }
+                    }
+                    this.missing_profile_task = None;
+                    this.ensure_user_profiles(Vec::new(), cx);
+                }
+            });
+        }));
+    }
+
+    pub fn retry_missing_profiles(&mut self) {
+        let failures: Vec<_> = self
+            .profile_lookup_results
+            .iter()
+            .filter_map(|(id, result)| result.is_err().then_some(*id))
+            .collect();
+        for id in failures {
+            self.profile_lookup_results.mark_stale(&id);
+        }
+    }
+
     pub fn users(&self) -> impl Iterator<Item = &User> + '_ {
         self.by_id.values()
     }
@@ -195,6 +326,7 @@ impl UsersByUserStore {
 
     pub fn ensure_loaded(&mut self, cx: &mut Context<Self>) {
         if !self.freshness.is_fresh(crate::CACHE_TTL) && !self.loading {
+            self.profile_lookup_results.clear();
             self.fetch(cx);
         }
     }
@@ -316,6 +448,9 @@ impl UsersByUserStore {
     }
 
     fn reset_profiles(&mut self) {
+        self.missing_profile_task = None;
+        self.missing_profile_ids.clear();
+        self.profile_lookup_results.clear();
         self.reset_generation = self.reset_generation.wrapping_add(1);
         self.profile_task = None;
         self.profile_pending.clear();
@@ -500,6 +635,17 @@ impl UsersByUserStore {
         }
     }
 
+    fn apply_users_snapshot(&mut self, users: Vec<mezon_proto::api::User>) {
+        self.freshness.mark_fetched();
+        for user in users {
+            if let Some(user) = user_from_api(user)
+                && !self.confirmed_profiles.contains(&user.id)
+            {
+                self.by_id.insert(user.id, user);
+            }
+        }
+    }
+
     fn fetch(&mut self, cx: &mut Context<Self>) {
         if self.loading {
             return;
@@ -516,14 +662,7 @@ impl UsersByUserStore {
                 this.loading = false;
                 match result {
                     Ok(users) => {
-                        this.freshness.mark_fetched();
-                        for user in users {
-                            if let Some(user) = user_from_api(user)
-                                && !this.confirmed_profiles.contains(&user.id)
-                            {
-                                this.by_id.insert(user.id, user);
-                            }
-                        }
+                        this.apply_users_snapshot(users);
                         tracing::info!("UsersByUserStore: loaded {} users", this.by_id.len());
                         cx.emit(UsersByUserEvent::Changed);
                         cx.notify();
@@ -566,8 +705,187 @@ impl UsersByUserStore {
     }
 }
 
+pub(crate) mod message_avatar {
+    use std::sync::Arc;
+
+    use gpui::{App, Global};
+    use mezon_client::{AppApi, transport::ApiMessage};
+
+    use crate::{ChannelId, ClanId, MessageId};
+
+    pub(crate) const AVATAR_LOOKUP_CONCURRENCY: usize = 4;
+    pub(crate) const AVATAR_NOTIFY_COALESCE: std::time::Duration =
+        std::time::Duration::from_millis(100);
+    const AVATAR_MESSAGE_DIRECTION_AROUND: i32 = 2;
+    const AVATAR_MESSAGE_LOOKUP_LIMIT: u32 = 2;
+
+    struct AvatarRequestPermits(Arc<tokio::sync::Semaphore>);
+    impl Global for AvatarRequestPermits {}
+
+    pub(crate) fn avatar_request_permits(cx: &mut App) -> Arc<tokio::sync::Semaphore> {
+        if !cx.has_global::<AvatarRequestPermits>() {
+            cx.set_global(AvatarRequestPermits(Arc::new(tokio::sync::Semaphore::new(
+                AVATAR_LOOKUP_CONCURRENCY,
+            ))));
+        }
+        cx.global::<AvatarRequestPermits>().0.clone()
+    }
+
+    #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+    pub(crate) struct MessageAvatarKey {
+        pub clan_id: ClanId,
+        pub parent_id: ChannelId,
+        pub channel_id: ChannelId,
+        pub message_id: MessageId,
+    }
+
+    pub(crate) async fn fetch_avatar_message(
+        api: &AppApi,
+        key: MessageAvatarKey,
+    ) -> anyhow::Result<Option<ApiMessage>> {
+        let page = if key.channel_id == key.parent_id {
+            api.list_channel_messages(
+                key.clan_id.get(),
+                key.channel_id.get(),
+                key.message_id.get(),
+                AVATAR_MESSAGE_DIRECTION_AROUND,
+                AVATAR_MESSAGE_LOOKUP_LIMIT,
+            )
+            .await?
+        } else {
+            api.list_topic_messages(
+                key.clan_id.get(),
+                key.parent_id.get(),
+                key.channel_id.get(),
+                key.message_id.get(),
+                AVATAR_MESSAGE_DIRECTION_AROUND,
+                AVATAR_MESSAGE_LOOKUP_LIMIT,
+            )
+            .await?
+        };
+        Ok(page
+            .messages
+            .into_iter()
+            .find(|message| message.message_id == key.message_id.get()))
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        #[gpui::test]
+        fn lookup_consumers_share_one_concurrency_budget(cx: &mut gpui::TestAppContext) {
+            cx.update(|cx| {
+                let first = avatar_request_permits(cx);
+                let second = avatar_request_permits(cx);
+                assert!(Arc::ptr_eq(&first, &second));
+                let permits: Vec<_> = (0..AVATAR_LOOKUP_CONCURRENCY)
+                    .map(|_| first.clone().try_acquire_owned().unwrap())
+                    .collect();
+                assert!(second.clone().try_acquire_owned().is_err());
+                drop(permits);
+                assert!(second.try_acquire_owned().is_ok());
+            });
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    #[gpui::test]
+    fn authoritative_snapshot_can_clear_avatar_and_display_name(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            let store = init_store(cx);
+            store.update(cx, |store, _| {
+                store.by_id.insert(
+                    UserId(7),
+                    User {
+                        id: UserId(7),
+                        username: "user".into(),
+                        display_name: "Old".into(),
+                        avatar_url: "old.png".into(),
+                        ..Default::default()
+                    },
+                );
+                store.apply_users_snapshot(vec![api::User {
+                    id: 7,
+                    username: "user".into(),
+                    ..Default::default()
+                }]);
+                let user = store.user(UserId(7)).unwrap();
+                assert!(user.avatar_url.is_empty());
+                assert!(user.display_name.is_empty());
+                assert_eq!(user.username, "user");
+            });
+        });
+    }
+
+    #[gpui::test]
+    fn cached_user_without_avatar_is_resolved_without_roster_requests(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        cx.update(|cx| {
+            let store = init_store(cx);
+            let members = ClanMembersStore::init(store.read(cx).api.clone(), cx);
+            members.update(cx, |members, _| {
+                members.seed_members_for_test(
+                    crate::ClanId(1),
+                    vec![crate::ClanMember {
+                        user: User {
+                            id: UserId(7),
+                            username: "no-avatar".into(),
+                            ..Default::default()
+                        },
+                        ..Default::default()
+                    }],
+                );
+            });
+            store.update(cx, |store, cx| {
+                store.ensure_user_profiles(vec![UserId(7), UserId(7)], cx);
+                assert_eq!(store.user(UserId(7)).unwrap().username, "no-avatar");
+                assert!(store.user(UserId(7)).unwrap().avatar_url.is_empty());
+                assert!(store.missing_profile_ids.is_empty());
+                assert!(store.missing_profile_task.is_none());
+                store
+                    .profile_lookup_results
+                    .insert(UserId(8), Err(()), None);
+                store.profile_lookup_results.insert(UserId(9), Ok(()), None);
+                store.retry_missing_profiles();
+                assert!(
+                    !store
+                        .profile_lookup_results
+                        .is_fresh(&UserId(8), crate::CACHE_TTL)
+                );
+                assert!(
+                    store
+                        .profile_lookup_results
+                        .is_fresh(&UserId(9), crate::CACHE_TTL)
+                );
+            });
+        });
+    }
+
+    #[gpui::test]
+    fn reset_cancels_missing_sender_lookup_and_clears_retry_state(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            let store = init_store(cx);
+            store.update(cx, |store, cx| {
+                store.missing_profile_ids.insert(UserId(7));
+                store
+                    .profile_lookup_results
+                    .insert(UserId(8), Err(()), None);
+                store.missing_profile_task =
+                    Some(cx.spawn(async |_, _| std::future::pending::<()>().await));
+                let generation = store.reset_generation;
+                store.reset(cx);
+                assert_ne!(store.reset_generation, generation);
+                assert!(store.missing_profile_ids.is_empty());
+                assert!(store.profile_lookup_results.is_empty());
+                assert!(store.missing_profile_task.is_none());
+            });
+        });
+    }
+
     #[gpui::test]
     fn duplicate_clan_events_coalesce_and_stale_results_cannot_replace_profile(
         cx: &mut gpui::TestAppContext,

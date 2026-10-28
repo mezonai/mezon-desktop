@@ -3,14 +3,23 @@ use std::time::Duration;
 
 use gpui::{
     Animation, AnimationExt as _, App, Context, Entity, FocusHandle, Focusable, FontWeight, Hsla,
-    MouseButton, RenderImage, Subscription, Task, Window, div, img, linear_color_stop,
-    linear_gradient, prelude::*, px, rgb, rgba, svg, white,
+    MouseButton, RenderImage, SharedString, Subscription, Task, Window, div, img,
+    linear_color_stop, linear_gradient, prelude::*, px, rgb, rgba, svg, white,
 };
 use mezon_store::{AuthState, LoginMethod, LoginStore, Session, Settings, WalletStore};
 
 use crate::app::window_controls;
 use crate::components::compositions::OtpInput;
-use crate::components::primitives::{FocusCycle, Input, InputEvent, InputState, Spinner};
+use crate::components::primitives::{
+    Dropdown, DropdownTriggerStyle, FocusCycle, Input, InputEvent, InputState, Spinner,
+};
+use crate::phone_util::{LOGIN_COUNTRIES, build_login_phone, mask_phone, phone_error_key};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum OtpKind {
+    Email,
+    Sms,
+}
 
 pub struct LoginView {
     auth_state: Entity<AuthState>,
@@ -21,9 +30,13 @@ pub struct LoginView {
     otp_step: u8,
     otp_req_id: String,
     otp_email: String,
+    otp_phone: String,
+    otp_kind: OtpKind,
 
     email_input: Option<Entity<InputState>>,
     password_input: Option<Entity<InputState>>,
+    phone_input: Option<Entity<InputState>>,
+    country_open: bool,
     otp_input: Option<Entity<OtpInput>>,
 
     loading: bool,
@@ -81,12 +94,16 @@ impl LoginView {
         let mut view = Self {
             auth_state,
             settings,
-            method: LoginMethod::Otp,
+            method: LoginMethod::Sms,
             otp_step: 0,
             otp_req_id: String::new(),
             otp_email: String::new(),
+            otp_phone: String::new(),
+            otp_kind: OtpKind::Email,
             email_input: None,
             password_input: None,
+            phone_input: None,
+            country_open: false,
             otp_input: None,
             loading: false,
             show_loading: false,
@@ -115,10 +132,12 @@ impl LoginView {
     }
 
     fn reset_to_initial(&mut self) {
-        self.method = LoginMethod::Otp;
+        self.method = LoginMethod::Sms;
         self.otp_step = 0;
         self.otp_req_id.clear();
         self.otp_email.clear();
+        self.otp_phone.clear();
+        self.country_open = false;
         self.error = None;
         self.countdown = 0;
         self.is_remember = false;
@@ -209,6 +228,24 @@ impl LoginView {
             self.password_input = Some(input);
         }
 
+        if self.phone_input.is_none() {
+            let placeholder = mezon_i18n::t(&locale, "common.login.enterPhone");
+            let input = cx.new(|cx| {
+                Self::login_input(window, cx, placeholder)
+                    .height(px(40.))
+                    .validate(|text, _cx| {
+                        text.is_empty()
+                            || text
+                                .chars()
+                                .enumerate()
+                                .all(|(index, c)| c.is_ascii_digit() || (index == 0 && c == '+'))
+                    })
+            });
+            self._field_subs
+                .push(cx.subscribe_in(&input, window, Self::on_field_change));
+            self.phone_input = Some(input);
+        }
+
         if self.otp_input.is_none() {
             let entity = cx.entity().clone();
             self.otp_input = Some(cx.new(|cx| {
@@ -217,6 +254,12 @@ impl LoginView {
                 }))
             }));
         }
+    }
+
+    fn switch_login_method(&mut self, method: LoginMethod, cx: &mut Context<Self>) {
+        self.reset_flow_state();
+        self.method = method;
+        cx.notify();
     }
 
     fn on_field_change(
@@ -242,12 +285,17 @@ impl LoginView {
                             Self::handle_send_otp(&entity, window, cx);
                         }
                     }
+                    LoginMethod::Sms => {
+                        if otp_step == 0 {
+                            Self::handle_send_sms_otp(&entity, window, cx);
+                        }
+                    }
                 });
             }
         }
     }
 
-    fn login_input(
+    pub(super) fn login_input(
         window: &mut Window,
         cx: &mut Context<InputState>,
         placeholder: &str,
@@ -356,6 +404,7 @@ impl LoginView {
                     Ok(req_id) => {
                         this.otp_req_id = req_id.clone();
                         this.otp_email = email_clone.clone();
+                        this.otp_kind = OtpKind::Email;
                         this.otp_step = 1;
                         this.countdown = OTP_COOLDOWN_SECS;
                         this.error = None;
@@ -363,7 +412,8 @@ impl LoginView {
                         this.auth_state.update(cx, |state, cx| {
                             *state = AuthState::OtpRequested {
                                 req_id,
-                                email: email_clone,
+                                email: Some(email_clone),
+                                phone: None,
                             };
                             cx.notify();
                         });
@@ -384,12 +434,84 @@ impl LoginView {
         .detach();
     }
 
+    fn handle_send_sms_otp(entity: &Entity<LoginView>, _window: &mut Window, cx: &mut App) {
+        let raw = entity.read(cx).phone_form_values(cx);
+        if let Some(err_key) = phone_error_key(&raw) {
+            entity.update(cx, |this, cx| {
+                let locale = this.settings.read(cx).language.clone();
+                this.error = Some(mezon_i18n::t(&locale, err_key).to_string());
+                cx.notify();
+            });
+            return;
+        }
+        let Some(full_phone) = build_login_phone(&raw) else {
+            return;
+        };
+
+        if entity.read(cx).loading {
+            return;
+        }
+
+        entity.update(cx, |this, cx| {
+            this.begin_loading(cx);
+        });
+
+        let client = LoginStore::global(cx).read(cx).client();
+        let phone_clone = full_phone.clone();
+        let entity_clone = entity.clone();
+
+        cx.spawn(async move |cx| {
+            let result = client.request_sms_otp(&phone_clone).await;
+            entity_clone.update(cx, |this, cx| {
+                this.end_loading(cx);
+                match result {
+                    Ok(req_id) => {
+                        this.otp_req_id = req_id.clone();
+                        this.otp_phone = phone_clone.clone();
+                        this.otp_kind = OtpKind::Sms;
+                        this.otp_step = 1;
+                        this.countdown = OTP_COOLDOWN_SECS;
+                        this.error = None;
+                        this.pending_otp_clear = true;
+                        this.auth_state.update(cx, |state, cx| {
+                            *state = AuthState::OtpRequested {
+                                req_id,
+                                email: None,
+                                phone: Some(phone_clone),
+                            };
+                            cx.notify();
+                        });
+                        this.start_countdown(cx);
+                    }
+                    Err(e) => {
+                        let locale = this.settings.read(cx).language.clone();
+                        this.error = Some(friendly_error(&locale, &e));
+                        if is_rate_limited(&e) {
+                            this.countdown = OTP_COOLDOWN_SECS;
+                            this.start_countdown(cx);
+                        }
+                    }
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    fn phone_form_values(&self, cx: &App) -> String {
+        self.phone_input
+            .as_ref()
+            .map(|input| input.read(cx).value().to_string())
+            .unwrap_or_default()
+    }
+
     fn handle_confirm_otp(entity: &Entity<LoginView>, otp_code: String, cx: &mut App) {
         if entity.read(cx).loading {
             return;
         }
 
         let req_id = entity.read(cx).otp_req_id.clone();
+        let otp_kind = entity.read(cx).otp_kind;
 
         entity.update(cx, |this, cx| {
             this.begin_loading(cx);
@@ -400,7 +522,10 @@ impl LoginView {
         let entity_clone = entity.clone();
 
         cx.spawn(async move |cx| {
-            let result = client.confirm_otp(&req_id, &otp_code).await;
+            let result = match otp_kind {
+                OtpKind::Sms => client.confirm_otp_sms(&req_id, &otp_code).await,
+                OtpKind::Email => client.confirm_otp(&req_id, &otp_code).await,
+            };
             entity_clone.update(cx, |this, cx| {
                 this.end_loading(cx);
                 match result {
@@ -481,7 +606,7 @@ impl LoginView {
         .detach();
     }
 
-    fn on_auth_success(session: Session, auth_state: &Entity<AuthState>, cx: &mut App) {
+    pub(super) fn on_auth_success(session: Session, auth_state: &Entity<AuthState>, cx: &mut App) {
         tracing::info!("Authentication successful");
         tracing::debug!("  User ID: {}", session.user_id);
         tracing::debug!("  Username: {}", session.username);
@@ -494,6 +619,14 @@ impl LoginView {
                 }
             })
             .detach();
+
+        if session.username_pending {
+            auth_state.update(cx, |state, cx| {
+                *state = AuthState::UsernameRequired(session);
+                cx.notify();
+            });
+            return;
+        }
 
         auth_state.update(cx, |state, cx| {
             *state = AuthState::Connecting(session.clone());
@@ -553,13 +686,206 @@ impl LoginView {
             LoginMethod::Password => text_field(&self.email_input)
                 .chain(text_field(&self.password_input))
                 .collect(),
-            LoginMethod::Otp if self.otp_step == 0 => Vec::new(),
+            LoginMethod::Otp if self.otp_step == 0 => text_field(&self.email_input).collect(),
             LoginMethod::Otp => self
                 .otp_input
                 .as_ref()
                 .map(|otp| otp.read(cx).field_handles(cx))
                 .unwrap_or_default(),
+            LoginMethod::Sms if self.otp_step == 0 => text_field(&self.phone_input).collect(),
+            LoginMethod::Sms => self
+                .otp_input
+                .as_ref()
+                .map(|otp| otp.read(cx).field_handles(cx))
+                .unwrap_or_default(),
         }
+    }
+
+    fn render_alternative_links(&self, locale: &str, cx: &mut Context<Self>) -> gpui::AnyElement {
+        let hint_key = match self.method {
+            LoginMethod::Sms => "common.login.cannotAccessYourPhone",
+            LoginMethod::Otp => "common.login.cannotAccessYourEmail",
+            LoginMethod::Password => "common.login.passwordNotSet",
+        };
+        let links: &[(&str, LoginMethod)] = match self.method {
+            LoginMethod::Sms => &[
+                ("common.login.loginWithEmailOTP", LoginMethod::Otp),
+                ("common.login.loginWithPassword", LoginMethod::Password),
+            ],
+            LoginMethod::Otp => &[
+                ("common.login.loginWithSMS", LoginMethod::Sms),
+                ("common.login.loginWithPassword", LoginMethod::Password),
+            ],
+            LoginMethod::Password => &[
+                ("common.login.loginWithEmailOTP", LoginMethod::Otp),
+                ("common.login.loginWithSMS", LoginMethod::Sms),
+            ],
+        };
+        let mut col = div().mt_4().flex().flex_col().items_center().gap_1().child(
+            div()
+                .text_sm()
+                .text_color(white())
+                .child(mezon_i18n::t(locale, hint_key)),
+        );
+        for (label_key, target) in links {
+            let entity = cx.entity().clone();
+            let method = *target;
+            col = col.child(
+                div()
+                    .text_sm()
+                    .text_color(rgb(0x3b82f6))
+                    .cursor_pointer()
+                    .hover(|s| s.opacity(0.8))
+                    .on_mouse_down(MouseButton::Left, move |_, _window, cx| {
+                        entity.update(cx, |this, cx| this.switch_login_method(method, cx));
+                    })
+                    .child(mezon_i18n::t(locale, label_key)),
+            );
+        }
+        col.into_any_element()
+    }
+
+    fn render_sms_form(&self, locale: &str, cx: &mut Context<Self>) -> gpui::AnyElement {
+        let show_loading = self.show_loading;
+        let mut col = div().flex().flex_col();
+
+        if self.otp_step == 0 {
+            let country_items: Vec<SharedString> = LOGIN_COUNTRIES
+                .iter()
+                .map(|(name, dial)| SharedString::from(format!("{name} ({dial})")))
+                .collect();
+            if let Some(input) = &self.phone_input {
+                col = col.child(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .gap_1()
+                        .child(required_label(mezon_i18n::t(locale, "common.login.phone")))
+                        .child(
+                            div()
+                                .flex()
+                                .flex_row()
+                                .gap_2()
+                                .items_start()
+                                .child(
+                                    div().w(px(150.)).child(
+                                        Dropdown::new("login-phone-country")
+                                            .items(country_items)
+                                            .selected(Some(0))
+                                            .open(self.country_open)
+                                            .trigger_style(DropdownTriggerStyle::InputPrimary)
+                                            .on_toggle({
+                                                let entity = cx.entity().clone();
+                                                move |_, cx| {
+                                                    entity.update(cx, |this, cx| {
+                                                        this.country_open = !this.country_open;
+                                                        cx.notify();
+                                                    })
+                                                }
+                                            })
+                                            .on_select({
+                                                let entity = cx.entity().clone();
+                                                move |_, _, cx| {
+                                                    entity.update(cx, |this, cx| {
+                                                        this.country_open = false;
+                                                        cx.notify();
+                                                    })
+                                                }
+                                            }),
+                                    ),
+                                )
+                                .child(div().flex_1().child(Input::new(input))),
+                        ),
+                );
+            }
+            let raw = self.phone_form_values(cx);
+            let countdown = self.countdown;
+            let phone_ok = build_login_phone(&raw).is_some();
+            let send_disabled = show_loading || !phone_ok || countdown > 0;
+            let send_label = if countdown > 0 {
+                format!(
+                    "{} ({})",
+                    mezon_i18n::t(locale, "common.login.send"),
+                    countdown
+                )
+            } else {
+                mezon_i18n::t(locale, "common.login.send").to_string()
+            };
+            let entity = cx.entity().clone();
+            col = col.child(div().mt_3().child(login_button(
+                "sms-otp-send",
+                send_label,
+                show_loading,
+                send_disabled,
+                move |window, cx| Self::handle_send_sms_otp(&entity, window, cx),
+            )));
+            col = col.child(error_slot(self.error.as_deref()));
+            col = col.child(self.render_alternative_links(locale, cx));
+        } else {
+            let masked = mask_phone(&self.otp_phone);
+            let message = mezon_i18n::t(locale, "accountSetting.setPhoneModal.otpSentMessage")
+                .replace("{{phone}}", &masked);
+            col = col.child(
+                div()
+                    .text_sm()
+                    .text_center()
+                    .mb_4()
+                    .text_color(rgb(0xd1d5db))
+                    .child(message),
+            );
+            if let Some(input) = &self.otp_input {
+                col = col.child(input.clone());
+            }
+            let label = if self.countdown > 0 {
+                format!(
+                    "{} ({})",
+                    mezon_i18n::t(locale, "common.login.resendOtp"),
+                    self.countdown
+                )
+            } else {
+                mezon_i18n::t(locale, "common.login.resendOtp").to_string()
+            };
+            let entity = cx.entity().clone();
+            col = col.child(div().mt_3().child(login_button(
+                "sms-otp-resend",
+                label,
+                show_loading,
+                show_loading || self.countdown > 0,
+                move |window, cx| Self::handle_send_sms_otp(&entity, window, cx),
+            )));
+            if self.countdown == 0 {
+                let entity_back = cx.entity().clone();
+                col = col.child(
+                    div()
+                        .mt_2()
+                        .flex()
+                        .justify_center()
+                        .text_sm()
+                        .text_color(rgb(0x3b82f6))
+                        .cursor_pointer()
+                        .hover(|s| s.opacity(0.8))
+                        .on_mouse_down(MouseButton::Left, move |_, _window, cx| {
+                            entity_back.update(cx, |this, cx| {
+                                this.reset_flow_state();
+                                cx.notify();
+                            });
+                        })
+                        .child(mezon_i18n::t(
+                            locale,
+                            "accountSetting.setPhoneModal.backToPhoneInput",
+                        )),
+                );
+            }
+            col = col.child(error_slot(self.error.as_deref()));
+        }
+
+        div()
+            .flex()
+            .flex_col()
+            .min_h(px(FORM_MIN_HEIGHT))
+            .justify_center()
+            .child(col)
+            .into_any_element()
     }
 
     fn render_otp_form(&self, locale: &str, cx: &mut Context<Self>) -> gpui::AnyElement {
@@ -656,7 +982,7 @@ impl LoginView {
         }
 
         col = col.child(error_slot(self.error.as_deref()));
-        col = col.child(self.otp_footer(locale, cx));
+        col = col.child(self.render_alternative_links(locale, cx));
 
         div()
             .flex()
@@ -664,37 +990,6 @@ impl LoginView {
             .min_h(px(FORM_MIN_HEIGHT))
             .justify_center()
             .child(col)
-            .into_any_element()
-    }
-
-    fn otp_footer(&self, locale: &str, cx: &mut Context<Self>) -> gpui::AnyElement {
-        let entity = cx.entity().clone();
-        div()
-            .flex()
-            .flex_col()
-            .items_center()
-            .gap_1()
-            .child(
-                div()
-                    .text_sm()
-                    .text_color(white())
-                    .child(mezon_i18n::t(locale, "common.login.cannotAccessYourEmail")),
-            )
-            .child(
-                div()
-                    .text_sm()
-                    .text_color(rgb(0x3b82f6))
-                    .cursor_pointer()
-                    .hover(|s| s.opacity(0.8))
-                    .on_mouse_down(MouseButton::Left, move |_, _window, cx| {
-                        entity.update(cx, |this, cx| {
-                            this.reset_flow_state();
-                            this.method = LoginMethod::Password;
-                            cx.notify();
-                        });
-                    })
-                    .child(mezon_i18n::t(locale, "common.login.loginByPassword")),
-            )
             .into_any_element()
     }
 
@@ -752,6 +1047,7 @@ impl LoginView {
                 signin_disabled,
                 move |_window, cx| Self::handle_sign_in(&entity, cx),
             ))
+            .child(self.render_alternative_links(locale, cx))
             .into_any_element()
     }
 
@@ -855,6 +1151,9 @@ impl Render for LoginView {
             if let Some(input) = self.password_input.clone() {
                 input.update(cx, |i, cx| i.set_value("", window, cx));
             }
+            if let Some(input) = self.phone_input.clone() {
+                input.update(cx, |i, cx| i.set_value("", window, cx));
+            }
             if let Some(otp) = self.otp_input.clone() {
                 otp.update(cx, |o, cx| o.clear(window, cx));
             }
@@ -868,12 +1167,9 @@ impl Render for LoginView {
         let locale = self.settings.read(cx).language.clone();
 
         let blue = rgb(0x3b82f6);
-        let purple = rgb(0xa855f7);
-        let pink = rgb(0xf9a8d4);
         let gray400 = rgb(0x9ca3af);
 
-        let is_otp = self.method == LoginMethod::Otp;
-        let on_otp_step1 = is_otp && self.otp_step == 1;
+        let on_otp_step1 = self.method != LoginMethod::Password && self.otp_step == 1;
 
         let mut left_col = div().flex().flex_col().flex_1().min_w_0();
 
@@ -899,6 +1195,7 @@ impl Render for LoginView {
         );
 
         left_col = match self.method {
+            LoginMethod::Sms => left_col.child(self.render_sms_form(&locale, cx)),
             LoginMethod::Otp => left_col.child(self.render_otp_form(&locale, cx)),
             LoginMethod::Password => left_col.child(self.render_password_form(&locale, cx)),
         }
@@ -944,32 +1241,15 @@ impl Render for LoginView {
                         .text_color(gray400)
                         .child(mezon_i18n::t(&locale, "common.login.keepSignedIn")),
                 );
-            let mut row = div()
-                .mt_4()
-                .flex()
-                .flex_row()
-                .items_center()
-                .justify_between()
-                .child(checkbox);
-            if !is_otp {
-                let entity_toggle = cx.entity().clone();
-                row = row.child(
-                    div()
-                        .text_sm()
-                        .text_color(blue)
-                        .cursor_pointer()
-                        .hover(|s| s.opacity(0.8))
-                        .on_mouse_down(MouseButton::Left, move |_, _window, cx| {
-                            entity_toggle.update(cx, |this, cx| {
-                                this.reset_flow_state();
-                                this.method = LoginMethod::Otp;
-                                cx.notify();
-                            });
-                        })
-                        .child(mezon_i18n::t(&locale, "common.login.loginByOTP")),
-                );
-            }
-            left_col = left_col.child(row);
+            left_col = left_col.child(
+                div()
+                    .mt_4()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .justify_between()
+                    .child(checkbox),
+            );
         }
 
         let card = div()
@@ -988,22 +1268,6 @@ impl Render for LoginView {
             .child(left_col)
             .child(self.render_qr_panel(&locale, cx));
 
-        let background = window_controls::window_drag_handle(
-            div()
-                .absolute()
-                .inset_0()
-                .bg(linear_gradient(
-                    135.,
-                    linear_color_stop(blue, 0.),
-                    linear_color_stop(purple, 0.5),
-                ))
-                .child(div().absolute().inset_0().bg(linear_gradient(
-                    135.,
-                    linear_color_stop(rgba(0xf9a8d400), 0.5),
-                    linear_color_stop(pink, 1.),
-                ))),
-        );
-
         div()
             .relative()
             .flex()
@@ -1012,9 +1276,28 @@ impl Render for LoginView {
             .items_center()
             .justify_center()
             .px_4()
-            .child(background)
+            .child(login_background())
             .child(card)
     }
+}
+
+pub(super) fn login_background() -> gpui::AnyElement {
+    window_controls::window_drag_handle(
+        div()
+            .absolute()
+            .inset_0()
+            .bg(linear_gradient(
+                135.,
+                linear_color_stop(rgb(0x3b82f6), 0.),
+                linear_color_stop(rgb(0xa855f7), 0.5),
+            ))
+            .child(div().absolute().inset_0().bg(linear_gradient(
+                135.,
+                linear_color_stop(rgba(0xf9a8d400), 0.5),
+                linear_color_stop(rgb(0xf9a8d4), 1.),
+            ))),
+    )
+    .into_any_element()
 }
 
 fn build_qr_images(data: &str) -> Option<(Arc<RenderImage>, Arc<RenderImage>)> {
@@ -1086,7 +1369,7 @@ fn is_rate_limited(err: &anyhow::Error) -> bool {
     chain.contains("HTTP 429") || chain.to_lowercase().contains("too frequently")
 }
 
-fn error_slot(error: Option<&str>) -> gpui::AnyElement {
+pub(super) fn error_slot(error: Option<&str>) -> gpui::AnyElement {
     let mut slot = div()
         .w_full()
         .min_w_0()
@@ -1200,7 +1483,7 @@ fn mask_email(email: &str) -> String {
     }
 }
 
-fn login_button(
+pub(super) fn login_button(
     id: &'static str,
     label: String,
     loading: bool,

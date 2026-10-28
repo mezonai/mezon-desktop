@@ -4,13 +4,13 @@ use std::time::Duration;
 use gpui::MouseButton;
 #[cfg(target_os = "windows")]
 use gpui::WindowControlArea;
-#[cfg(any(target_os = "linux", target_os = "freebsd"))]
-use gpui::{DispatchPhase, MouseMoveEvent, MouseUpEvent, canvas};
 use gpui::{
     AnyElement, AnyWindowHandle, App, Bounds, Context, CursorStyle, Div, Entity, Stateful, Task,
     Window, WindowBackgroundAppearance, WindowBounds, WindowKind, WindowOptions, div, prelude::*,
     px, size,
 };
+#[cfg(any(target_os = "linux", target_os = "freebsd"))]
+use gpui::{DispatchPhase, MouseMoveEvent, MouseUpEvent, canvas};
 use mezon_store::{DesktopDraw, VoiceStore};
 
 use super::native::{NativeRect, NativeWindow, native_window};

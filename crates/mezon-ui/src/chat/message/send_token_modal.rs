@@ -12,6 +12,7 @@ use mezon_store::{
 };
 
 use crate::app::shell::Shell;
+use crate::command_palette::SEARCH_CTRLK_DEBOUNCE_MS;
 use crate::components::primitives::{
     Avatar, Button, ButtonVariants, FocusCycle, Icon, IconName, Input, InputEvent, InputState,
 };
@@ -19,7 +20,6 @@ use crate::theme::ActiveTheme;
 
 use mezon_store::TOKEN_DECIMAL_FACTOR as DECIMAL_FACTOR;
 const MAX_AMOUNT_DIGITS: usize = 15;
-const SEARCH_DEBOUNCE_MS: u64 = 300;
 const RECIPIENT_ROW_PX: f32 = 48.;
 const RECIPIENT_MENU_MAX_PX: f32 = RECIPIENT_ROW_PX * 5.;
 
@@ -298,7 +298,7 @@ impl SendTokenModal {
         }
         self._search_task = cx.spawn(async move |this, cx| {
             cx.background_executor()
-                .timer(Duration::from_millis(SEARCH_DEBOUNCE_MS))
+                .timer(Duration::from_millis(SEARCH_CTRLK_DEBOUNCE_MS))
                 .await;
             let _ = this.update(cx, |this, cx| {
                 let query = this.search.read(cx).value().to_string();
@@ -812,12 +812,7 @@ fn recipient_row(
                 });
             }
         })
-        .child(
-            Avatar::new()
-                .name(candidate.username.clone())
-                .src(candidate.avatar.clone())
-                .size_px(px(28.)),
-        )
+        .child(Avatar::new().src(candidate.avatar.clone()).size_px(px(28.)))
         .child(
             div()
                 .text_sm()

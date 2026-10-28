@@ -544,11 +544,24 @@ impl AppConfig {
         }
         let known = crate::emoji::emoji_source(emoji_id)
             .filter(|src| self.is_own_media_origin(&self.read_media_url(src)));
-        let source = match known.as_deref() {
-            Some(src) => Cow::Borrowed(src),
-            None => Cow::Owned(format!("{}/emojis/{}.webp", self.base_img_url, emoji_id)),
-        };
-        self.imgproxy_url(&source, size, size, "fit")
+        if let Some(src) = known.as_deref() {
+            return self.imgproxy_url(src, size, size, "fit");
+        }
+        let base = self.base_img_url.trim_end_matches('/');
+        let fallback =
+            self.imgproxy_url(&format!("{base}/emojis/{emoji_id}.webp"), size, size, "fit");
+        let mezon_base = self.mezon_cdn_url.trim().trim_end_matches('/');
+        if mezon_base.is_empty() {
+            return fallback;
+        }
+        let primary = self.imgproxy_url(
+            &format!("{mezon_base}/emojis/{emoji_id}.webp"),
+            size,
+            size,
+            "fit",
+        );
+        crate::emoji::set_emoji_url_fallback(primary.clone(), fallback);
+        primary
     }
 
     pub fn attachment_proxy(
@@ -1162,9 +1175,18 @@ mod tests {
     fn stored_attachment_urls_use_the_read_cdn() {
         let cfg = AppConfig::dev_defaults();
         let emoji = cfg.emoji_src("123");
-        assert!(
-            emoji.contains(&format!("{}/emojis/123.webp", cfg.base_img_url)),
-            "every url this app builds is a url something will fetch: {emoji}"
+        assert_eq!(
+            emoji,
+            cfg.imgproxy_url("https://cdn.mezon.ai/emojis/123.webp", 100, 100, "fit")
+        );
+        assert_eq!(
+            crate::emoji::emoji_url_fallback(&emoji),
+            Some(cfg.imgproxy_url(
+                &format!("{}/emojis/123.webp", cfg.base_img_url),
+                100,
+                100,
+                "fit",
+            ))
         );
         assert!(
             cfg.is_own_media_origin(&format!("{}/uploads/photo.png", cfg.base_img_url)),
@@ -1247,14 +1269,33 @@ mod tests {
             emoji("880012", "https://tracker.example/emojis/880012.webp"),
         ]);
 
+        let known = cfg.emoji_src("880011");
         assert_eq!(
-            cfg.emoji_src("880011"),
+            known,
             cfg.imgproxy_url("https://cdn.mezon.ai/emojis/880011.webp", 100, 100, "fit")
         );
+        assert_eq!(crate::emoji::emoji_url_fallback(&known), None);
+
+        let unknown = cfg.emoji_src("880012");
         assert_eq!(
-            cfg.emoji_src("880012"),
-            cfg.imgproxy_url("https://cdn.komu.vn/emojis/880012.webp", 100, 100, "fit")
+            unknown,
+            cfg.imgproxy_url("https://cdn.mezon.ai/emojis/880012.webp", 100, 100, "fit")
         );
+        assert_eq!(
+            crate::emoji::emoji_url_fallback(&unknown),
+            Some(cfg.imgproxy_url("https://cdn.komu.vn/emojis/880012.webp", 100, 100, "fit"))
+        );
+
+        let no_mezon_cdn = AppConfig {
+            mezon_cdn_url: "   ".into(),
+            ..cfg
+        };
+        let base_only = no_mezon_cdn.emoji_src("880013");
+        assert_eq!(
+            base_only,
+            no_mezon_cdn.imgproxy_url("https://cdn.komu.vn/emojis/880013.webp", 100, 100, "fit")
+        );
+        assert_eq!(crate::emoji::emoji_url_fallback(&base_only), None);
     }
 
     #[test]

@@ -216,8 +216,8 @@ impl ClanSidebar {
                 .w_full()
                 .flex()
                 .justify_center()
-                .when(above, |el| el.top_0())
-                .when(!above, |el| el.bottom_0())
+                .when(above, |el| el.top_1())
+                .when(!above, |el| el.bottom_1())
                 .child(
                     mention_float_button(
                         if above {

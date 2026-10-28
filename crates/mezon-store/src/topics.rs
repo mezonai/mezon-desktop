@@ -24,12 +24,14 @@ use crate::presign;
 use crate::realtime::{RealtimeDispatch, RealtimeKind};
 use crate::topic_badges::{TopicBadgeStore, TopicListing};
 use crate::upload_jobs::UploadJob;
+use crate::users_by_user::message_avatar::{
+    MessageAvatarKey, avatar_request_permits, fetch_avatar_message,
+};
 use crate::{AppConfig, CACHE_TTL, ChannelId, ClanId, Message, MessageId, MessageRef, UserId};
 
 const TOPICS_LIMIT: i32 = 50;
-const INBOX_MESSAGE_DIRECTION_AROUND: i32 = 2;
-const INBOX_AVATAR_LOOKUP_LIMIT: u32 = 2;
-const INBOX_AVATAR_LOOKUP_CONCURRENCY: usize = 4;
+const INBOX_AVATAR_LOOKUP_CONCURRENCY: usize =
+    crate::users_by_user::message_avatar::AVATAR_LOOKUP_CONCURRENCY;
 const STREAM_MODE_CHANNEL: i32 = 2;
 const STREAM_MODE_THREAD: i32 = 6;
 const UPDATED_NOTIFY_COALESCE: Duration = Duration::from_millis(100);
@@ -464,9 +466,7 @@ impl TopicsStore {
         Self {
             inbox_message_avatars: Default::default(),
             inbox_message_generation: 0,
-            inbox_avatar_permits: Arc::new(tokio::sync::Semaphore::new(
-                INBOX_AVATAR_LOOKUP_CONCURRENCY,
-            )),
+            inbox_avatar_permits: avatar_request_permits(cx),
             data: TopicsData::default(),
             clan_id: None,
             loading: false,
@@ -2130,26 +2130,16 @@ impl TopicsStore {
                     if !matches!(loading, Ok(true)) {
                         return None;
                     }
-                    let page = if key.0 == parent {
-                        api.list_channel_messages(
-                            clan.get(),
-                            parent.get(),
-                            key.1.get(),
-                            INBOX_MESSAGE_DIRECTION_AROUND,
-                            INBOX_AVATAR_LOOKUP_LIMIT,
-                        )
-                        .await
-                    } else {
-                        api.list_topic_messages(
-                            clan.get(),
-                            parent.get(),
-                            key.0.get(),
-                            key.1.get(),
-                            INBOX_MESSAGE_DIRECTION_AROUND,
-                            INBOX_AVATAR_LOOKUP_LIMIT,
-                        )
-                        .await
-                    };
+                    let page = fetch_avatar_message(
+                        &api,
+                        MessageAvatarKey {
+                            clan_id: clan,
+                            parent_id: parent,
+                            channel_id: key.0,
+                            message_id: key.1,
+                        },
+                    )
+                    .await;
                     Some((key, page))
                 }
             }))
@@ -2160,7 +2150,10 @@ impl TopicsStore {
                     continue;
                 };
                 let state = match page {
-                    Ok(page) => message_avatar_from_messages(key.1, &page.messages),
+                    Ok(Some(message)) => {
+                        message_avatar_from_messages(key.1, std::slice::from_ref(&message))
+                    }
+                    Ok(None) => InboxMessageAvatar::Missing,
                     Err(error) => {
                         tracing::warn!(
                             message_id = key.1.get(),

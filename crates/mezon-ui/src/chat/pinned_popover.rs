@@ -31,7 +31,7 @@ use crate::chat::message::selection::{
 };
 use crate::chat::message::{
     ConfirmUnpinMessageModal, SELECTION_BG, code_block_copy_overlay, heading_line_height,
-    heading_size, open_message_link, pin_link_element, render_ogp_preview,
+    heading_size, inline_code_chip, open_message_link, pin_link_element, render_ogp_preview,
     render_pin_rich_layout_element, render_poll_card_readonly, resolve_message_link_url,
 };
 use crate::components::primitives::text_actions::Copy;
@@ -283,10 +283,8 @@ impl PinnedPopoverPanel {
             || self.pin_cards.iter().zip(&cards).any(|(old, new)| {
                 old.message_id != new.message_id || old.selectable_text != new.selectable_text
             });
-        if selection_stale {
-            if let Ok(mut selection) = self.selection.try_borrow_mut() {
-                selection.clear();
-            }
+        if selection_stale && let Ok(mut selection) = self.selection.try_borrow_mut() {
+            selection.clear();
         }
         let changed_items = self
             .pin_cards
@@ -1035,7 +1033,7 @@ fn render_body(
         .child(body)
 }
 
-fn resolve_pin_avatar_urls(
+pub(crate) fn resolve_pin_avatar_urls(
     pin: &PinnedMessage,
     clan_id: Option<mezon_store::ClanId>,
     channel_id: Option<ChannelId>,
@@ -1095,7 +1093,6 @@ fn pin_card(
     let avatar_fallback = vm.avatar_fallback.clone();
 
     let mut avatar = Avatar::new()
-        .name(&sender_label)
         .with_size(Size::Small)
         .anonymous(vm.is_anonymous && avatar_src.is_none())
         .image_cache(avatar_cache.clone());
@@ -1867,13 +1864,11 @@ fn render_pin_spans(
                 let styled = pin_selectable_segment(text, base, selected.as_ref());
                 push_pin_text_segment(&mut segments, &styled, base..end);
                 row = row.child(
-                    div()
+                    inline_code_chip(theme)
+                        .flex_none()
+                        .whitespace_nowrap()
                         .text_sm()
                         .line_height(rems(1.25))
-                        .px_1()
-                        .rounded_sm()
-                        .bg(code_bg)
-                        .text_color(body_color)
                         .child(styled),
                 );
                 base = end;

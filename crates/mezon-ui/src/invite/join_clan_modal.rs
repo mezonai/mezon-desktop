@@ -1,9 +1,9 @@
 use gpui::{
-    App, ClickEvent, Context, Entity, FocusHandle, Focusable, FontWeight, ObjectFit, Render,
-    SharedString, Subscription, Window, div, img, prelude::*, px,
+    App, ClickEvent, Context, Entity, FocusHandle, Focusable, FontWeight, Global, ObjectFit,
+    Render, SharedString, Subscription, Window, div, img, prelude::*, px,
 };
 use mezon_store::{
-    AppConfig, ChannelId, ClanList, InviteDetails, InviteEvent, InviteState, InviteStore, Settings,
+    AppConfig, ChannelId, ClanId, ClanList, InviteEvent, InviteState, InviteStore, Settings,
 };
 
 use crate::app::shell::Shell;
@@ -16,6 +16,34 @@ use crate::util::imgproxy;
 const MODAL_WIDTH: f32 = 440.;
 const LOGO_PX: f32 = 48.;
 const LOGO_PROXY_PX: u32 = 100;
+
+#[derive(Default)]
+struct PendingInviteClick(Option<Subscription>);
+
+impl Global for PendingInviteClick {}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum InviteClick {
+    GoToClan {
+        clan_id: ClanId,
+        channel_id: ChannelId,
+    },
+    ShowModal,
+    AwaitLoad,
+}
+
+fn invite_click(state: &InviteState, is_member: impl Fn(ClanId) -> bool) -> InviteClick {
+    match state {
+        InviteState::Loaded(details) if details.user_joined || is_member(details.clan_id) => {
+            InviteClick::GoToClan {
+                clan_id: details.clan_id,
+                channel_id: details.channel_id,
+            }
+        }
+        InviteState::Loaded(_) | InviteState::Idle | InviteState::Failed => InviteClick::ShowModal,
+        InviteState::Loading => InviteClick::AwaitLoad,
+    }
+}
 
 pub struct JoinClanModal {
     focus_handle: FocusHandle,
@@ -38,6 +66,46 @@ impl JoinClanModal {
         if Shell::global(cx).read(cx).has_modal() {
             return;
         }
+        cx.default_global::<PendingInviteClick>().0.take();
+        let store = InviteStore::global(cx);
+        store.update(cx, |store, cx| store.ensure_invite(invite_id.clone(), cx));
+        if Self::resolve(&invite_id, cx) {
+            return;
+        }
+        let subscription = cx.subscribe(&store, move |_, _: &InviteEvent, cx| {
+            cx.default_global::<PendingInviteClick>().0.take();
+            Self::resolve(&invite_id, cx);
+        });
+        cx.set_global(PendingInviteClick(Some(subscription)));
+    }
+
+    fn resolve(invite_id: &str, cx: &mut App) -> bool {
+        let action = invite_click(InviteStore::global(cx).read(cx).state(), |id| {
+            ClanList::global(cx).read(cx).clan(id).is_some()
+        });
+        match action {
+            InviteClick::GoToClan {
+                clan_id,
+                channel_id,
+            } => {
+                let locale = Settings::try_global(cx)
+                    .map(|settings| settings.read(cx).language.clone())
+                    .unwrap_or_else(|| "en".to_string());
+                go_to_joined_clan(&locale, clan_id, channel_id, cx);
+                true
+            }
+            InviteClick::ShowModal => {
+                Self::show(invite_id.to_string(), cx);
+                true
+            }
+            InviteClick::AwaitLoad => false,
+        }
+    }
+
+    fn show(invite_id: String, cx: &mut App) {
+        if Shell::global(cx).read(cx).has_modal() {
+            return;
+        }
         let locale: SharedString = Settings::try_global(cx)
             .map(|settings| settings.read(cx).language.clone())
             .unwrap_or_else(|| "en".to_string())
@@ -51,7 +119,7 @@ impl JoinClanModal {
             ];
             Self {
                 focus_handle: cx.focus_handle(),
-                invite_id: invite_id.clone(),
+                invite_id,
                 locale,
                 joining: false,
                 error: None,
@@ -67,7 +135,6 @@ impl JoinClanModal {
                 _subscriptions: subscriptions,
             }
         });
-        store.update(cx, |store, cx| store.ensure_invite(invite_id, cx));
         Shell::global(cx).update(cx, |shell, cx| shell.show_modal(view.into(), cx));
     }
 
@@ -75,31 +142,21 @@ impl JoinClanModal {
         Shell::global(cx).update(cx, |shell, cx| shell.close_modal(cx));
     }
 
-    fn details(&self, cx: &App) -> Option<InviteDetails> {
-        match InviteStore::global(cx).read(cx).state() {
-            InviteState::Loaded(details) => Some(details.clone()),
-            _ => None,
-        }
-    }
-
     fn accept(&mut self, cx: &mut Context<Self>) {
         if self.joining {
             return;
         }
-        if let Some(details) = self.details(cx) {
-            let joined = details.user_joined
-                || ClanList::global(cx)
-                    .read(cx)
-                    .clan(details.clan_id)
-                    .is_some();
-            if joined {
-                let message =
-                    mezon_i18n::t(&self.locale, "invitation.acceptModal.toast.alreadyMember");
-                Shell::global(cx).update(cx, |shell, cx| shell.info(message, cx));
-                open_clan(details.clan_id, details.channel_id, cx);
-                Self::close(cx);
-                return;
-            }
+        let action = invite_click(InviteStore::global(cx).read(cx).state(), |id| {
+            ClanList::global(cx).read(cx).clan(id).is_some()
+        });
+        if let InviteClick::GoToClan {
+            clan_id,
+            channel_id,
+        } = action
+        {
+            go_to_joined_clan(&self.locale, clan_id, channel_id, cx);
+            Self::close(cx);
+            return;
         }
         let Some(domain) = AppConfig::try_global(cx).map(|config| config.domain_url.clone()) else {
             return;
@@ -130,6 +187,12 @@ impl JoinClanModal {
         })
         .detach();
     }
+}
+
+fn go_to_joined_clan(locale: &str, clan_id: ClanId, channel_id: ChannelId, cx: &mut App) {
+    let message = mezon_i18n::t(locale, "invitation.acceptModal.toast.alreadyMember");
+    Shell::global(cx).update(cx, |shell, cx| shell.info(message, cx));
+    open_clan(clan_id, channel_id, cx);
 }
 
 fn open_clan(clan_id: mezon_store::ClanId, channel_id: ChannelId, cx: &mut App) {
@@ -337,5 +400,69 @@ impl Render for JoinClanModal {
                             ),
                     ),
             )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use mezon_store::InviteDetails;
+
+    use super::*;
+
+    fn loaded(user_joined: bool) -> InviteState {
+        InviteState::Loaded(InviteDetails {
+            clan_id: ClanId(42),
+            channel_id: ChannelId(99),
+            clan_name: "Test Clan".to_string(),
+            clan_logo: String::new(),
+            member_count: 5,
+            user_joined,
+        })
+    }
+
+    #[test]
+    fn invite_click_go_to_clan_when_user_joined() {
+        let state = loaded(true);
+        assert_eq!(
+            invite_click(&state, |_| false),
+            InviteClick::GoToClan {
+                clan_id: ClanId(42),
+                channel_id: ChannelId(99),
+            }
+        );
+    }
+
+    #[test]
+    fn invite_click_go_to_clan_when_in_clan_list() {
+        let state = loaded(false);
+        assert_eq!(
+            invite_click(&state, |id| id == ClanId(42)),
+            InviteClick::GoToClan {
+                clan_id: ClanId(42),
+                channel_id: ChannelId(99),
+            }
+        );
+    }
+
+    #[test]
+    fn invite_click_shows_modal_when_not_member() {
+        let state = loaded(false);
+        assert_eq!(invite_click(&state, |_| false), InviteClick::ShowModal);
+    }
+
+    #[test]
+    fn invite_click_non_loaded_states() {
+        assert_eq!(
+            invite_click(&InviteState::Loading, |_| true),
+            InviteClick::AwaitLoad
+        );
+        assert_eq!(
+            invite_click(&InviteState::Failed, |_| true),
+            InviteClick::ShowModal
+        );
+        assert_eq!(
+            invite_click(&InviteState::Idle, |_| true),
+            InviteClick::ShowModal
+        );
     }
 }

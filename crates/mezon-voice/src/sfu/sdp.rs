@@ -155,6 +155,7 @@ pub fn directions_by_mid(sdp: &str) -> std::collections::HashMap<String, String>
     out
 }
 
+#[allow(dead_code)]
 pub fn codec_summary(sdp: &str) -> String {
     let mut out = String::new();
     for section in split_sections(sdp).media {
@@ -266,6 +267,7 @@ fn strip_bitrate_hints(fmtp: &str) -> String {
         .join(";")
 }
 
+#[allow(dead_code)]
 pub fn setup_roles(sdp: &str) -> String {
     let mut seen: Vec<&str> = Vec::new();
     for line in sdp.lines() {
@@ -284,6 +286,7 @@ pub fn setup_roles(sdp: &str) -> String {
     }
 }
 
+#[allow(dead_code)]
 pub fn ice_ufrags(sdp: &str) -> String {
     let mut seen: Vec<&str> = Vec::new();
     for line in sdp.lines() {

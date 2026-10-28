@@ -1,4 +1,5 @@
 pub use mezon_client::transport::OutgoingOgp;
+use mezon_client::transport::trim_trailing_url_punctuation;
 pub use mezon_client::{OgpResult, fetch_invite_preview, fetch_ogp};
 
 const EXCLUDED_HOSTS: &[&str] = &[
@@ -9,8 +10,6 @@ const EXCLUDED_HOSTS: &[&str] = &[
     "fb.com",
     "tiktok.com",
 ];
-
-const TRAILING_PUNCTUATION: &[char] = &['.', ',', ';', ':', '!', '?', ')', ']', '}', '\'', '"'];
 
 pub fn invite_id_from_url(url: &str) -> Option<String> {
     const NEEDLE: &[u8] = b"/invite/";
@@ -36,24 +35,6 @@ pub fn first_previewable_url(text: &str, internal_domain: Option<&str>) -> Optio
         .find(|url| is_previewable(url, internal_domain))
 }
 
-fn trim_trailing_punctuation(token: &str) -> &str {
-    let mut unmatched_close = token
-        .matches(')')
-        .count()
-        .saturating_sub(token.matches('(').count());
-    let mut end = token.len();
-    while let Some(ch) = token[..end].chars().next_back() {
-        if !TRAILING_PUNCTUATION.contains(&ch) || (ch == ')' && unmatched_close == 0) {
-            break;
-        }
-        if ch == ')' {
-            unmatched_close -= 1;
-        }
-        end -= ch.len_utf8();
-    }
-    &token[..end]
-}
-
 fn extract_urls(text: &str) -> Vec<String> {
     let mut urls = Vec::new();
     let mut rest = text;
@@ -62,7 +43,7 @@ fn extract_urls(text: &str) -> Vec<String> {
         let end = from
             .find(|c: char| c.is_whitespace() || matches!(c, '<' | '>' | '"' | '|' | '`'))
             .unwrap_or(from.len());
-        let token = trim_trailing_punctuation(&from[..end]);
+        let token = trim_trailing_url_punctuation(&from[..end]);
         if token.len() > "https://".len() {
             urls.push(token.to_string());
         }

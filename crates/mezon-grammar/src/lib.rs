@@ -17,7 +17,8 @@ pub mod trie;
 
 pub use client::{KeystrokeEvent, MAX_CORRECTION_CHAR_COUNT, MezonGrammarClient};
 pub use pronoun::{
-    SUPPORTED_PRONOUNS, extract_target_pronoun, generate_dynamic_replies, render_dynamic_template,
+    SUPPORTED_PRONOUNS, extract_mentioned_pronoun, extract_target_pronoun, generate_dynamic_replies,
+    is_unreplyable_or_ack_message, mask_non_pronouns, render_dynamic_template,
     resolve_pronoun_pair, suggest_quick_replies,
 };
 pub use rules::{CorrectionEdit, CorrectionResult};

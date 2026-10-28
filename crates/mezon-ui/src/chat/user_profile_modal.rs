@@ -338,7 +338,6 @@ impl Render for UserProfileModal {
 
         let member_since = format_member_since(created_at);
         let mut avatar_view = Avatar::new()
-            .name(display_name.clone())
             .size_px(px(96.))
             .image_cache(self.avatar_image_cache.clone());
         if !avatar.is_empty() {

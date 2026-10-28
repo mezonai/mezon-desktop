@@ -245,6 +245,10 @@ impl PlayerImpl {
             PlayerBackend::Webm(player) => player.failed(),
         }
     }
+
+    pub fn set_live_offset(&self, _seconds: f64) {}
+
+    pub fn set_audio_output_device(&self, _uid: Option<&str>) {}
 }
 
 impl MediaFoundationPlayer {

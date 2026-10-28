@@ -207,7 +207,7 @@ fn render_direct_unread_item(item: &DirectUnreadItem, animate_out: bool) -> AnyE
             .object_fit(gpui::ObjectFit::Cover)
             .into_any_element()
     } else {
-        let mut avatar = Avatar::new().name(item.label.clone()).size_px(avatar_size);
+        let mut avatar = Avatar::new().size_px(avatar_size);
         if !item.avatar_src.is_empty() {
             avatar = avatar.src(item.avatar_src.clone());
             if !item.avatar_raw.is_empty() && item.avatar_raw != item.avatar_src {

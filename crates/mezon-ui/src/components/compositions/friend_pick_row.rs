@@ -51,9 +51,7 @@ pub fn render_friend_pick_row(
     selected: bool,
     on_toggle: impl Fn(UserId, &mut App) + 'static,
 ) -> AnyElement {
-    let mut avatar = crate::components::primitives::Avatar::new()
-        .name(row.name.clone())
-        .size_px(px(32.));
+    let mut avatar = crate::components::primitives::Avatar::new().size_px(px(32.));
     if !row.avatar_src.is_empty() {
         avatar = avatar.src(row.avatar_src.clone());
         if !row.avatar_raw.is_empty() && row.avatar_raw != row.avatar_src {

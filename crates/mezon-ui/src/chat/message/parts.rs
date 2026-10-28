@@ -373,13 +373,11 @@ fn first_non_empty<'a>(preferred: &'a str, fallback: &'a str) -> &'a str {
 }
 
 pub fn avatar_element(msg: &Message, ctx: &RowCtx, cx: &App) -> AnyElement {
-    let display_name = resolve_message_display_name(msg, ctx, cx);
     let mut avatar = Avatar::new()
-        .name(display_name)
         .with_size(Size::Small)
         .image_cache(ctx.avatar_cache.clone());
     let (raw_url, proxied) = if mezon_store::is_anonymous_sender_id(&msg.sender_id, cx) {
-        avatar = avatar.skeleton(true);
+        avatar = avatar.pending(msg.is_sending());
         if msg.avatar_url.is_empty() {
             return avatar.anonymous(!msg.is_sending()).into_any_element();
         }
@@ -589,18 +587,15 @@ pub fn render_reply(msg: &Message, reference: &MessageReference, ctx: &RowCtx) -
         resolve_reference_identity(reference, is_anonymous, ctx, ctx.app);
     let avatar = if is_anonymous && sender_avatar.is_empty() {
         Avatar::new()
-            .name(sender_name.clone())
             .size_px(px(20.))
             .anonymous(true)
             .image_cache(ctx.avatar_cache.clone())
     } else if sender_avatar.is_empty() {
         Avatar::new()
-            .name(sender_name.clone())
             .size_px(px(20.))
             .image_cache(ctx.avatar_cache.clone())
     } else {
         Avatar::new()
-            .name(sender_name.clone())
             .src(sender_avatar)
             .size_px(px(20.))
             .image_cache(ctx.avatar_cache.clone())

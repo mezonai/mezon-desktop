@@ -1499,6 +1499,30 @@ const GALLERY_PREVIEW_DECODE_MAX_PX: u32 = 768;
 const STICKER_DECODE_MAX_PX: u32 = 160;
 const STICKER_ANIMATION_MAX_BYTES: u64 = 2 * 1024 * 1024;
 
+async fn fetch_avatar_bytes(
+    client: &Arc<dyn gpui::http_client::HttpClient>,
+    uri: gpui::SharedUri,
+) -> Result<Vec<u8>, ImageCacheError> {
+    use anyhow::Context as _;
+
+    let mut response = client
+        .get(uri.as_ref(), ().into(), true)
+        .await
+        .with_context(|| format!("loading avatar from {uri:?}"))?;
+    let body = read_body_limited(&mut response, AVATAR_FETCH_MAX_BYTES).await?;
+    if !response.status().is_success() {
+        let mut body = String::from_utf8_lossy(&body).into_owned();
+        let first_line = body.lines().next().unwrap_or("").trim_end();
+        body.truncate(first_line.len());
+        return Err(ImageCacheError::BadStatus {
+            uri,
+            status: response.status(),
+            body,
+        });
+    }
+    Ok(body)
+}
+
 /// An [`Asset`] loader for avatars that, unlike GPUI's stock [`ImageAssetLoader`],
 /// decodes **only the first frame** and **downscales** to avatar size before
 /// building the `RenderImage`.
@@ -1530,26 +1554,20 @@ fn load_avatar_scaled(
                 }
                 std::fs::read(uri.as_ref())?
             }
-            Resource::Uri(uri) => {
-                use anyhow::Context as _;
-
-                let mut response = client
-                    .get(uri.as_ref(), ().into(), true)
-                    .await
-                    .with_context(|| format!("loading avatar from {uri:?}"))?;
-                let body = read_body_limited(&mut response, AVATAR_FETCH_MAX_BYTES).await?;
-                if !response.status().is_success() {
-                    let mut body = String::from_utf8_lossy(&body).into_owned();
-                    let first_line = body.lines().next().unwrap_or("").trim_end();
-                    body.truncate(first_line.len());
-                    return Err(ImageCacheError::BadStatus {
-                        uri,
-                        status: response.status(),
-                        body,
-                    });
+            Resource::Uri(uri) => match fetch_avatar_bytes(&client, uri.clone()).await {
+                Ok(body) => body,
+                Err(err @ ImageCacheError::BadStatus { .. }) => {
+                    let Some(fallback) = mezon_store::emoji_url_fallback(uri.as_ref()) else {
+                        return Err(err);
+                    };
+                    match fetch_avatar_bytes(&client, fallback.into()).await {
+                        Ok(body) => body,
+                        Err(ImageCacheError::BadStatus { .. }) => return Err(err),
+                        Err(transport) => return Err(transport),
+                    }
                 }
-                body
-            }
+                Err(err) => return Err(err),
+            },
             Resource::Embedded(path) => match asset_source.load(&path).ok().flatten() {
                 Some(data) => data.to_vec(),
                 None => {
@@ -3703,5 +3721,79 @@ mod tests {
             "dropped frames must have their delay folded into the survivors, so the animation \
              still plays over its original duration"
         );
+    }
+
+    #[gpui::test]
+    fn emoji_loader_falls_back_to_cloudflare_when_minio_returns_bad_status(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        use image::ImageEncoder as _;
+
+        let pixels = image::RgbaImage::from_pixel(16, 16, image::Rgba([10, 20, 30, 255]));
+        let mut webp = Vec::new();
+        image::codecs::webp::WebPEncoder::new_lossless(&mut webp)
+            .write_image(
+                pixels.as_raw(),
+                pixels.width(),
+                pixels.height(),
+                image::ExtendedColorType::Rgba8,
+            )
+            .expect("webp encodes");
+
+        let primary = "https://imgproxy.komu.vn/sig/rs:fit:100:100:1/mb:2097152/plain/https://cdn.mezon.ai/emojis/fallback-ok.webp@webp";
+        let fallback = "https://imgproxy.komu.vn/sig/rs:fit:100:100:1/mb:2097152/plain/https://cdn.komu.vn/emojis/fallback-ok.webp@webp";
+        mezon_store::set_emoji_url_fallback(primary.to_string(), fallback.to_string());
+
+        let both_missing_primary = "https://imgproxy.komu.vn/sig/rs:fit:100:100:1/mb:2097152/plain/https://cdn.mezon.ai/emojis/both-missing.webp@webp";
+        let both_missing_fallback = "https://imgproxy.komu.vn/sig/rs:fit:100:100:1/mb:2097152/plain/https://cdn.komu.vn/emojis/both-missing.webp@webp";
+        mezon_store::set_emoji_url_fallback(
+            both_missing_primary.to_string(),
+            both_missing_fallback.to_string(),
+        );
+
+        cx.update(|cx| {
+            cx.http_client().as_fake().replace_handler(move |_, req| {
+                let uri = req.uri().to_string();
+                let body = webp.clone();
+                async move {
+                    if uri == fallback {
+                        Ok(gpui::http_client::Response::builder()
+                            .status(200)
+                            .body(body.into())
+                            .unwrap())
+                    } else if uri == both_missing_fallback {
+                        Ok(gpui::http_client::Response::builder()
+                            .status(503)
+                            .body("fallback down".into())
+                            .unwrap())
+                    } else {
+                        Ok(gpui::http_client::Response::builder()
+                            .status(404)
+                            .body("primary missing".into())
+                            .unwrap())
+                    }
+                }
+            });
+        });
+
+        let loaded = cx.update(|cx| {
+            futures::executor::block_on(EmojiImageLoader::load(Resource::Uri(primary.into()), cx))
+        });
+        assert!(loaded.is_ok());
+
+        let failed = cx.update(|cx| {
+            futures::executor::block_on(EmojiImageLoader::load(
+                Resource::Uri(both_missing_primary.into()),
+                cx,
+            ))
+        });
+        match failed {
+            Err(ImageCacheError::BadStatus { uri, status, body }) => {
+                assert_eq!(uri.as_ref(), both_missing_primary);
+                assert_eq!(status.as_u16(), 404);
+                assert_eq!(body, "primary missing");
+            }
+            other => panic!("expected original BadStatus, got {other:?}"),
+        }
     }
 }

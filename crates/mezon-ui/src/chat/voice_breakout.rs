@@ -174,6 +174,15 @@ fn can_create_room_count(count: u32, available_idle: u32) -> bool {
     (1..=MAX_BREAKOUT_ROOMS).contains(&count) && count <= available_idle
 }
 
+fn idle_channels_warning(locale: &str, available_idle: u32) -> String {
+    if available_idle == 0 {
+        mezon_i18n::t(locale, "channelVoice.breakout.noIdleChannels").to_string()
+    } else {
+        mezon_i18n::t(locale, "channelVoice.breakout.notEnoughIdleChannels")
+            .replace("{{count}}", &available_idle.to_string())
+    }
+}
+
 fn can_open_selected_rooms(
     rooms: &[BreakoutRoomItem],
     idle_channels: &[(ChannelId, SharedString)],
@@ -1443,11 +1452,12 @@ impl BreakoutRoomsModal {
                             )),
                     )
                     .when(not_enough_rooms, |el| {
-                        el.child(div().text_xs().text_color(danger_color).child(format!(
-                            "{} ({})",
-                            mezon_i18n::t(locale, "channelVoice.breakout.notEnoughRooms"),
-                            available_rooms
-                        )))
+                        el.child(
+                            div()
+                                .text_xs()
+                                .text_color(danger_color)
+                                .child(idle_channels_warning(locale, available_rooms)),
+                        )
                     })
                     .child(
                         h_flex()
@@ -2460,9 +2470,9 @@ mod tests {
     use super::{
         BreakoutRoomItem, ListRow, MAX_BREAKOUT_ROOMS, build_list_rows, build_manual_assignments,
         can_create_room_count, can_open_breakout, can_open_selected_rooms, delete_last_room,
-        group_members_by_room, is_eligible_idle_voice_channel, pick_next_unused_idle_channel,
-        place_unassigned_participants, rebind_rooms_to_idle_prefix, sort_and_label_idle_channels,
-        toggle_participant_room,
+        group_members_by_room, idle_channels_warning, is_eligible_idle_voice_channel,
+        pick_next_unused_idle_channel, place_unassigned_participants, rebind_rooms_to_idle_prefix,
+        sort_and_label_idle_channels, toggle_participant_room,
     };
 
     fn room_counts(
@@ -2799,11 +2809,29 @@ mod tests {
                 "channelVoice.breakout.moveTo",
                 "channelVoice.breakout.exchange",
                 "channelVoice.breakout.notEnoughRooms",
+                "channelVoice.breakout.notEnoughIdleChannels",
+                "channelVoice.breakout.noIdleChannels",
             ] {
                 let text = mezon_i18n::t(locale, key);
                 assert_ne!(text, key, "{locale} is missing {key}");
                 assert!(!text.is_empty(), "{locale} has empty {key}");
             }
+        }
+    }
+
+    #[test]
+    fn idle_channels_warning_names_the_free_channel_count() {
+        for locale in [
+            "en", "vi", "ru", "ukr", "es", "tt", "de", "it", "pt", "jpn", "pl", "kr", "swe", "blr",
+            "fr", "nl",
+        ] {
+            let some = idle_channels_warning(locale, 2);
+            assert!(some.contains('2'), "{locale}: {some}");
+            assert!(!some.contains("{{count}}"), "{locale}: {some}");
+            assert_eq!(
+                idle_channels_warning(locale, 0),
+                mezon_i18n::t(locale, "channelVoice.breakout.noIdleChannels")
+            );
         }
     }
 

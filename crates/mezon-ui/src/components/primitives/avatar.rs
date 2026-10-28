@@ -6,7 +6,6 @@ use crate::theme::ActiveTheme;
 #[derive(IntoElement)]
 pub struct Avatar {
     src: Option<SharedString>,
-    name: Option<SharedString>,
     size: Size,
     custom_size: Option<Pixels>,
     border_color: Option<Hsla>,
@@ -16,16 +15,16 @@ pub struct Avatar {
     image_cache: Option<gpui::Entity<crate::image_cache::LruImageCache>>,
     is_anonymous: bool,
     group_default: bool,
-    skeleton: bool,
+    pending: bool,
 }
 
 const ANONYMOUS_AVATAR_ICON: &str = "icons/anonymous-avatar.svg";
+const USER_AVATAR_ICON: &str = "icons/avatar-user.svg";
 
 impl Avatar {
     pub fn new() -> Self {
         Self {
             src: None,
-            name: None,
             size: Size::Medium,
             custom_size: None,
             border_color: None,
@@ -35,7 +34,7 @@ impl Avatar {
             image_cache: None,
             is_anonymous: false,
             group_default: false,
-            skeleton: false,
+            pending: false,
         }
     }
 
@@ -60,8 +59,8 @@ impl Avatar {
         self
     }
 
-    pub fn skeleton(mut self, skeleton: bool) -> Self {
-        self.skeleton = skeleton;
+    pub fn pending(mut self, pending: bool) -> Self {
+        self.pending = pending;
         self
     }
 
@@ -77,11 +76,6 @@ impl Avatar {
 
     pub fn fallback_src(mut self, src: impl Into<SharedString>) -> Self {
         self.fallback_src = Some(src.into());
-        self
-    }
-
-    pub fn name(mut self, name: impl Into<SharedString>) -> Self {
-        self.name = Some(name.into());
         self
     }
 
@@ -235,10 +229,6 @@ pub(crate) fn clipped_initials_tile(
         .into_any_element()
 }
 
-fn initials_circle(d: Pixels, bg: Hsla, text_color: Hsla, initials: String) -> AnyElement {
-    initials_tile(d, None, bg, text_color, initials)
-}
-
 fn anonymous_circle(d: Pixels) -> AnyElement {
     div()
         .flex()
@@ -252,12 +242,22 @@ fn anonymous_circle(d: Pixels) -> AnyElement {
         .into_any_element()
 }
 
-fn skeleton_circle(d: Pixels, fill: Hsla) -> AnyElement {
+fn loading_circle(d: Pixels, fill: Hsla, border: Hsla) -> AnyElement {
     div()
         .size(d)
         .flex_shrink_0()
         .rounded_full()
         .bg(fill)
+        .border_1()
+        .border_color(border)
+        .into_any_element()
+}
+
+pub(crate) fn default_user_avatar(size: Pixels, corner_radius: Pixels) -> AnyElement {
+    img(USER_AVATAR_ICON)
+        .size(size)
+        .rounded(corner_radius)
+        .object_fit(gpui::ObjectFit::Cover)
         .into_any_element()
 }
 
@@ -322,18 +322,13 @@ impl RenderOnce for Avatar {
             }
         });
 
-        let name = self.name.clone().unwrap_or_default();
-        let bg = avatar_color(name.as_ref());
-        let text_color = avatar_text_color(bg);
         let element_bg = Hsla::from(cx.theme().bg_tertiary);
-        let initials = name_initials(name.as_ref());
         let is_anonymous = self.is_anonymous;
         let group_default = self.group_default;
-        let skeleton_bg = self.skeleton.then(|| Hsla::from(cx.theme().bg_hover));
-        let loading_circle = move |initials: String| match skeleton_bg {
-            Some(fill) => skeleton_circle(image_size, fill),
-            None => initials_circle(image_size, bg, text_color, initials),
-        };
+        let loading_bg = Hsla::from(cx.theme().bg_hover);
+        let loading_border = Hsla::from(cx.theme().text_muted);
+        let loading = move || loading_circle(image_size, loading_bg, loading_border);
+        let fallback = move || default_user_avatar(image_size, image_size / 2.);
 
         div()
             .size(container_size)
@@ -343,59 +338,39 @@ impl RenderOnce for Avatar {
                 this.border(border_width).border_color(color)
             })
             .image_cache(avatar_cache)
-            .child(match self.src {
-                _ if is_anonymous => anonymous_circle(image_size),
-                Some(src) => {
-                    let loading_initials = initials.clone();
-                    let fallback_initials = initials.clone();
-                    let raw_fallback = self.fallback_src.clone();
-                    let proxied = src.clone();
-                    let grayscale = self.grayscale;
-                    clipped_image(
-                        image_size,
-                        src,
-                        grayscale,
-                        element_bg,
-                        move || loading_circle(loading_initials.clone()),
-                        move || {
+            .child(
+                match self
+                    .src
+                    .filter(|src| !src.is_empty())
+                    .or_else(|| self.fallback_src.clone().filter(|src| !src.is_empty()))
+                {
+                    _ if is_anonymous => anonymous_circle(image_size),
+                    Some(src) => {
+                        let raw_fallback = self.fallback_src.clone();
+                        let proxied = src.clone();
+                        let grayscale = self.grayscale;
+                        clipped_image(image_size, src, grayscale, element_bg, loading, move || {
                             if let Some(raw) = raw_fallback.clone()
                                 && !raw.is_empty()
                                 && raw.as_ref() != proxied.as_ref()
                             {
                                 return clipped_image(
-                                    image_size,
-                                    raw,
-                                    grayscale,
-                                    element_bg,
-                                    {
-                                        let retry_loading = fallback_initials.clone();
-                                        move || loading_circle(retry_loading.clone())
-                                    },
-                                    {
-                                        let final_initials = fallback_initials.clone();
-                                        move || {
-                                            initials_circle(
-                                                image_size,
-                                                bg,
-                                                text_color,
-                                                final_initials.clone(),
-                                            )
-                                        }
-                                    },
+                                    image_size, raw, grayscale, element_bg, loading, fallback,
                                 );
                             }
-                            initials_circle(image_size, bg, text_color, fallback_initials.clone())
-                        },
-                    )
-                }
-                None if group_default => group_default_circle(image_size),
-                None => loading_circle(initials),
-            })
+                            fallback()
+                        })
+                    }
+                    None if group_default => group_default_circle(image_size),
+                    None if self.pending => loading(),
+                    None => fallback(),
+                },
+            )
             .children(self.indicator.map(|indicator| div().child(indicator)))
     }
 }
 
-/// Avatar fallback palette, 1:1 with mezon-react `avatarColors`. The background is picked by
+/// Clan initials fallback palette, 1:1 with mezon-react `avatarColors`. The background is picked by
 /// `firstChar.charCodeAt(0) % 7`, matching the web client exactly.
 const AVATAR_COLORS: [u32; 7] = [
     0xade603, 0x00b2cc, 0xfda63c, 0xe16dcc, 0xe8467b, 0x9c7cfd, 0x22e2b3,
@@ -421,4 +396,47 @@ pub(crate) fn name_initials(name: &str) -> String {
     first_upper_char(name)
         .map(|c| c.to_string())
         .unwrap_or_else(|| "?".to_string())
+}
+
+#[cfg(test)]
+mod avatar_tests {
+    use std::sync::Arc;
+
+    use super::USER_AVATAR_ICON;
+    use crate::util::assets::Assets;
+
+    #[test]
+    fn default_avatar_remains_visible_on_theme_surfaces() {
+        let asset = Assets::get(USER_AVATAR_ICON).expect("default user avatar is embedded");
+        let renderer = gpui::SvgRenderer::new(Arc::new(Assets));
+        let image = renderer
+            .render_single_frame(&asset.data, 1.0)
+            .expect("default user avatar renders");
+        let pixels = image.as_bytes(0).expect("avatar has pixels");
+        for name in [
+            "dark",
+            "light",
+            "purple",
+            "abyss",
+            "red_dark",
+            "sunrise",
+            "sunset",
+            "cisher",
+            "berrynade",
+        ] {
+            let theme = crate::theme::resolve_theme(name);
+            for background in [theme.surfaces.primary.solid, theme.bg_tertiary] {
+                let visible_pixels = pixels
+                    .chunks_exact(4)
+                    .filter(|pixel| {
+                        pixel[3] > 240 && (f32::from(pixel[1]) / 255. - background.g).abs() > 0.2
+                    })
+                    .count();
+                assert!(
+                    visible_pixels >= 20,
+                    "avatar is indistinguishable on {name}"
+                );
+            }
+        }
+    }
 }

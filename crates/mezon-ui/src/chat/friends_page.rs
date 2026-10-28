@@ -1322,7 +1322,6 @@ fn render_friend_row(
     let state = row.state;
 
     let mut avatar = Avatar::new()
-        .name(row.label.clone())
         .size_px(px(AVATAR_SIZE))
         .image_cache(avatar_cache.clone());
     if !row.avatar_src.is_empty() {
@@ -1481,7 +1480,6 @@ fn render_activity_row(
             avatar_raw,
         } => {
             let mut avatar = Avatar::new()
-                .name(label.clone())
                 .size_px(px(AVATAR_SIZE))
                 .image_cache(avatar_cache.clone());
             if !avatar_src.is_empty() {

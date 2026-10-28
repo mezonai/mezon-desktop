@@ -36,9 +36,9 @@ pub(crate) fn mention_float_button(
         .shadow_lg()
         .cursor_pointer()
         .when(compact, |el| {
-            el.px_1p5()
-                .py_0p5()
-                .text_size(px(9.))
+            el.px_2()
+                .py_1()
+                .text_size(px(10.))
                 .font_weight(FontWeight::BOLD)
                 .hover(|style| style.opacity(0.9))
         })
@@ -157,7 +157,7 @@ mod tests {
                             .relative()
                             .font_family(crate::theme::ui_font_family(cx))
                             .font_weight(FontWeight::BOLD)
-                            .text_size(px(9.))
+                            .text_size(px(10.))
                             .child(labels.short.clone())
                             .child(
                                 gpui::canvas(
@@ -170,7 +170,7 @@ mod tests {
                     },
                 );
                 assert!(
-                    measured.get() > px(0.) && measured.get() + px(12.) <= px(72.),
+                    measured.get() > px(0.) && measured.get() + px(16.) <= px(72.),
                     "{locale}: {:?}",
                     measured.get()
                 );

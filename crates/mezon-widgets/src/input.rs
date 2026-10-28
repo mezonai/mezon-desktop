@@ -1247,7 +1247,7 @@ impl EntityInputHandler for InputState {
         _cx: &mut Context<Self>,
     ) -> Option<ImeSurroundingText> {
         if self.masked {
-            return None;
+            return Some(ImeSurroundingText::from_selection("", 0..0, false, None));
         }
         Some(ImeSurroundingText::from_selection(
             &self.content,
@@ -1264,6 +1264,9 @@ impl EntityInputHandler for InputState {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if self.masked {
+            return;
+        }
         let range = surrounding_delete_range(
             &self.content,
             &self.selected_range,

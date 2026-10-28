@@ -30,7 +30,7 @@ pub(crate) fn resolve_stream_display(
     clan_id: Option<ClanId>,
     m: &StreamMember,
 ) -> ResolvedMemberDisplay {
-    resolve_user_display(cx, clan_id, m.user_id, &m.display_name, "")
+    resolve_user_display(cx, clan_id, m.user_id, &m.display_name, &m.avatar)
 }
 
 pub(crate) fn resolve_user_display(

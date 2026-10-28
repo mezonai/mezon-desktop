@@ -299,6 +299,20 @@ impl Shell {
         }
     }
 
+    pub fn error_replace(
+        &mut self,
+        key: impl Into<SharedString>,
+        message: impl Into<SharedString>,
+        cx: &mut Context<Self>,
+    ) {
+        let key = key.into();
+        self.toasts.retain(|t| t.key.as_ref() != Some(&key));
+        self.toast(ToastKind::Error, message, cx);
+        if let Some(item) = self.toasts.last_mut() {
+            item.key = Some(key);
+        }
+    }
+
     /// Show `view` as the active modal (backdrop click dismisses). The view renders its own card.
     pub fn show_modal(&mut self, view: AnyView, cx: &mut Context<Self>) {
         self.modal_underlay = None;
@@ -1747,6 +1761,48 @@ mod tests {
             clan_id: ClanId(7),
             channel_id: ChannelId(42),
         }
+    }
+
+    #[gpui::test]
+    fn a_repeated_error_restarts_its_toast_instead_of_stacking(cx: &mut TestAppContext) {
+        let shell = cx.update(|cx| {
+            crate::router::Router::init(cx);
+            Shell::init(cx)
+        });
+        let keyed = |cx: &mut TestAppContext| {
+            cx.read(|cx| {
+                shell
+                    .read(cx)
+                    .toasts
+                    .iter()
+                    .filter(|t| t.key.as_deref() == Some("password"))
+                    .count()
+            })
+        };
+        cx.update(|cx| {
+            shell.update(cx, |shell, cx| {
+                shell.error_replace("password", "failed", cx);
+                shell.error_replace("password", "failed", cx);
+                shell.error_replace("other", "else", cx);
+            });
+        });
+        assert_eq!(keyed(cx), 1);
+        assert_eq!(cx.read(|cx| shell.read(cx).toasts.len()), 2);
+
+        cx.executor()
+            .advance_clock(TOAST_TTL - Duration::from_secs(1));
+        cx.update(|cx| {
+            shell.update(cx, |shell, cx| {
+                shell.error_replace("password", "failed", cx)
+            });
+        });
+        cx.executor().advance_clock(Duration::from_secs(2));
+        cx.run_until_parked();
+        assert_eq!(keyed(cx), 1);
+
+        cx.executor().advance_clock(TOAST_TTL);
+        cx.run_until_parked();
+        assert_eq!(keyed(cx), 0);
     }
 
     #[gpui::test]

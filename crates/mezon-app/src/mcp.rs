@@ -1111,6 +1111,7 @@ fn build_context(cx: &App, auth_state: &gpui::Entity<AuthState>) -> Value {
             });
         }
         AuthState::OtpRequested { .. } => "otp_requested",
+        AuthState::UsernameRequired(_) => "username_required",
     };
     json!({
         "route": route,

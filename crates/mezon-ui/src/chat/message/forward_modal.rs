@@ -17,7 +17,7 @@ use mezon_store::{
 };
 
 use crate::app::shell::Shell;
-use crate::command_palette::FILTER_DEBOUNCE_MS;
+use crate::command_palette::SEARCH_CTRLK_DEBOUNCE_MS;
 use crate::components::primitives::{
     Avatar, Button, ButtonVariants, Checkbox, Icon, IconName, Input, InputEvent, InputState,
     Sizable, Size, Spinner,
@@ -891,7 +891,7 @@ impl ForwardMessageModal {
         self.server_search_pending = true;
         self._server_search_task = cx.spawn(async move |this, cx| {
             cx.background_executor()
-                .timer(Duration::from_millis(FILTER_DEBOUNCE_MS))
+                .timer(Duration::from_millis(SEARCH_CTRLK_DEBOUNCE_MS))
                 .await;
             let Ok(search) = this.update(cx, |this, cx| {
                 this.lost_channels.clear();
@@ -1399,10 +1399,8 @@ fn render_option_row(
                 .into_any_element(),
         )
     } else {
-        // Not every user has an avatar — `Avatar` falls back to the name initials,
-        // and retries the raw URL if the imgproxy one fails (same as FriendsPage).
+        // Retry the raw avatar URL if imgproxy fails, then show the default user icon.
         let mut avatar = Avatar::new()
-            .name(option.label.clone())
             .size_px(px(16.))
             .image_cache(image_cache.clone())
             .group_default(
@@ -1893,7 +1891,6 @@ impl Render for ShareContactModal {
             SharedString::from(crate::util::imgproxy::avatar_url(cx, &avatar_raw))
         };
         let mut preview_avatar = Avatar::new()
-            .name(SharedString::from(self.contact.display_name.clone()))
             .size_px(px(40.))
             .image_cache(self.image_cache.clone());
         if !avatar_proxied.is_empty() {
@@ -2062,7 +2059,6 @@ fn render_share_option_row(
         )
     } else {
         let mut avatar = Avatar::new()
-            .name(option.label.clone())
             .size_px(px(16.))
             .image_cache(image_cache.clone())
             .group_default(

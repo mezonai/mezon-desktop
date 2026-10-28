@@ -322,6 +322,43 @@ fn mention_spans_from_fcm(fcm: &api::DirectFcmProto) -> Vec<InboxMentionSpan> {
         .collect()
 }
 
+fn mention_spans_from_entity_mentions(
+    mentions: &[crate::transport::ApiEntityMention],
+) -> Vec<InboxMentionSpan> {
+    mentions
+        .iter()
+        .map(|mention| {
+            let is_role = mention.role_id != 0;
+            InboxMentionSpan {
+                start: mention.s,
+                end: mention.e,
+                user_id: if is_role {
+                    String::new()
+                } else {
+                    mention.user_id.to_string()
+                },
+                role_id: if is_role {
+                    mention.role_id.to_string()
+                } else {
+                    String::new()
+                },
+                is_role,
+            }
+        })
+        .collect()
+}
+
+fn mention_spans_from_channel_message(message: &api::ChannelMessage) -> Vec<InboxMentionSpan> {
+    let from_proto = mention_spans_from_entity_mentions(&crate::transport::parse_message_mentions(
+        &message.mentions,
+    ));
+    if from_proto.is_empty() {
+        mention_spans_from_json_content(&message.content)
+    } else {
+        from_proto
+    }
+}
+
 fn mention_spans_from_json_content(content: &str) -> Vec<InboxMentionSpan> {
     let Ok(value) = serde_json::from_str::<serde_json::Value>(content) else {
         return Vec::new();
@@ -383,6 +420,7 @@ fn preview_from_fcm(fcm: api::DirectFcmProto) -> InboxMessagePreview {
 }
 
 fn preview_from_channel_message(message: api::ChannelMessage) -> InboxMessagePreview {
+    let mention_spans = mention_spans_from_channel_message(&message);
     let mut preview = InboxMessagePreview {
         message_id: id_str(message.message_id),
         channel_id: id_str(message.channel_id),
@@ -400,7 +438,7 @@ fn preview_from_channel_message(message: api::ChannelMessage) -> InboxMessagePre
         attachment_size: 0,
         attachment_thumbnail: String::new(),
         has_more_attachment: false,
-        mention_spans: Vec::new(),
+        mention_spans,
         topic_id: optional_id_str(message.topic_id),
     };
     apply_preview_attachments(&mut preview);
@@ -823,10 +861,29 @@ impl InboxNotification {
     pub fn contains_here_mention(&self) -> bool {
         self.message.as_ref().is_some_and(|message| {
             message
-                .mention_spans
+                .mention_spans_for_render()
                 .iter()
                 .any(|span| crate::transport::is_here_user_id(&span.user_id))
         })
+    }
+
+    pub fn is_here_only_mention(&self) -> bool {
+        if self.code == INBOX_USER_REPLIED_CODE {
+            return false;
+        }
+        let Some(message) = &self.message else {
+            return false;
+        };
+        let mut has_here = false;
+        let mut has_other = false;
+        for span in message.mention_spans_for_render() {
+            if crate::transport::is_here_user_id(&span.user_id) {
+                has_here = true;
+            } else if !span.user_id.is_empty() || !span.role_id.is_empty() {
+                has_other = true;
+            }
+        }
+        has_here && !has_other
     }
 
     pub fn is_here_only_for_user(&self, user_id: i64, role_ids: &[i64]) -> bool {
@@ -1172,7 +1229,69 @@ mod tests {
         };
 
         assert!(notification.contains_here_mention());
+        assert!(notification.is_here_only_mention());
         assert!(notification.is_here_only_for_user(7, &[]));
+    }
+
+    fn here_mention_bytes() -> Vec<u8> {
+        api::MessageMentionList {
+            mentions: vec![api::MessageMention {
+                user_id: crate::transport::MENTION_HERE_USER_ID.parse().unwrap(),
+                username: "here".into(),
+                s: 0,
+                e: 5,
+                ..Default::default()
+            }],
+        }
+        .encode_to_vec()
+    }
+
+    fn system_here_channel_message() -> api::ChannelMessage {
+        api::ChannelMessage {
+            message_id: 99,
+            channel_id: 7,
+            clan_id: 1,
+            sender_id: 0,
+            username: "System".into(),
+            content: r#"{"t": "@here Event Daily has started."}"#.into(),
+            mentions: here_mention_bytes(),
+            create_time_seconds: 1_700_000_000,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn channel_message_preview_keeps_here_mention_spans() {
+        let preview = preview_from_channel_message(system_here_channel_message());
+        assert_eq!(preview.mention_spans.len(), 1);
+        assert!(crate::transport::is_here_user_id(
+            &preview.mention_spans[0].user_id
+        ));
+    }
+
+    #[test]
+    fn realtime_channel_message_here_mention_is_here_only() {
+        let notification = inbox_notification_from_api(api::Notification {
+            id: 1,
+            category: InboxCategory::Mentions as i32,
+            code: INBOX_USER_MENTIONED_CODE,
+            content: system_here_channel_message().encode_to_vec(),
+            channel_id: 7,
+            clan_id: 1,
+            ..Default::default()
+        })
+        .expect("notification");
+        assert!(notification.contains_here_mention());
+        assert!(notification.is_here_only_mention());
+        assert!(notification.is_here_only_for_user(7, &[]));
+        assert_eq!(notification.effective_message_id().as_deref(), Some("99"));
+    }
+
+    #[test]
+    fn channel_mention_here_only_is_skipped_from_optimistic_inbox() {
+        let notification = inbox_notification_from_channel_mention(&system_here_channel_message());
+        assert!(notification.contains_here_mention());
+        assert!(notification.is_here_only_mention());
     }
 
     #[test]
@@ -1208,6 +1327,7 @@ mod tests {
             code: INBOX_USER_MENTIONED_CODE,
             message: Some(message),
         };
+        assert!(!notification.is_here_only_mention());
         assert!(!notification.is_here_only_for_user(7, &[]));
     }
 
@@ -1244,6 +1364,7 @@ mod tests {
             code: INBOX_USER_MENTIONED_CODE,
             message: Some(message),
         };
+        assert!(!notification.is_here_only_mention());
         assert!(!notification.is_here_only_for_user(7, &[99]));
         assert!(notification.is_here_only_for_user(7, &[100]));
     }
@@ -1272,6 +1393,7 @@ mod tests {
             code: INBOX_USER_REPLIED_CODE,
             message: Some(message),
         };
+        assert!(!notification.is_here_only_mention());
         assert!(!notification.is_here_only_for_user(7, &[]));
     }
 
@@ -1535,6 +1657,57 @@ mod tests {
             message: None,
         };
         assert_eq!(notification.effective_topic_id().as_deref(), Some("99"));
+    }
+
+    #[test]
+    fn marked_message_fcm_uses_author_from_server() {
+        let fcm = api::DirectFcmProto {
+            message_id: 42,
+            channel_id: 7,
+            clan_id: 1,
+            sender_id: 5,
+            username: "huy.buidoanquang".into(),
+            display_name: "Huy".into(),
+            content: r#"{"t":"hello"}"#.into(),
+            ..Default::default()
+        };
+        let notification = inbox_notification_from_api(api::Notification {
+            id: 1,
+            category: InboxCategory::Messages as i32,
+            code: INBOX_MESSAGE_MARK_CODE,
+            content: fcm.encode_to_vec(),
+            sender_id: 5,
+            channel_id: 7,
+            clan_id: 1,
+            ..Default::default()
+        })
+        .expect("notification");
+        let message = notification.message.expect("preview");
+        assert_eq!(message.sender_id, "5");
+        assert_eq!(message.username, "huy.buidoanquang");
+        assert_eq!(message.display_name, "Huy");
+    }
+
+    #[test]
+    fn webhook_message_without_message_id_keeps_content() {
+        let fcm = api::DirectFcmProto {
+            sender_id: 9,
+            display_name: "Hook".into(),
+            content: r#"{"t":"deploy done"}"#.into(),
+            ..Default::default()
+        };
+        let notification = inbox_notification_from_api(api::Notification {
+            id: 1,
+            category: InboxCategory::Messages as i32,
+            code: INBOX_MESSAGE_MARK_CODE,
+            content: fcm.encode_to_vec(),
+            sender_id: 9,
+            ..Default::default()
+        })
+        .expect("notification");
+        let message = notification.message.expect("preview");
+        assert_eq!(message.content, "deploy done");
+        assert_eq!(message.display_name, "Hook");
     }
 
     #[test]

@@ -181,6 +181,11 @@ pub(crate) fn toggle_anonymous_shortcut(in_topic: bool, cx: &mut App) {
         .and_then(|clan_id| ClanList::global(cx).read(cx).clan(clan_id))
         .is_some_and(|clan| clan.prevent_anonymous)
     {
+        let locale = Settings::try_global(cx)
+            .map(|settings| settings.read(cx).language.clone())
+            .unwrap_or_else(|| "en".to_string());
+        let message = SharedString::from(mezon_i18n::t(&locale, "common.anonymousDisabledByClan"));
+        Shell::global(cx).update(cx, |shell, cx| shell.info(message, cx));
         return;
     }
     MessagesStore::global(cx).update(cx, |store, cx| store.toggle_anonymous_mode(in_topic, cx));
@@ -1437,6 +1442,16 @@ impl MentionInput {
         }
     }
 
+    fn composer_sends_anonymously(&self, cx: &App) -> bool {
+        self.composer_anonymous(cx)
+            && mention_role_clan(cx).is_some_and(|clan_id| {
+                !ClanList::global(cx)
+                    .read(cx)
+                    .clan(clan_id)
+                    .is_some_and(|clan| clan.prevent_anonymous)
+            })
+    }
+
     fn open_share_location(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.file_menu_open = false;
         if self.composer_anonymous(cx) {
@@ -2437,6 +2452,11 @@ impl MentionInput {
         };
 
         if sigil == Sigil::Slash && at != 0 {
+            self.end_mention(cx);
+            return;
+        }
+
+        if sigil == Sigil::At && self.composer_sends_anonymously(cx) {
             self.end_mention(cx);
             return;
         }
@@ -3654,7 +3674,6 @@ impl MentionInput {
                 ),
                 Suggestion::Member(member, avatar_src) => {
                     let mut avatar = Avatar::new()
-                        .name(member.display.clone())
                         .size_px(px(20.))
                         .image_cache(self.avatar_cache.clone());
                     if !avatar_src.is_empty() {

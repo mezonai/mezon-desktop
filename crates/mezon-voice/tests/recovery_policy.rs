@@ -5,4 +5,5 @@
 mod playback_health;
 
 #[path = "../src/reconnect.rs"]
+#[allow(dead_code)]
 mod reconnect;
