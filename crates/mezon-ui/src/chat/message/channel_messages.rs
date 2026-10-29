@@ -1726,6 +1726,7 @@ impl ChannelMessages {
                 | MessagesEvent::AnonymousModeChanged
                 | MessagesEvent::SendFailedWithoutRow
                 | MessagesEvent::SendPermissionDenied
+                | MessagesEvent::AttachmentUploadFailed { .. }
                 | MessagesEvent::OgpRemoveFailed => return,
                 MessagesEvent::TopicUpdated { .. } => {}
             }
@@ -2519,7 +2520,10 @@ impl ChannelMessages {
                 .iter()
                 .enumerate()
                 .rev()
-                .find(|(_, m)| message_context_menu::message_is_editable(m, me))
+                .find(|(_, m)| {
+                    message_context_menu::message_is_editable(m, me)
+                        && !message_context_menu::topic_edit_blocked(m, self.is_topic_box, cx)
+                })
                 .map(|(pos, m)| (m.id, pos))
         };
         if self.is_topic_box {

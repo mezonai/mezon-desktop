@@ -216,6 +216,16 @@ pub(crate) fn message_is_editable(msg: &Message, current_user_id: &str) -> bool 
         )
 }
 
+pub(crate) fn topic_edit_blocked(msg: &Message, is_topic_box: bool, cx: &App) -> bool {
+    if is_topic_box {
+        TopicsStore::global(cx)
+            .read(cx)
+            .is_init_topic_message(msg.id)
+    } else {
+        channel_delete_blocked(msg, cx)
+    }
+}
+
 fn can_delete_message(msg: &Message, current_user_id: &str, is_topic_box: bool, cx: &App) -> bool {
     if is_topic_box {
         if is_first_topic_message(msg, cx) {
@@ -447,7 +457,7 @@ fn build_topic_menu(
         );
     }
 
-    let show_edit = message_is_editable(msg, current_user_id);
+    let show_edit = message_is_editable(msg, current_user_id) && !topic_edit_blocked(msg, true, cx);
     if show_edit {
         let host = host.clone();
         let message_id = msg.id;
@@ -642,7 +652,8 @@ fn build_channel_menu(
         );
     }
 
-    let show_edit = message_is_editable(msg, current_user_id);
+    let show_edit =
+        message_is_editable(msg, current_user_id) && !topic_edit_blocked(msg, false, cx);
     if show_edit {
         let host = host.clone();
         let message_id = msg.id;

@@ -603,7 +603,6 @@ impl EventsStore {
     fn visible_in_clan<'a>(
         &'a self,
         clan_id: ClanId,
-        current_user: Option<UserId>,
         cx: &'a App,
     ) -> impl Iterator<Item = &'a ClanEventItem> + 'a {
         let channels = ChannelList::global(cx).read(cx);
@@ -611,9 +610,11 @@ impl EventsStore {
         self.events(clan_id).iter().filter(move |event| {
             event.event_status != EventStatus::Completed as i32
                 && (event.end_time_seconds == 0 || event.end_time_seconds > now)
-                && (!event.is_private || Some(event.creator_id) == current_user)
                 && event
                     .channel_id
+                    .is_none_or(|channel_id| channels.channel_in_clan(clan_id, channel_id))
+                && event
+                    .channel_voice_id
                     .is_none_or(|channel_id| channels.channel_in_clan(clan_id, channel_id))
         })
     }
@@ -621,21 +622,19 @@ impl EventsStore {
     pub fn visible_events(
         &self,
         clan_id: ClanId,
-        current_user: Option<UserId>,
+        _current_user: Option<UserId>,
         cx: &App,
     ) -> Vec<ClanEventItem> {
-        self.visible_in_clan(clan_id, current_user, cx)
-            .cloned()
-            .collect()
+        self.visible_in_clan(clan_id, cx).cloned().collect()
     }
 
     pub fn visible_event_count(
         &self,
         clan_id: ClanId,
-        current_user: Option<UserId>,
+        _current_user: Option<UserId>,
         cx: &App,
     ) -> usize {
-        self.visible_in_clan(clan_id, current_user, cx).count()
+        self.visible_in_clan(clan_id, cx).count()
     }
 }
 

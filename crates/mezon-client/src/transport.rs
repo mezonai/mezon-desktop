@@ -8746,18 +8746,13 @@ impl MezonTransport {
             if let Ok(envelope) = realtime::Envelope::decode(response.as_slice())
                 && let Some(realtime::envelope::Message::Error(error)) = envelope.message
             {
-                return Err(anyhow::anyhow!(
+                return Err(api_status_error(code)).context(format!(
                     "UploadAttachmentFile API error: code={} error={}",
-                    error.code,
-                    error.message
+                    error.code, error.message
                 ));
             }
 
-            return Err(anyhow::anyhow!(
-                "API error: code={}, response={}",
-                code,
-                msg
-            ));
+            return Err(api_status_error(code));
         }
         Ok(api::UploadAttachment::decode(response.as_slice())?)
     }
@@ -10830,7 +10825,7 @@ impl MezonTransport {
             )
             .await?;
         if code != 0 {
-            return Err(anyhow::anyhow!("API error: code={}", code));
+            return Err(api_status_error(code));
         }
         Ok(api::MultipartUploadAttachment::decode(response.as_slice())?)
     }

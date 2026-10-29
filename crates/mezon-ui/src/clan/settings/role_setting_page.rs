@@ -24,6 +24,19 @@ use super::role_list_side_bar::{
 use crate::app::shell::Shell;
 use crate::chat::message::ReactionPicker;
 
+fn rebase_permission_draft(
+    draft: &HashSet<i64>,
+    baseline: &HashSet<i64>,
+    current: &HashSet<i64>,
+) -> HashSet<i64> {
+    let removed: HashSet<_> = baseline.difference(draft).copied().collect();
+    current
+        .difference(&removed)
+        .copied()
+        .chain(draft.difference(baseline).copied())
+        .collect()
+}
+
 pub(crate) fn role_edit_allowed(
     has_manage_clan: bool,
     is_clan_owner: bool,
@@ -128,7 +141,9 @@ impl RoleSettingPage {
             &RolesStore::global(cx),
             |this, _, event: &RolesEvent, cx| {
                 match event {
-                    RolesEvent::Created { clan_id, role_id } if *clan_id == this.clan_id => {
+                    RolesEvent::Created { clan_id, role_id }
+                        if *clan_id == this.clan_id && this.creating_role =>
+                    {
                         if let Some(role) = RolesStore::global(cx)
                             .read(cx)
                             .clan_role(*clan_id, *role_id)
@@ -141,6 +156,34 @@ impl RoleSettingPage {
                             this.edit_tab = RoleEditTab::Display;
                             this.load_draft_from_role(&role);
                             this.reset_name_input();
+                        }
+                    }
+                    RolesEvent::RoleCreateFailed { clan_id }
+                        if *clan_id == this.clan_id && this.creating_role =>
+                    {
+                        this.exit_edit_mode(cx);
+                        let locale = this.settings.read(cx).language.clone();
+                        let message = mezon_i18n::t(&locale, "clanOverviewSetting.toast.saveError")
+                            .to_string();
+                        Shell::global(cx).update(cx, |shell, cx| shell.error(message, cx));
+                    }
+                    RolesEvent::Changed { clan_id } if *clan_id == this.clan_id => {
+                        if let Some(role_id) = this.selected_role_id {
+                            let role = RolesStore::global(cx)
+                                .read(cx)
+                                .clan_role(*clan_id, role_id)
+                                .cloned();
+                            if let Some(role) = role {
+                                let saved = role_active_permission_ids(&role);
+                                this.draft_permission_ids = rebase_permission_draft(
+                                    &this.draft_permission_ids,
+                                    &this.saved_permission_ids,
+                                    &saved,
+                                );
+                                this.saved_permission_ids = saved;
+                            } else {
+                                this.exit_edit_mode(cx);
+                            }
                         }
                     }
                     RolesEvent::RoleSaved { clan_id, role_id }
@@ -478,6 +521,9 @@ impl RoleSettingPage {
     }
 
     fn start_create_role(&mut self, cx: &mut Context<Self>) {
+        if self.is_saving(cx) {
+            return;
+        }
         let locale = self.settings.read(cx).language.clone();
         let default_name = mezon_i18n::t(&locale, "clanRoles.createNewRole.newRole").to_string();
         let roles = RolesStore::global(cx);
@@ -1048,7 +1094,6 @@ impl RoleSettingPage {
                                         locale,
                                         theme,
                                         can_edit,
-                                        is_everyone,
                                         is_clan_owner,
                                         window,
                                         cx,
@@ -1270,7 +1315,28 @@ pub fn render_role_save_bar(
 
 #[cfg(test)]
 mod role_edit_permission_tests {
-    use super::role_edit_allowed;
+    use super::{rebase_permission_draft, role_edit_allowed};
+    use std::collections::HashSet;
+
+    #[test]
+    fn server_permission_changes_do_not_turn_metadata_edits_into_regrants() {
+        let baseline = HashSet::from([41, 92]);
+        let server = HashSet::from([92]);
+        let draft = rebase_permission_draft(&baseline, &baseline, &server);
+        assert_eq!(draft, server);
+        assert!(draft.difference(&server).next().is_none());
+    }
+
+    #[test]
+    fn rebase_preserves_explicit_edits_and_accepts_unrelated_server_changes() {
+        let baseline = HashSet::from([41, 92, 8]);
+        let draft = HashSet::from([41, 92, 99]);
+        let server = HashSet::from([92, 8, 100]);
+        assert_eq!(
+            rebase_permission_draft(&draft, &baseline, &server),
+            HashSet::from([92, 99, 100])
+        );
+    }
 
     #[test]
     fn manage_clan_is_required() {

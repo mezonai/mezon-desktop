@@ -3358,6 +3358,8 @@
   "message.attachment.fromPrivateChannel": "Media från en privat kanal",
   "message.attachment.uploading": "Laddar upp...",
   "message.attachment.uploadFailed": "Uppladdningen misslyckades",
+  "message.attachment.uploadFailedInvalidFile": "Uppladdningen misslyckades: den här filen kan inte laddas upp. Kontrollera filnamnet och försök igen.",
+  "message.attachment.uploadFailedRetry": "Uppladdningen misslyckades. Kontrollera din anslutning och försök igen.",
   "message.attachments.attachment": "Bilaga",
   "message.attachments.audio": "Röstmeddelande",
   "message.attachments.contact": "Visitekort",
