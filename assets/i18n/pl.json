@@ -3357,6 +3357,8 @@
   "message.attachment.fromPrivateChannel": "Multimedia z prywatnego kanału",
   "message.attachment.uploading": "Przekazywanie...",
   "message.attachment.uploadFailed": "Nie udało się przesłać",
+  "message.attachment.uploadFailedInvalidFile": "Przesyłanie nie powiodło się: nie można przesłać tego pliku. Sprawdź nazwę pliku i spróbuj ponownie.",
+  "message.attachment.uploadFailedRetry": "Przesyłanie nie powiodło się. Sprawdź połączenie i spróbuj ponownie.",
   "message.attachments.attachment": "Załącznik",
   "message.attachments.audio": "Wiadomość głosowa",
   "message.attachments.contact": "Karta wizytowa",

@@ -18,6 +18,7 @@ const CHECK_NAME_TYPE_NICKNAME: i32 = 4;
 
 const UPLOAD_NAME_MAX_LEN: usize = 100;
 const UPLOAD_EXTENSION_MAX_LEN: usize = 16;
+const UPLOAD_FALLBACK_NAME: &str = "file";
 
 pub fn sanitize_upload_filename(name: &str) -> String {
     let clean: String = name
@@ -30,10 +31,14 @@ pub fn sanitize_upload_filename(name: &str) -> String {
             }
         })
         .collect();
-    if clean.len() <= UPLOAD_NAME_MAX_LEN {
-        return clean;
+    let clean = clean.trim_end_matches(['.', '_']);
+    if clean.is_empty() {
+        return UPLOAD_FALLBACK_NAME.to_string();
     }
-    match clean.rfind('.') {
+    if clean.len() <= UPLOAD_NAME_MAX_LEN {
+        return clean.to_string();
+    }
+    let truncated = match clean.rfind('.') {
         Some(dot) if clean.len() - dot <= UPLOAD_EXTENSION_MAX_LEN => {
             let extension = &clean[dot..];
             format!(
@@ -42,6 +47,12 @@ pub fn sanitize_upload_filename(name: &str) -> String {
             )
         }
         _ => clean[..UPLOAD_NAME_MAX_LEN].to_string(),
+    };
+    let trimmed = truncated.trim_end_matches(['.', '_']);
+    if trimmed.is_empty() {
+        UPLOAD_FALLBACK_NAME.to_string()
+    } else {
+        trimmed.to_string()
     }
 }
 
@@ -3641,6 +3652,19 @@ mod tests {
             ),
             "doc"
         );
+    }
+
+    #[test]
+    fn upload_filename_never_empty_or_dots_only() {
+        assert_eq!(sanitize_upload_filename("."), "file");
+        assert_eq!(sanitize_upload_filename(".."), "file");
+        assert_eq!(sanitize_upload_filename(""), "file");
+        assert_eq!(sanitize_upload_filename("a.pdf"), "a.pdf");
+        assert_eq!(
+            sanitize_upload_filename("CV-Cao Tuấn Đạt."),
+            "CV_Cao_Tu_n___t"
+        );
+        assert_eq!(sanitize_upload_filename("日本語"), "file");
     }
 
     #[test]

@@ -150,6 +150,9 @@ pub enum MessagesEvent {
     /// so there is no optimistic row) — the UI has to surface it as a toast.
     SendFailedWithoutRow,
     SendPermissionDenied,
+    AttachmentUploadFailed {
+        invalid_file: bool,
+    },
     OgpRemoveFailed,
     /// The whole viewport was replaced (channel switch / fetch). `count` is the
     /// new row count.
@@ -6235,7 +6238,12 @@ impl MessagesStore {
                     Err(e) => {
                         tracing::error!("presign attachments failed: {e}");
                         let _ = this.update(cx, |this, cx| {
+                            this.fail_temp_attachments(channel_id, temp_id);
                             this.mark_temp_failed(channel_id, temp_id, cx);
+                            cx.emit(MessagesEvent::AttachmentUploadFailed {
+                                invalid_file: api_status_from_error(&e)
+                                    .is_some_and(ApiStatusError::is_invalid_argument),
+                            });
                         });
                         return;
                     }
@@ -8353,6 +8361,21 @@ impl MessagesStore {
             return;
         }
         self.mark_temp_failed(channel_id, temp_id, cx);
+    }
+
+    fn fail_temp_attachments(&mut self, channel_id: ChannelId, temp_id: MessageId) {
+        let Some(message) = self
+            .cache
+            .get_mut(&channel_id)
+            .and_then(|channel| channel.messages.get_mut_by_id(temp_id))
+        else {
+            return;
+        };
+        for att in message.attachments.iter_mut() {
+            att.uploading = false;
+            att.presign_pending = false;
+            att.upload_failed = true;
+        }
     }
 
     fn mark_temp_failed(

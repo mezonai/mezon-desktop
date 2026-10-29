@@ -3357,6 +3357,8 @@
   "message.attachment.fromPrivateChannel": "Ảnh/video từ kênh riêng tư",
   "message.attachment.uploading": "Đang tải lên...",
   "message.attachment.uploadFailed": "Tải lên thất bại",
+  "message.attachment.uploadFailedInvalidFile": "Tải lên thất bại: không thể tải tệp này lên. Vui lòng kiểm tra tên tệp và thử lại.",
+  "message.attachment.uploadFailedRetry": "Tải lên thất bại. Vui lòng kiểm tra kết nối và thử lại.",
   "message.attachments.attachment": "Tệp đính kèm",
   "message.attachments.audio": "Tin nhắn thoại",
   "message.attachments.contact": "Danh thiếp",

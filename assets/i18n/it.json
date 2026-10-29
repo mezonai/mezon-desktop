@@ -3358,6 +3358,8 @@
   "message.attachment.fromPrivateChannel": "Contenuto multimediale da un canale privato",
   "message.attachment.uploading": "Caricamento in corso...",
   "message.attachment.uploadFailed": "Caricamento non riuscito",
+  "message.attachment.uploadFailedInvalidFile": "Caricamento non riuscito: impossibile caricare questo file. Controlla il nome del file e riprova.",
+  "message.attachment.uploadFailedRetry": "Caricamento non riuscito. Controlla la connessione e riprova.",
   "message.attachments.attachment": "Allegato",
   "message.attachments.audio": "Messaggio vocale",
   "message.attachments.contact": "Contatto",

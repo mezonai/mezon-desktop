@@ -420,11 +420,11 @@ impl OverviewSettingPage {
         let has_system = self.has_system_changes();
         let system_draft = self.system_message.clone();
 
-        let saved_name = self.saved_draft.clan_name.clone();
+        let saved_draft = self.saved_draft.clone();
         let clan_list = self.clan_list.clone();
         let clan_task = has_clan.then(|| {
             clan_list.update(cx, |store, cx| {
-                store.save_clan_overview(clan_id, draft.clone(), &saved_name, cx)
+                store.save_clan_overview(clan_id, draft.clone(), &saved_draft, cx)
             })
         });
         let system_request = system_draft.clone().filter(|_| has_system);

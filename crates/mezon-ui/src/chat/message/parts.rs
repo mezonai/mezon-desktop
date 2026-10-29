@@ -2323,7 +2323,8 @@ pub fn render_hover_actions(msg: &Message, is_different_day: bool, ctx: &RowCtx)
         && msg.code != MessageCode::SendToken
         && msg.code.is_user_timeline()
         && !is_poll_msg
-        && !msg.is_forwarded;
+        && !msg.is_forwarded
+        && !super::message_context_menu::topic_edit_blocked(msg, ctx.is_topic_box, ctx.app);
     let show_thread = !ctx.is_topic_box
         && ctx.channel_top_level
         && ctx.can_manage_thread

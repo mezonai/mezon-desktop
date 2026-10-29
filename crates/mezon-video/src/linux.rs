@@ -1,6 +1,6 @@
 use std::cell::Cell;
-use std::sync::Once;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Once, OnceLock};
 
 use gstreamer as gst;
 use gstreamer::prelude::*;
@@ -102,6 +102,12 @@ impl PlayerImpl {
         })
     }
 
+    pub fn open_live(url: &str) -> Result<Self, PlayerError> {
+        let player = Self::open(url, None)?;
+        rebase_live_timestamps(&player.playbin);
+        Ok(player)
+    }
+
     fn build(url: &str, max_size: Option<(u32, u32)>) -> Result<Self, gst::glib::BoolError> {
         let playbin = gst::ElementFactory::make("playbin").build()?;
         let mut caps_builder =
@@ -188,6 +194,11 @@ impl PlayerImpl {
         let data = frame.plane_data(0).ok()?;
         let out = crate::frame_util::pack_bgra_rows(data, stride, width, height)?;
         crate::render_frame::bgra_to_frame(width, height, out)
+    }
+
+    pub fn skip_frame(&self) {
+        self.drain_bus();
+        let _ = self.appsink.try_pull_sample(gst::ClockTime::ZERO);
     }
 
     pub fn play(&self) {
@@ -297,6 +308,51 @@ fn auto_orientation_filter() -> Option<gst::Element> {
     Some(filter)
 }
 
+fn rebase_live_timestamps(playbin: &gst::Element) {
+    let Some(bin) = playbin.downcast_ref::<gst::Bin>() else {
+        return;
+    };
+    let shift = Arc::new(OnceLock::new());
+    bin.connect_deep_element_added(move |_, _, element| {
+        if element
+            .factory()
+            .is_none_or(|factory| factory.name().as_str() != "qtdemux")
+        {
+            return;
+        }
+        let shift = shift.clone();
+        element.connect_pad_added(move |_, pad| {
+            let shift = shift.clone();
+            pad.add_probe(gst::PadProbeType::BUFFER, move |pad, info| {
+                if let Some(offset) = live_pad_offset(pad, info, &shift)
+                    && pad.offset() != offset
+                {
+                    pad.set_offset(offset);
+                }
+                gst::PadProbeReturn::Ok
+            });
+        });
+    });
+}
+
+fn live_pad_offset(pad: &gst::Pad, info: &gst::PadProbeInfo, shift: &OnceLock<i64>) -> Option<i64> {
+    if let Some(offset) = shift.get() {
+        return Some(*offset);
+    }
+    let Some(gst::PadProbeData::Buffer(buffer)) = &info.data else {
+        return None;
+    };
+    let pts = buffer.pts()?;
+    let segment = pad.sticky_event::<gst::event::Segment>(0)?;
+    let running = segment
+        .segment()
+        .downcast_ref::<gst::ClockTime>()?
+        .to_running_time(pts)?;
+    let running = i64::try_from(running.nseconds()).ok()?;
+    let hold_back = i64::try_from(LIVE_HOLD_BACK.nseconds()).ok()?;
+    Some(*shift.get_or_init(|| hold_back - running))
+}
+
 fn turn_from_tag(orientation: &str) -> Option<Turn> {
     let (mirrored, rotation) = match orientation.strip_prefix("flip-") {
         Some(rotation) => (true, rotation),
@@ -323,6 +379,7 @@ const VIDEO_PAD_SIGNAL: &str = "get-video-pad";
 const VIDEO_TAGS_SIGNAL: &str = "get-video-tags";
 const VIDEO_DIRECTION_PROPERTY: &str = "video-direction";
 const POSTER_TIME: gst::ClockTime = gst::ClockTime::from_seconds(1);
+const LIVE_HOLD_BACK: gst::ClockTime = gst::ClockTime::from_seconds(3);
 const PROBE_TIMEOUT: gst::ClockTime = gst::ClockTime::from_seconds(5);
 
 pub fn probe_video(path: &str, max_poster_edge: u32) -> Option<crate::VideoProbe> {

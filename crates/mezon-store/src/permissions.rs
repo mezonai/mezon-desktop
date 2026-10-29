@@ -1,6 +1,8 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
+use futures::{FutureExt, future::Shared};
+
 use gpui::{App, AppContext, Context, Entity, EventEmitter, Global, Task};
 use mezon_client::{AppApi, ConnectionStatus};
 use mezon_proto::api;
@@ -14,6 +16,7 @@ pub const PERMISSION_CLAN_OWNER: &str = "clan-owner";
 pub const PERMISSION_ADMINISTRATOR: &str = "administrator";
 pub const PERMISSION_MANAGE_CHANNEL: &str = "manage-channel";
 pub const PERMISSION_MANAGE_CLAN: &str = "manage-clan";
+pub const PERMISSION_VIEW_CHANNEL: &str = "view-channel";
 
 pub const PERMISSION_SCOPE_CHANNEL: i32 = 2;
 
@@ -51,11 +54,13 @@ pub enum PermissionEvent {
     Changed { clan_id: Option<ClanId> },
 }
 
+pub(crate) type PermissionCatalogTask = Shared<Task<Result<(), String>>>;
+
 pub struct PermissionStore {
     catalog: HashMap<String, i32>,
     definitions: Vec<PermissionDefinition>,
     catalog_loaded: bool,
-    catalog_loading: bool,
+    catalog_task: Option<PermissionCatalogTask>,
     max_level_by_clan: HashMap<ClanId, i32>,
     loading_clans: HashSet<ClanId>,
     reset_generation: u64,
@@ -92,7 +97,7 @@ impl PermissionStore {
             catalog: HashMap::new(),
             definitions: Vec::new(),
             catalog_loaded: false,
-            catalog_loading: false,
+            catalog_task: None,
             max_level_by_clan: HashMap::new(),
             loading_clans: HashSet::new(),
             reset_generation: 0,
@@ -190,6 +195,7 @@ impl PermissionStore {
 
     pub fn reset(&mut self, cx: &mut Context<Self>) {
         self.reset_generation = self.reset_generation.wrapping_add(1);
+        self.catalog_task.take();
         self.max_level_by_clan.clear();
         self.loading_clans.clear();
         cx.notify();
@@ -298,38 +304,76 @@ impl PermissionStore {
     }
 
     fn load_permission_catalog(&mut self, cx: &mut Context<Self>) {
-        if self.catalog_loaded || self.catalog_loading {
+        if self.catalog_loaded || self.catalog_task.is_some() {
             return;
         }
-        self.catalog_loading = true;
-        let api = self.api.clone();
-        cx.spawn(async move |this, cx| {
-            let result = api.get_list_permission().await;
-            let _ = this.update(cx, |this, cx| {
-                this.catalog_loading = false;
-                match result {
-                    Ok(list) => {
-                        let definitions = definitions_from_permission_list(list);
-                        if definitions.is_empty() {
-                            tracing::warn!(
-                                "get_list_permission returned an empty catalog; keeping it unloaded so the next access retries"
-                            );
-                            return;
-                        }
-                        this.catalog = definitions
-                            .iter()
-                            .map(|definition| (definition.slug.clone(), definition.level))
-                            .collect();
-                        this.definitions = definitions;
-                        this.catalog_loaded = true;
-                        cx.emit(PermissionEvent::Changed { clan_id: None });
-                        cx.notify();
-                    }
-                    Err(err) => tracing::error!("get_list_permission failed: {err}"),
-                }
-            });
+        let task = self.load_catalog_task(cx);
+        cx.spawn(async move |_, _| {
+            let _ = task.await;
         })
         .detach();
+    }
+
+    pub(crate) fn load_catalog_task(&mut self, cx: &mut Context<Self>) -> PermissionCatalogTask {
+        if self.catalog_loaded {
+            return Task::ready(Ok(())).shared();
+        }
+        if let Some(task) = &self.catalog_task {
+            return task.clone();
+        }
+        let api = self.api.clone();
+        let generation = self.reset_generation;
+        let task = cx
+            .spawn(async move |this, cx| {
+                let result = api
+                    .get_list_permission()
+                    .await
+                    .map(definitions_from_permission_list)
+                    .map_err(|err| err.to_string());
+                this.update(cx, |this, cx| {
+                    this.finish_catalog_load(generation, result, cx)
+                })
+                .map_err(|err| err.to_string())?
+            })
+            .shared();
+        self.catalog_task = Some(task.clone());
+        task
+    }
+
+    fn finish_catalog_load(
+        &mut self,
+        generation: u64,
+        result: Result<Vec<PermissionDefinition>, String>,
+        cx: &mut Context<Self>,
+    ) -> Result<(), String> {
+        if self.reset_generation != generation {
+            return Err("permission catalog session changed".to_string());
+        }
+        self.catalog_task.take();
+        let result = result.and_then(|definitions| {
+            if definitions.is_empty() {
+                Err("permission catalog is empty".to_string())
+            } else {
+                Ok(definitions)
+            }
+        });
+        match result {
+            Ok(definitions) => {
+                self.catalog = definitions
+                    .iter()
+                    .map(|definition| (definition.slug.clone(), definition.level))
+                    .collect();
+                self.definitions = definitions;
+                self.catalog_loaded = true;
+                cx.emit(PermissionEvent::Changed { clan_id: None });
+                cx.notify();
+                Ok(())
+            }
+            Err(err) => {
+                tracing::error!("get_list_permission failed: {err}");
+                Err(err)
+            }
+        }
     }
 }
 
@@ -542,6 +586,134 @@ mod tests {
                     vec![PERMISSION_SEND_MESSAGE, PERMISSION_DELETE_MESSAGE]
                 );
                 assert_eq!(store.permission_definitions().len(), 4);
+            });
+        });
+    }
+
+    #[gpui::test]
+    fn catalog_load_callers_share_the_pending_request(cx: &mut TestAppContext) {
+        let store = cx.update(|cx| init_stores(AuthState::NotAuthenticated, cx));
+        let calls = std::rc::Rc::new(std::cell::Cell::new(0));
+        let shared_calls = calls.clone();
+        let (send, receive) = futures::channel::oneshot::channel();
+        let waiting = store.update(cx, |store, cx| {
+            let generation = store.reset_generation;
+            let task = cx
+                .spawn(async move |this, cx| {
+                    shared_calls.set(shared_calls.get() + 1);
+                    let definitions = receive.await.unwrap();
+                    this.update(cx, |store, cx| {
+                        store.finish_catalog_load(generation, Ok(definitions), cx)
+                    })
+                    .unwrap()
+                })
+                .shared();
+            store.catalog_task = Some(task);
+            (store.load_catalog_task(cx), store.load_catalog_task(cx))
+        });
+        cx.run_until_parked();
+        assert_eq!(calls.get(), 1);
+        let definitions = definitions_from_permission_list(api::PermissionList {
+            permissions: vec![permission(
+                41,
+                PERMISSION_SEND_MESSAGE,
+                1,
+                PERMISSION_SCOPE_CHANNEL,
+            )],
+            ..Default::default()
+        });
+        send.send(definitions.clone()).unwrap();
+        cx.run_until_parked();
+        assert_eq!(waiting.0.now_or_never(), Some(Ok(())));
+        assert_eq!(waiting.1.now_or_never(), Some(Ok(())));
+        store.update(cx, |store, _| {
+            assert_eq!(store.permission_definitions(), definitions)
+        });
+        assert_eq!(calls.get(), 1);
+    }
+
+    #[gpui::test]
+    fn empty_catalog_does_not_poison_the_cache(cx: &mut TestAppContext) {
+        cx.update(|cx| {
+            let store = init_stores(AuthState::NotAuthenticated, cx);
+            store.update(cx, |store, cx| {
+                assert!(
+                    store
+                        .finish_catalog_load(store.reset_generation, Ok(vec![]), cx)
+                        .is_err()
+                );
+                assert!(!store.catalog_loaded);
+                assert!(store.catalog_task.is_none());
+            });
+        });
+    }
+
+    #[gpui::test]
+    fn catalog_completion_caches_success_and_retries_failure(cx: &mut TestAppContext) {
+        cx.update(|cx| {
+            let store = init_stores(AuthState::NotAuthenticated, cx);
+            store.update(cx, |store, cx| {
+                let generation = store.reset_generation;
+                store.catalog_task = Some(Task::ready(Err("load failed".to_string())).shared());
+                assert!(
+                    store
+                        .finish_catalog_load(generation, Err("load failed".into()), cx)
+                        .is_err()
+                );
+                assert!(!store.catalog_loaded);
+                assert!(store.catalog_task.is_none());
+                let definitions = definitions_from_permission_list(api::PermissionList {
+                    permissions: vec![permission(
+                        41,
+                        PERMISSION_SEND_MESSAGE,
+                        1,
+                        PERMISSION_SCOPE_CHANNEL,
+                    )],
+                    ..Default::default()
+                });
+                assert!(
+                    store
+                        .finish_catalog_load(generation, Ok(definitions.clone()), cx)
+                        .is_ok()
+                );
+                assert_eq!(store.permission_definitions(), definitions);
+                assert_eq!(store.catalog.get(PERMISSION_SEND_MESSAGE), Some(&1));
+                assert_eq!(store.load_catalog_task(cx).now_or_never(), Some(Ok(())));
+                assert!(store.catalog_task.is_none());
+            });
+        });
+    }
+
+    #[gpui::test]
+    fn stale_catalog_completion_preserves_new_session_load(cx: &mut TestAppContext) {
+        cx.update(|cx| {
+            let store = init_stores(AuthState::NotAuthenticated, cx);
+            store.update(cx, |store, cx| {
+                let generation = store.reset_generation;
+                store.reset(cx);
+                let in_flight = Task::ready(Err("new session load".to_string())).shared();
+                store.catalog_task = Some(in_flight);
+                let definitions = definitions_from_permission_list(api::PermissionList {
+                    permissions: vec![permission(
+                        41,
+                        PERMISSION_SEND_MESSAGE,
+                        1,
+                        PERMISSION_SCOPE_CHANNEL,
+                    )],
+                    ..Default::default()
+                });
+                assert!(
+                    store
+                        .finish_catalog_load(generation, Ok(definitions), cx)
+                        .is_err()
+                );
+                assert!(store.permission_definitions().is_empty());
+                assert!(!store.catalog_loaded);
+                assert!(store.catalog_task.is_some());
+                assert_eq!(
+                    store.load_catalog_task(cx).now_or_never(),
+                    Some(Err("new session load".to_string()))
+                );
             });
         });
     }

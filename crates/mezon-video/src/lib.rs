@@ -184,6 +184,14 @@ impl VideoPlayer {
         Ok(Self { inner })
     }
 
+    pub fn open_live(url: &str) -> Result<Self, PlayerError> {
+        #[cfg(target_os = "linux")]
+        let inner = platform::PlayerImpl::open_live(url)?;
+        #[cfg(not(target_os = "linux"))]
+        let inner = platform::PlayerImpl::open(url, None)?;
+        Ok(Self { inner })
+    }
+
     #[cfg(any(windows, target_os = "macos"))]
     pub fn from_prepared(prepared: PreparedVideo) -> Result<Self, PlayerError> {
         let inner = match prepared.inner {
@@ -211,6 +219,11 @@ impl VideoPlayer {
 
     pub fn copy_frame(&self) -> Option<VideoFrame> {
         self.inner.copy_frame()
+    }
+
+    pub fn skip_frame(&self) {
+        #[cfg(any(windows, target_os = "linux"))]
+        self.inner.skip_frame();
     }
 
     pub fn play(&self) {

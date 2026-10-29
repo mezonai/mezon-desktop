@@ -261,6 +261,17 @@ fn video_error_text(cx: &App) -> String {
     mezon_i18n::t(&locale, "channelStream.videoError").to_string()
 }
 
+fn missing_plugin_text(command: Option<&str>, cx: &App) -> String {
+    let locale = crate::Settings::try_global(cx)
+        .map(|s| s.read(cx).language.clone())
+        .unwrap_or_else(|| "en".to_string());
+    let text = mezon_i18n::t(&locale, "media.video.error.missingPlugin");
+    match command {
+        Some(command) => format!("{text} {command}"),
+        None => text.to_string(),
+    }
+}
+
 impl StreamStore {
     pub fn init(api: Arc<AppApi>, cx: &mut App) -> Entity<Self> {
         let entity = cx.new(|cx| Self::new(api, cx));
@@ -1010,7 +1021,7 @@ impl StreamStore {
         self.playing_url = None;
         let output_device_id =
             crate::Settings::try_global(cx).and_then(|s| s.read(cx).output_device_id.clone());
-        match mezon_video::VideoPlayer::open(&url, None) {
+        match mezon_video::VideoPlayer::open_live(&url) {
             Ok(player) => {
                 player.set_live_offset(STREAM_LIVE_OFFSET_SECS);
                 player.set_audio_output_device(coreaudio_device_uid(output_device_id.as_deref()));
@@ -1104,6 +1115,7 @@ impl StreamStore {
             let mut last_time: Option<f64> = None;
             let mut last_advance_at = Instant::now();
             let mut started = false;
+            let mut missing_plugin = false;
             loop {
                 cx.background_executor().timer(HEALTH_POLL_INTERVAL).await;
                 let cont = this
@@ -1128,6 +1140,10 @@ impl StreamStore {
                             started = false;
                         }
                         let failed = player.failed();
+                        if failed && player.missing_plugin() {
+                            missing_plugin = true;
+                            return false;
+                        }
                         let current_time = player.current_time();
                         if let Some(prev) = last_time {
                             if current_time > prev {
@@ -1174,6 +1190,22 @@ impl StreamStore {
                 if !cont {
                     break;
                 }
+            }
+            if missing_plugin {
+                let command = cx
+                    .background_executor()
+                    .spawn(async { mezon_video::plugin_install_command() })
+                    .await;
+                let _ = this.update(cx, |this, cx| {
+                    if this.session_generation != session_generation
+                        || !this.is_session_channel(channel_id)
+                    {
+                        return;
+                    }
+                    this.send_streaming_watch(channel_id, false, cx);
+                    let message = missing_plugin_text(command, cx);
+                    this.fail_stream(message, cx);
+                });
             }
         }));
     }
