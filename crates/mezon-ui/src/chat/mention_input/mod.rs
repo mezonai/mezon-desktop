@@ -28,7 +28,7 @@ use mezon_store::{
     MentionSearchStore, MessageSpan, MessagesStore, OgpResult, OutgoingAttachment, OutgoingContent,
     OutgoingEmoji, OutgoingHashtag, OutgoingMention, OutgoingOgp, QuickMenuStore, RolesEvent,
     RolesStore, Settings, TopicsStore, UserId, fetch_invite_preview, fetch_ogp,
-    first_previewable_url, internal_invite_id, is_clan_invite_url,
+    first_previewable_url, internal_invite_id, is_clan_invite_url, outgoing_realtime_proto_len,
 };
 use std::time::Duration;
 use unicode_normalization::UnicodeNormalization;
@@ -76,6 +76,7 @@ const MAX_EMOJI_CANDIDATES: usize = 20;
 const MENTION_HERE_DISPLAY: &str = "@here";
 const MENTION_HERE_NORM: &str = "@HERE";
 const CONVERT_TO_FILE_THRESHOLD: usize = 3700;
+const REALTIME_SEND_HEADROOM: usize = 256;
 const CONVERT_PREFIX_LEN: usize = 8;
 const COMMITTED_MASK_START: char = '\u{E010}';
 const COMMITTED_MASK_END: char = '\u{E011}';
@@ -946,6 +947,14 @@ fn exceeds_convert_threshold(text: &str) -> bool {
     content_payload_utf8_len(text) > CONVERT_TO_FILE_THRESHOLD
 }
 
+fn convert_overflow_bytes(text_payload_len: usize, frame_len: usize) -> isize {
+    let frame_budget =
+        mezon_client::abridged_tcp_adapter::MAX_REALTIME_FRAME_PAYLOAD - REALTIME_SEND_HEADROOM;
+    let text_over = text_payload_len as isize - CONVERT_TO_FILE_THRESHOLD as isize;
+    let frame_over = frame_len as isize - frame_budget as isize;
+    text_over.max(frame_over)
+}
+
 fn should_convert_paste_to_file(current_input: &str, pasted: &str) -> bool {
     current_input.trim().is_empty() && exceeds_convert_threshold(pasted)
 }
@@ -1369,6 +1378,15 @@ impl MentionInput {
         )
     }
 
+    fn convert_overflow(&self, text: &str, cx: &App) -> isize {
+        let raw = self.input.read(cx).value();
+        let content = outgoing_content_from_committed(raw, &self.committed);
+        convert_overflow_bytes(
+            content_payload_utf8_len(text),
+            outgoing_realtime_proto_len(text, &content, cx),
+        )
+    }
+
     pub fn take_payload(
         &mut self,
         window: &mut Window,
@@ -1389,7 +1407,7 @@ impl MentionInput {
         } else {
             raw.trim_end().to_string()
         };
-        if self.overflow_to_file && !text.is_empty() && exceeds_convert_threshold(&text) {
+        if self.overflow_to_file && !text.is_empty() && self.convert_overflow(&text, cx) > 0 {
             if MessagesStore::global(cx).read(cx).is_anonymous_mode() {
                 self.show_anonymous_convert_blocked(cx);
                 return None;
@@ -2209,12 +2227,10 @@ impl MentionInput {
             self.flash_command = None;
         }
         self.overflow_counter = {
-            // Raw UTF-8 length is a lower bound on the payload, so serialize only when the
-            // draft can actually be over.
-            let threshold = CONVERT_TO_FILE_THRESHOLD - CONVERT_PREFIX_LEN;
-            if self.overflow_to_file && content.len() > threshold {
-                let over = content_payload_utf8_len(&content) as isize
-                    - CONVERT_TO_FILE_THRESHOLD as isize;
+            // Measures what Enter measures (text payload and whole send frame), so the counter
+            // and the convert-on-send never disagree; short drafts skip the encode.
+            if self.overflow_to_file && content.len() > CONVERT_TO_FILE_THRESHOLD / 4 {
+                let over = self.convert_overflow(&content, cx);
                 (over > 0).then_some(-over)
             } else {
                 None
@@ -4591,8 +4607,9 @@ mod channel_suggest_tests {
 mod convert_tests {
     use super::{
         CONVERT_PREFIX_LEN, CONVERT_TO_FILE_THRESHOLD, PASTE_SAFETY_CAP_UTF16,
-        content_payload_utf8_len, exceeds_convert_threshold, should_convert_paste_to_file,
-        trim_paste_to_utf16_cap, write_text_as_pending_attachment,
+        REALTIME_SEND_HEADROOM, content_payload_utf8_len, convert_overflow_bytes,
+        exceeds_convert_threshold, should_convert_paste_to_file, trim_paste_to_utf16_cap,
+        write_text_as_pending_attachment,
     };
 
     #[test]
@@ -4676,6 +4693,15 @@ mod convert_tests {
             trim_paste_to_utf16_cap(current, pasted, PASTE_SAFETY_CAP_UTF16),
             pasted
         );
+    }
+
+    #[test]
+    fn convert_overflow_bytes_checks_both_text_and_frame_budget() {
+        let frame_budget =
+            mezon_client::abridged_tcp_adapter::MAX_REALTIME_FRAME_PAYLOAD - REALTIME_SEND_HEADROOM;
+        assert!(convert_overflow_bytes(CONVERT_TO_FILE_THRESHOLD, 100) <= 0);
+        assert!(convert_overflow_bytes(3000, frame_budget + 1) > 0);
+        assert!(convert_overflow_bytes(CONVERT_TO_FILE_THRESHOLD + 1, 100) > 0);
     }
 }
 

@@ -17,9 +17,9 @@ use mezon_client::transport::{
     MESSAGE_BUZZ_CODE, OutgoingEmoji as TransportEmoji, OutgoingHashtag as TransportHashtag,
     OutgoingHashtags, OutgoingMention as TransportMention, OutgoingMessageFlags, OutgoingOgp,
     OutgoingReply, SHARE_CONTACT_CODE, build_send_content, build_send_content_with_code,
-    build_share_contact_content_json, detect_markdown, emoji_content_tokens,
-    hashtag_content_tokens, is_here_user_id, markdown_content_tokens, mention_content_tokens,
-    with_create_time_seconds,
+    build_share_contact_content_json, chat_message_realtime_proto_len, detect_markdown,
+    emoji_content_tokens, hashtag_content_tokens, is_here_user_id, markdown_content_tokens,
+    mention_content_tokens, with_create_time_seconds,
 };
 use mezon_client::{
     ApiStatusError, AppApi, AttachmentUploadOutcome, ConnectionStatus, InboxCategory,
@@ -297,6 +297,32 @@ impl OutgoingContent {
     pub fn is_empty(&self) -> bool {
         self.mentions.is_empty() && self.hashtags.is_empty() && self.emojis.is_empty()
     }
+}
+
+pub fn outgoing_realtime_proto_len(text: &str, content: &OutgoingContent, cx: &App) -> usize {
+    let mentions: Vec<TransportMention> = content
+        .mentions
+        .iter()
+        .cloned()
+        .map(OutgoingMention::into_transport)
+        .collect();
+    let hashtags = outgoing_hashtags(
+        text,
+        content
+            .hashtags
+            .iter()
+            .cloned()
+            .map(OutgoingHashtag::into_transport)
+            .collect(),
+        cx,
+    );
+    let emojis: Vec<TransportEmoji> = content
+        .emojis
+        .iter()
+        .cloned()
+        .map(OutgoingEmoji::into_transport)
+        .collect();
+    chat_message_realtime_proto_len(text, &mentions, &hashtags, &emojis)
 }
 
 #[derive(Debug, Clone)]

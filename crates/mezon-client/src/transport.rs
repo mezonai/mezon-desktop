@@ -3262,6 +3262,33 @@ pub fn forward_blocked_for_realtime(
     forward_blocked_for_realtime_message(&message)
 }
 
+pub fn chat_message_realtime_proto_len(
+    text: &str,
+    mentions: &[OutgoingMention],
+    hashtags: &OutgoingHashtags,
+    emojis: &[OutgoingEmoji],
+) -> usize {
+    let mention_everyone = mentions.iter().any(OutgoingMention::is_here);
+    let sent = build_send_content(text, mentions, hashtags, emojis);
+    let proto_mentions: Vec<api::MessageMention> = sent
+        .mentions
+        .iter()
+        .filter_map(OutgoingMention::to_proto)
+        .collect();
+    let message = realtime::ChannelMessageSend {
+        clan_id: i64::MAX,
+        channel_id: i64::MAX,
+        content: sent.json,
+        mentions: proto_mentions,
+        mode: 2,
+        is_public: true,
+        mention_everyone,
+        topic_id: i64::MAX,
+        ..Default::default()
+    };
+    channel_message_send_realtime_proto_len(&message, i32::MAX)
+}
+
 pub fn mention_content_tokens(mentions: &[OutgoingMention]) -> Vec<ContentToken> {
     mentions
         .iter()
@@ -13943,5 +13970,32 @@ mod tests {
         assert!(!named_msg.anonymous_message);
         assert!(named_msg.mention_everyone);
         assert_eq!(named_msg.mentions.len(), 2);
+    }
+
+    #[test]
+    fn chat_message_realtime_proto_len_grows_with_mentions() {
+        let text = "a".repeat(3000);
+        let hashtags = OutgoingHashtags::default();
+        let plain_json_len = serde_json::to_string(&serde_json::json!({ "t": &text }))
+            .unwrap()
+            .len();
+        let plain_len = chat_message_realtime_proto_len(&text, &[], &hashtags, &[]);
+        assert!(plain_len >= plain_json_len);
+        assert!(plain_len < crate::abridged_tcp_adapter::MAX_REALTIME_FRAME_PAYLOAD);
+
+        let mentions: Vec<OutgoingMention> = (0..25)
+            .map(|i| {
+                let s = i * 25;
+                OutgoingMention {
+                    username: "abcdefghijklmnopqrst".to_string(),
+                    user_id: "1840651252770279424".to_string(),
+                    role_id: String::new(),
+                    s,
+                    e: s + 21,
+                }
+            })
+            .collect();
+        let with_mentions_len = chat_message_realtime_proto_len(&text, &mentions, &hashtags, &[]);
+        assert!(with_mentions_len > crate::abridged_tcp_adapter::MAX_REALTIME_FRAME_PAYLOAD);
     }
 }
