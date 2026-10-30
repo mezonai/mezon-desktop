@@ -2823,12 +2823,16 @@ impl ChannelList {
         ts: i64,
         message_id: MessageId,
         cx: &mut Context<Self>,
-    ) {
+    ) -> bool {
+        if channel_id.is_zero() {
+            return false;
+        }
         if !seen {
             self.note_notified_channel(clan_id, channel_id);
         }
         let mut visible_changed = false;
         let mut found = false;
+        let mut counted_badge = false;
         let mut updated_channel = None;
         if let Some(categories) = self.cache.get_mut(&clan_id) {
             for ch in categories
@@ -2859,6 +2863,7 @@ impl ChannelList {
                 );
                 if is_mention && !seen && counts_badge {
                     ch.badge_count = ch.badge_count.saturating_add(1);
+                    counted_badge = true;
                 }
                 visible_changed =
                     visible_changed || was_unread != ch.is_unread() || was_badge != ch.badge_count;
@@ -2870,6 +2875,7 @@ impl ChannelList {
                 let overlay = self.pending_channel_badges.entry(channel_id).or_default();
                 if is_mention {
                     overlay.count += 1;
+                    counted_badge = true;
                 }
                 if ts > overlay.last_sent_timestamp {
                     overlay.last_sent_timestamp = ts;
@@ -2901,6 +2907,7 @@ impl ChannelList {
         if visible_changed {
             self.notify_channel_list(clan_id, cx);
         }
+        counted_badge
     }
 
     pub fn palette_channel_unread(&self, channel: &Channel) -> (u32, i64, i64) {
@@ -16549,6 +16556,76 @@ mod tests {
                 assert_eq!(channels.linked_channel_running, 0);
                 assert!(channels.linked_channel_pump.is_none());
                 assert!(channels.can_resolve_linked_channel(ChannelId(1024)));
+            });
+        });
+    }
+
+    #[gpui::test]
+    fn note_channel_message_only_counts_mention_badges_for_badge_eligible_channels(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        cx.update(|cx| {
+            let channels = init_channel_list(cx);
+            channels.update(cx, |channels, cx| {
+                let mut structure = structure_with_two_channels();
+                let mut stream = make_channel(3, "stream", "1");
+                stream.channel_type = ChannelType::Stream;
+                structure[0].channels.push(stream);
+                channels.apply_clan_structure(ClanId(1), structure, None, cx);
+
+                assert!(!channels.note_channel_message(
+                    ClanId(1),
+                    ChannelId(0),
+                    true,
+                    false,
+                    100,
+                    MessageId(10),
+                    cx,
+                ));
+                assert_eq!(channels.channel_badge_count(ClanId(1), ChannelId(1)), 0);
+                assert_eq!(channels.channel_badge_count(ClanId(1), ChannelId(2)), 0);
+                assert_eq!(channels.channel_badge_count(ClanId(1), ChannelId(3)), 0);
+                assert!(channels.pending_channel_badges.is_empty());
+                assert!(channels.notified_channels.is_empty());
+
+                assert!(!channels.note_channel_message(
+                    ClanId(1),
+                    ChannelId(3),
+                    true,
+                    false,
+                    110,
+                    MessageId(11),
+                    cx,
+                ));
+                assert_eq!(channels.channel_badge_count(ClanId(1), ChannelId(3)), 0);
+
+                assert!(channels.note_channel_message(
+                    ClanId(1),
+                    ChannelId(1),
+                    true,
+                    false,
+                    120,
+                    MessageId(12),
+                    cx,
+                ));
+                assert_eq!(channels.channel_badge_count(ClanId(1), ChannelId(1)), 1);
+
+                assert!(channels.note_channel_message(
+                    ClanId(1),
+                    ChannelId(999),
+                    true,
+                    false,
+                    130,
+                    MessageId(13),
+                    cx,
+                ));
+                assert_eq!(
+                    channels
+                        .pending_channel_badges
+                        .get(&ChannelId(999))
+                        .map(|b| b.count),
+                    Some(1)
+                );
             });
         });
     }

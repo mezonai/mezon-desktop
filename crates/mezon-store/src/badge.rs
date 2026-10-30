@@ -25,6 +25,7 @@ const MAX_BADGE_DEDUP: usize = 500;
 const DM_GOTIFY_DEDUP_WINDOW: Duration = Duration::from_secs(1);
 const NOTIFICATION_USER_MENTIONED: i32 = -9;
 const NOTIFICATION_USER_REPLIED: i32 = -11;
+const NOTIFICATION_CHANNEL_TYPE_STREAM: i32 = 6;
 const NOTIFICATION_CHANNEL_TYPE_THREAD: i32 = 7;
 const NOTIFICATION_CHANNEL_TYPE_APP: i32 = 8;
 const NOTIFICATION_CHANNEL_TYPE_VOICE: i32 = 10;
@@ -445,8 +446,8 @@ impl BadgeService {
                         skip = skip_unread_activity,
                         "socket ChannelMessage decision"
                     );
-                    if !skip_unread_activity {
-                        ChannelList::global(cx).update(cx, |cl, cx| {
+                    let counted_badge = if !skip_unread_activity {
+                        let counted = ChannelList::global(cx).update(cx, |cl, cx| {
                             cl.note_channel_message(
                                 clan_id,
                                 channel_id,
@@ -462,14 +463,21 @@ impl BadgeService {
                                 store.set_last_read_message(channel_id, message_id);
                             });
                         }
-                    }
-                    if !from_me && is_new_message && !seen && !skip_unread_activity {
+                        counted
+                    } else {
+                        false
+                    };
+                    if !from_me
+                        && is_new_message
+                        && !seen
+                        && !skip_unread_activity
+                        && !channel_id.is_zero()
+                    {
                         ClanList::global(cx).update(cx, |cls, cx| {
                             cls.set_has_unread_message(clan_id, cx);
                         });
                     }
-                    if !from_me && is_new_message && !seen && badge_mention && !skip_unread_activity
-                    {
+                    if !from_me && is_new_message && !seen && counted_badge {
                         ClanList::global(cx).update(cx, |cls, cx| {
                             cls.increment_clan_badge(clan_id, cx);
                         });
@@ -615,10 +623,11 @@ impl BadgeService {
         }
         if notif.channel_type == NOTIFICATION_CHANNEL_TYPE_APP
             || notif.channel_type == NOTIFICATION_CHANNEL_TYPE_VOICE
+            || notif.channel_type == NOTIFICATION_CHANNEL_TYPE_STREAM
         {
             tracing::debug!(
                 channel_type = notif.channel_type,
-                "badge: skip notification, app/voice channel"
+                "badge: skip notification, app/voice/stream channel"
             );
             return;
         }
@@ -699,7 +708,7 @@ impl BadgeService {
             "badge: apply notification increment"
         );
         if badge_channel == channel_id {
-            ChannelList::global(cx).update(cx, |cl, cx| {
+            let counted = ChannelList::global(cx).update(cx, |cl, cx| {
                 cl.note_channel_message(
                     clan_id,
                     badge_channel,
@@ -708,13 +717,17 @@ impl BadgeService {
                     msg_time,
                     message_id,
                     cx,
-                );
+                )
             });
-        }
-        ClanList::global(cx).update(cx, |cls, cx| {
-            cls.increment_clan_badge(clan_id, cx);
-        });
-        if badge_channel != channel_id {
+            if counted {
+                ClanList::global(cx).update(cx, |cls, cx| {
+                    cls.increment_clan_badge(clan_id, cx);
+                });
+            }
+        } else {
+            ClanList::global(cx).update(cx, |cls, cx| {
+                cls.increment_clan_badge(clan_id, cx);
+            });
             ChannelList::global(cx).update(cx, |cl, cx| {
                 cl.increment_channel_for_topic(clan_id, channel_id, badge_channel, cx);
             });
@@ -867,6 +880,101 @@ mod tests {
                 badge.note_dm_notification(dm, 300, cx);
             });
             assert_eq!(unread(cx), Some(1));
+        });
+    }
+
+    #[gpui::test]
+    fn notification_only_increments_clan_badge_when_a_channel_badge_moves(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        use prost::Message as _;
+
+        cx.update(|cx| {
+            let api = std::sync::Arc::new(mezon_client::AppApi::new(
+                std::sync::Arc::new(mezon_client::TransportClient::new(String::new())),
+                String::new(),
+            ));
+            RealtimeDispatch::init(api.clone(), cx);
+            let auth_state = cx.new(|_| {
+                AuthState::Authenticated(mezon_client::Session {
+                    user_id: "7".to_string(),
+                    ..Default::default()
+                })
+            });
+            let badge = BadgeService::init(auth_state, cx);
+            let clans = ClanList::init(api.clone(), cx);
+            DirectMessageStore::init(api.clone(), cx);
+            let channels = ChannelList::init(api.clone(), cx);
+            MessagesStore::init(api, cx);
+
+            clans.update(cx, |clans, _| {
+                clans.clans.push(crate::clan::Clan {
+                    id: ClanId(1),
+                    creator_id: UserId(0),
+                    name: "clan".to_string(),
+                    avatar_url: None,
+                    banner_url: None,
+                    badge_count: 0,
+                    has_unread: false,
+                    muted: false,
+                    welcome_channel_id: None,
+                    status: 0,
+                    is_onboarding: false,
+                    is_community: false,
+                    prevent_anonymous: false,
+                    community_banner: String::new(),
+                    about: String::new(),
+                    description: String::new(),
+                    short_url: String::new(),
+                });
+            });
+            channels.update(cx, |channels, cx| {
+                let mut structure = crate::channel::test_support::two_channels();
+                structure[0].channels[1].channel_type = crate::channel::ChannelType::Stream;
+                channels.apply_clan_structure(ClanId(1), structure, None, cx);
+            });
+
+            let make_notif = |channel_id: i64, channel_type: i32, message_id: i64| Notification {
+                code: NOTIFICATION_USER_MENTIONED,
+                clan_id: 1,
+                channel_id,
+                channel_type,
+                content: ChannelMessage {
+                    message_id,
+                    create_time_seconds: 100,
+                    ..Default::default()
+                }
+                .encode_to_vec(),
+                ..Default::default()
+            };
+            let clan_badge = |cx: &App| clans.read(cx).clans[0].badge_count;
+
+            badge.update(cx, |badge, cx| {
+                badge.handle_notification(&make_notif(0, 0, 10), cx);
+            });
+            assert_eq!(clan_badge(cx), 0);
+
+            badge.update(cx, |badge, cx| {
+                badge.handle_notification(&make_notif(2, 6, 11), cx);
+            });
+            assert_eq!(clan_badge(cx), 0);
+            assert_eq!(
+                channels
+                    .read(cx)
+                    .channel_badge_count(ClanId(1), ChannelId(2)),
+                0
+            );
+
+            badge.update(cx, |badge, cx| {
+                badge.handle_notification(&make_notif(1, 1, 12), cx);
+            });
+            assert_eq!(clan_badge(cx), 1);
+            assert_eq!(
+                channels
+                    .read(cx)
+                    .channel_badge_count(ClanId(1), ChannelId(1)),
+                1
+            );
         });
     }
 }
