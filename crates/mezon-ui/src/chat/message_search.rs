@@ -12,9 +12,9 @@ use gpui::{
 use mezon_store::{
     ChannelId, ChannelList, ChannelType, ClanId, MessageId, MessageSearchStore, MessageSpan,
     MessagesStore, RichClick, RichLayout, RichRunKind, SearchDropdownMode, SearchHit,
-    SearchPageToken, autocomplete_needle, has_filter_options, resolve_search_hit_ogp,
-    search_content_highlight_terms, search_dropdown_mode, search_page_count, search_page_numbers,
-    should_show_search_dropdown,
+    SearchPageToken, autocomplete_needle, build_rich_layout, has_filter_options,
+    resolve_search_hit_ogp, search_content_highlight_terms, search_dropdown_mode,
+    search_page_count, search_page_numbers, should_show_search_dropdown,
 };
 use ui::ScrollAxes;
 use ui::Scrollbars;
@@ -25,9 +25,9 @@ use crate::chat::layout::ChatLayout;
 use crate::chat::member_list::{MentionMemberRaw, mention_member_pool};
 use crate::chat::mention_input::filter_members_for_search;
 use crate::chat::message::{
-    RichRunPalette, code_block_copy_overlay, format_message_time, inline_code_chip,
-    interactive_link_text, open_message_link, render_ogp_preview, render_poll_card_readonly,
-    rich_run_highlight_with_link_underline,
+    RichRunPalette, code_block_copy_overlay, format_message_time, hidden_hashtag_label,
+    inline_code_chip, interactive_link_text, open_message_link, render_ogp_preview,
+    render_poll_card_readonly, rich_run_highlight_with_link_underline,
 };
 use crate::chat::role_style::message_sender_color;
 use crate::components::primitives::{Icon, IconName, Input, InputState, Sizable, Size, Spinner};
@@ -939,6 +939,8 @@ fn render_search_row(
                                                 hit,
                                                 highlight_terms,
                                                 theme,
+                                                locale,
+                                                cx,
                                             )),
                                     )
                                 })
@@ -994,15 +996,19 @@ fn render_search_message_content(
     hit: &SearchHit,
     terms: &[String],
     theme: &Theme,
+    locale: &str,
+    cx: &App,
 ) -> gpui::AnyElement {
-    if hit
-        .spans
+    let masked = mask_hidden_hashtags(&hit.spans, locale, cx);
+    let spans: &[MessageSpan] = masked.as_deref().unwrap_or(&hit.spans);
+    let masked_layout = masked.as_deref().and_then(build_rich_layout);
+    if spans
         .iter()
         .any(|span| matches!(span, MessageSpan::Code(_) | MessageSpan::CodeBlock { .. }))
     {
-        return render_search_spans(&hit.spans, hit.message_id, theme);
+        return render_search_spans(spans, hit.message_id, theme);
     }
-    if let Some(layout) = hit.rich_layout.as_ref()
+    if let Some(layout) = masked_layout.as_ref().or(hit.rich_layout.as_ref())
         && !layout.text.is_empty()
     {
         return render_rich_search_content(layout, terms, theme);
@@ -1011,6 +1017,38 @@ fn render_search_message_content(
         return render_search_styled_plain(hit.content_preview.as_ref(), terms, theme);
     }
     div().into_any_element()
+}
+
+fn mask_hidden_hashtags(spans: &[MessageSpan], locale: &str, cx: &App) -> Option<Vec<MessageSpan>> {
+    let mut changed = false;
+    let masked: Vec<MessageSpan> = spans
+        .iter()
+        .map(|span| match span {
+            MessageSpan::Hashtag {
+                display,
+                channel_id,
+                meta,
+            } => match hidden_hashtag_label(
+                display,
+                channel_id.as_deref(),
+                meta.as_deref(),
+                locale,
+                cx,
+            ) {
+                Some(label) => {
+                    changed = true;
+                    MessageSpan::Hashtag {
+                        display: label,
+                        channel_id: None,
+                        meta: None,
+                    }
+                }
+                None => span.clone(),
+            },
+            other => other.clone(),
+        })
+        .collect();
+    changed.then_some(masked)
 }
 
 fn render_search_spans(
