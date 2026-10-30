@@ -4214,11 +4214,20 @@ fn build_message_content_json(
     serde_json::Value::Object(obj).to_string()
 }
 
+fn channel_message_header_identity(header: Option<&api::ChannelMessageHeader>) -> (i64, i64) {
+    match header {
+        Some(header) => (header.id, header.sender_id),
+        None => (0, 0),
+    }
+}
+
 /// One page from `ListChannelMessages`, including read-position metadata.
 #[derive(Debug, Clone)]
 pub struct ListChannelMessagesResult {
     pub messages: Vec<ApiMessage>,
     pub last_seen_message_id: i64,
+    pub last_sent_message_id: i64,
+    pub last_sent_sender_id: i64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -5402,6 +5411,8 @@ impl MezonTransport {
 
         let page = api::ChannelMessageList::decode(response.as_slice())?;
         let last_seen_message_id = page.last_seen_message.as_ref().map(|h| h.id).unwrap_or(0);
+        let (last_sent_message_id, last_sent_sender_id) =
+            channel_message_header_identity(page.last_sent_message.as_ref());
         let parsed: Vec<ApiMessage> = page
             .messages
             .into_iter()
@@ -5420,6 +5431,8 @@ impl MezonTransport {
         Ok(ListChannelMessagesResult {
             messages: parsed,
             last_seen_message_id,
+            last_sent_message_id,
+            last_sent_sender_id,
         })
     }
 
@@ -5457,6 +5470,8 @@ impl MezonTransport {
 
         let page = api::ChannelMessageList::decode(response.as_slice())?;
         let last_seen_message_id = page.last_seen_message.as_ref().map(|h| h.id).unwrap_or(0);
+        let (last_sent_message_id, last_sent_sender_id) =
+            channel_message_header_identity(page.last_sent_message.as_ref());
         let messages: Vec<ApiMessage> = page
             .messages
             .into_iter()
@@ -5465,6 +5480,8 @@ impl MezonTransport {
         Ok(ListChannelMessagesResult {
             messages,
             last_seen_message_id,
+            last_sent_message_id,
+            last_sent_sender_id,
         })
     }
 
@@ -6376,7 +6393,7 @@ impl MezonTransport {
             .send_api_request(cid, "ListChannelDetail", body)
             .await?;
         if code != 0 {
-            return Err(anyhow::anyhow!("API error: code={}", code));
+            return Err(api_status_error(code));
         }
         let channel = api::ChannelDescription::decode(response.as_slice())?;
         Ok(Self::channel_desc_from_proto(channel))

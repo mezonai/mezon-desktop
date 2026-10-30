@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -255,6 +255,7 @@ pub struct SoundPicker {
     focus_handle: FocusHandle,
     name_input: Entity<InputState>,
     picked_path: Option<PathBuf>,
+    convert_to_wav: bool,
     file_label: SharedString,
     preview_url: Option<SharedString>,
     local_pcm: Option<DecodedPcm>,
@@ -349,6 +350,7 @@ impl SoundPicker {
             focus_handle: cx.focus_handle(),
             name_input,
             picked_path: None,
+            convert_to_wav: false,
             file_label,
             preview_url,
             local_pcm: None,
@@ -684,10 +686,13 @@ impl SoundPicker {
             let validated = cx
                 .background_spawn(async move { validate_sound_file(&path_buf, MAX_SOUND_BYTES) })
                 .await;
-            if let Err(code) = validated {
-                show_error(cx, sound_error_message(&locale, &code));
-                return;
-            }
+            let convert = match picked_sound_needs_wav(&path, validated) {
+                Ok(convert) => convert,
+                Err(code) => {
+                    show_error(cx, sound_error_message(&locale, &code));
+                    return;
+                }
+            };
             let label = path
                 .file_name()
                 .and_then(|n| n.to_str())
@@ -697,6 +702,7 @@ impl SoundPicker {
             let default_name = default_voice_shortname();
             let _ = this.update_in(cx, |this, window, cx| {
                 this.picked_path = Some(path.clone());
+                this.convert_to_wav = convert;
                 this.file_label = label.into();
                 this.preview_url = Some(preview.into());
                 this.local_pcm = None;
@@ -750,7 +756,7 @@ impl SoundPicker {
             return;
         }
 
-        let needs_processing = self.needs_processing(cx);
+        let needs_processing = self.needs_processing(cx) || self.convert_to_wav;
         if needs_processing
             && estimated_mono_wav_bytes(self.selected_duration(cx))
                 .is_none_or(|size| size > MAX_SOUND_BYTES)
@@ -893,6 +899,25 @@ fn waveform_amplitudes(pcm: &DecodedPcm) -> Vec<f32> {
             peak.clamp(0.08, 1.0)
         })
         .collect()
+}
+
+fn picked_sound_needs_wav(path: &Path, validated: Result<(), String>) -> Result<bool, String> {
+    match validated {
+        Ok(()) => Ok(false),
+        Err(code) if code == "unsupported_type" => {
+            let ext = path
+                .extension()
+                .and_then(|e| e.to_str())
+                .unwrap_or("")
+                .to_ascii_lowercase();
+            if mezon_store::SOUND_ALLOWED_EXTENSIONS.contains(&ext.as_str()) {
+                Ok(true)
+            } else {
+                Err(code)
+            }
+        }
+        Err(code) => Err(code),
+    }
 }
 
 fn sound_error_message(locale: &str, code: &str) -> String {
@@ -1297,5 +1322,43 @@ mod tests {
         assert_eq!(DEFAULT_VOLUME_PERCENT, 80.0);
         assert_eq!(DEFAULT_VOLUME_PERCENT / UNITY_VOLUME_PERCENT, 0.8);
         assert_eq!(MAX_VOLUME_PERCENT, 100.0);
+    }
+
+    #[test]
+    fn picked_sound_needs_wav_keeps_valid_file_as_is() {
+        assert_eq!(
+            picked_sound_needs_wav(Path::new("a.mp3"), Ok(())),
+            Ok(false)
+        );
+    }
+
+    #[test]
+    fn picked_sound_needs_wav_converts_allowed_extension_with_unsupported_content() {
+        for name in ["a.mp3", "a.MP3", "a.wav"] {
+            assert_eq!(
+                picked_sound_needs_wav(Path::new(name), Err("unsupported_type".into())),
+                Ok(true)
+            );
+        }
+    }
+
+    #[test]
+    fn picked_sound_needs_wav_rejects_disallowed_or_missing_extension() {
+        for name in ["a.ogg", "a.m4a", "noext"] {
+            assert_eq!(
+                picked_sound_needs_wav(Path::new(name), Err("unsupported_type".into())),
+                Err("unsupported_type".into())
+            );
+        }
+    }
+
+    #[test]
+    fn picked_sound_needs_wav_preserves_other_validation_errors() {
+        for code in ["size_limit", "empty"] {
+            assert_eq!(
+                picked_sound_needs_wav(Path::new("a.mp3"), Err(code.into())),
+                Err(code.into())
+            );
+        }
     }
 }

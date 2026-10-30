@@ -182,7 +182,11 @@ impl PlayerImpl {
         if self.failed.get() {
             return None;
         }
-        let sample = self.appsink.try_pull_sample(gst::ClockTime::ZERO)?;
+        let sample = if self.is_playing() {
+            self.appsink.try_pull_sample(gst::ClockTime::ZERO)?
+        } else {
+            self.appsink.try_pull_preroll(gst::ClockTime::ZERO)?
+        };
         let buffer = sample.buffer()?;
         let caps = sample.caps()?;
         let info = gst_video::VideoInfo::from_caps(caps).ok()?;
@@ -241,7 +245,7 @@ impl PlayerImpl {
         let position = gst::ClockTime::from_nseconds((target * 1_000_000_000.0) as u64);
         if let Err(error) = self
             .playbin
-            .seek_simple(gst::SeekFlags::FLUSH | gst::SeekFlags::KEY_UNIT, position)
+            .seek_simple(gst::SeekFlags::FLUSH | gst::SeekFlags::ACCURATE, position)
         {
             tracing::warn!(target: "mezon_video", %error, "gstreamer seek failed");
         }

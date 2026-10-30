@@ -5905,6 +5905,7 @@ dependencies = [
  "core-foundation 0.10.0",
  "core-foundation-sys 0.8.7",
  "core-video",
+ "dirs 5.0.1",
  "gdk-pixbuf 0.20.10",
  "gpui",
  "gstreamer",

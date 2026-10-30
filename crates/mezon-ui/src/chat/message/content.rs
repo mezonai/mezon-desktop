@@ -2444,16 +2444,48 @@ pub(super) fn hashtag_chip(
     cx: &App,
 ) -> HashtagChip {
     let parsed_channel = channel_id.and_then(parse_channel_id);
-    let resolved = parsed_channel
-        .and_then(|cid| hashtag_channel(cid, cx))
-        .or_else(|| {
-            let meta = meta?;
+    let resolved = parsed_channel.and_then(|cid| hashtag_channel(cid, cx));
+    let (in_clan, meta_visible) = match meta {
+        Some(meta) if resolved.is_none() => {
             let store = ChannelList::global(cx).read(cx);
-            hashtag_meta_visible_in(store, meta).then(|| ResolvedHashtag {
-                name: Some(meta.label.clone()),
-                icon: mention_channel_icon(meta.channel_type, meta.private, 0),
-            })
-        });
+            let in_clan = ClanList::global(cx).read(cx).clan(meta.clan_id).is_some();
+            (in_clan, hashtag_meta_visible_in(store, meta))
+        }
+        _ => (false, false),
+    };
+    hashtag_chip_from_meta(
+        display,
+        parsed_channel,
+        resolved,
+        meta,
+        in_clan,
+        meta_visible,
+        locale,
+    )
+}
+
+fn hashtag_chip_from_meta(
+    display: &str,
+    parsed_channel: Option<ChannelId>,
+    resolved: Option<ResolvedHashtag>,
+    meta: Option<&HashtagMeta>,
+    in_clan: bool,
+    meta_visible: bool,
+    locale: &str,
+) -> HashtagChip {
+    let resolved = resolved.or_else(|| {
+        let meta = meta?;
+        meta_visible.then(|| ResolvedHashtag {
+            name: Some(meta.label.clone()),
+            icon: mention_channel_icon(meta.channel_type, meta.private, 0),
+        })
+    });
+    if resolved.is_none()
+        && let (Some(parsed), Some(meta)) = (parsed_channel, meta)
+        && thread_link_wants_detail(meta, in_clan, meta_visible)
+    {
+        return private_channel_chip(Some(parsed), Some(meta.clan_id), locale);
+    }
     let mut chip = hashtag_chip_for(display, parsed_channel, resolved, locale);
     chip.clan_hint = meta.map(|meta| meta.clan_id);
     chip
@@ -2467,8 +2499,21 @@ pub(crate) fn hidden_hashtag_label(
     cx: &App,
 ) -> Option<SharedString> {
     let chip = hashtag_chip(display, channel_id, meta, locale, cx);
-    (matches!(chip.icon, IconName::LockedPrivate) && chip.channel_id.is_none())
-        .then_some(chip.label)
+    matches!(chip.icon, IconName::LockedPrivate).then_some(chip.label)
+}
+
+fn private_channel_chip(
+    channel_id: Option<ChannelId>,
+    clan_hint: Option<ClanId>,
+    locale: &str,
+) -> HashtagChip {
+    HashtagChip {
+        label: SharedString::new_static(mezon_i18n::t(locale, "message.privateChannel")),
+        icon: IconName::LockedPrivate,
+        italic: false,
+        channel_id,
+        clan_hint,
+    }
 }
 
 fn hashtag_chip_for(
@@ -2498,13 +2543,7 @@ fn hashtag_chip_for(
         };
     }
     if parsed_channel.is_some() {
-        return HashtagChip {
-            label: SharedString::new_static(mezon_i18n::t(locale, "message.privateChannel")),
-            icon: IconName::LockedPrivate,
-            italic: false,
-            channel_id: None,
-            clan_hint: None,
-        };
+        return private_channel_chip(None, None, locale);
     }
     HashtagChip {
         label: hashtag_display_label(display),
@@ -2749,12 +2788,49 @@ fn navigate_to_channel(
     locale: &str,
     cx: &mut App,
 ) {
-    let Some(clan_id) = clan_for_channel(channel_id, cx).or(clan_hint) else {
+    let no_access = mezon_i18n::t(locale, "message.noAccess");
+    if let Some(clan_id) = clan_for_channel(channel_id, cx) {
+        navigate(
+            cx,
+            Route::Channel {
+                clan_id,
+                channel_id,
+            },
+        );
+        return;
+    }
+    let Some(clan_id) = clan_hint else {
         Shell::global(cx).update(cx, |shell, cx| {
-            shell.info(mezon_i18n::t(locale, "message.noAccess"), cx);
+            shell.info(no_access, cx);
         });
         return;
     };
+    if ChannelList::global(cx)
+        .read(cx)
+        .is_clan_cache_loaded(clan_id)
+    {
+        let task =
+            ChannelList::global(cx).update(cx, |c, cx| c.channel_link_detail(channel_id, cx));
+        cx.spawn(async move |cx| {
+            let resolved = task.await;
+            cx.update(|cx| match resolved {
+                Some(clan_id) => navigate(
+                    cx,
+                    Route::Channel {
+                        clan_id,
+                        channel_id,
+                    },
+                ),
+                None => {
+                    Shell::global(cx).update(cx, |shell, cx| {
+                        shell.info(no_access, cx);
+                    });
+                }
+            });
+        })
+        .detach();
+        return;
+    }
     navigate(
         cx,
         Route::Channel {
@@ -2773,34 +2849,6 @@ fn clan_for_channel(channel_id: ChannelId, cx: &App) -> Option<ClanId> {
             .or_else(|| store.linked_channel(channel_id))
             .map(|channel| channel.clan_id)
     })
-}
-
-pub(super) fn channel_links_needing_detail(spans: &[MessageSpan], cx: &App) -> Vec<ChannelId> {
-    let store = ChannelList::global(cx).read(cx);
-    let clans = ClanList::global(cx).read(cx);
-    let mut channel_ids = Vec::new();
-    for span in spans {
-        let MessageSpan::Hashtag {
-            channel_id: Some(raw),
-            meta: Some(meta),
-            ..
-        } = span
-        else {
-            continue;
-        };
-        let Some(channel_id) = parse_channel_id(raw) else {
-            continue;
-        };
-        let in_clan = clans.clan(meta.clan_id).is_some();
-        if thread_link_wants_detail(meta, in_clan, hashtag_meta_visible_in(store, meta))
-            && store.can_resolve_linked_channel(channel_id)
-            && store.linkable_channel(channel_id).is_none()
-            && !channel_ids.contains(&channel_id)
-        {
-            channel_ids.push(channel_id);
-        }
-    }
-    channel_ids
 }
 
 // linked-channel-api: re-add channel_url_clan_id to the imports above when restoring.
@@ -2838,17 +2886,6 @@ pub(super) fn channel_links_needing_detail(spans: &[MessageSpan], cx: &App) -> V
 // linked-channel-api:     let clans = ClanList::global(cx).read(cx);
 // linked-channel-api:     clans.has_listed() && clans.clan(clan_id).is_some()
 // linked-channel-api: }
-
-pub(super) fn defer_linked_channel_resolve(channel_ids: Vec<ChannelId>, cx: &mut App) {
-    if channel_ids.is_empty() {
-        return;
-    }
-    cx.defer(move |cx| {
-        ChannelList::global(cx).update(cx, |channels, cx| {
-            channels.resolve_linked_channels(channel_ids, cx);
-        });
-    });
-}
 
 fn render_plain_text_spans(msg: &Message, ctx: &RowCtx, color: gpui::Rgba) -> AnyElement {
     let text: SharedString = match msg.spans.as_slice() {
@@ -3460,7 +3497,7 @@ mod tests {
 mod hashtag_label_tests {
     use super::{
         ChannelId, ChannelType, ClanId, HashtagChip, HashtagMeta, IconName, ResolvedHashtag,
-        hashtag_chip_for, hashtag_meta_visible, thread_link_wants_detail,
+        hashtag_chip_for, hashtag_chip_from_meta, hashtag_meta_visible, thread_link_wants_detail,
     };
     use gpui::SharedString;
 
@@ -3584,6 +3621,45 @@ mod hashtag_label_tests {
         assert!(!thread_link_wants_detail(&thread, false, false));
         let channel = meta(ChannelType::Text, None, false);
         assert!(!thread_link_wants_detail(&channel, true, false));
+    }
+
+    #[test]
+    fn unresolved_thread_link_wanting_detail_builds_clickable_private_chip() {
+        let thread = meta(ChannelType::Thread, None, false);
+        let chip = hashtag_chip_from_meta(
+            LINK,
+            Some(ChannelId(2)),
+            None,
+            Some(&thread),
+            true,
+            hashtag_meta_visible(&thread, true, false),
+            "en",
+        );
+
+        assert_eq!(chip.label, "private-channel");
+        assert!(!chip.italic);
+        assert_eq!(chip.icon.path(), IconName::LockedPrivate.path());
+        assert_eq!(chip.channel_id, Some(ChannelId(2)));
+        assert_eq!(chip.clan_hint, Some(ClanId(1)));
+    }
+
+    #[test]
+    fn unresolved_non_thread_link_in_loaded_clan_stays_non_clickable() {
+        let channel = meta(ChannelType::Text, None, false);
+        let chip = hashtag_chip_from_meta(
+            "#secret",
+            Some(ChannelId(2)),
+            None,
+            Some(&channel),
+            true,
+            hashtag_meta_visible(&channel, true, false),
+            "en",
+        );
+
+        assert_eq!(chip.label, "private-channel");
+        assert!(!chip.italic);
+        assert_eq!(chip.icon.path(), IconName::LockedPrivate.path());
+        assert_eq!(chip.channel_id, None);
     }
 }
 

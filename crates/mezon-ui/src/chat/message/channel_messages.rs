@@ -4981,19 +4981,17 @@ impl ChannelMessages {
                             .into_any_element();
                     }
                     let row_ix = ix - usize::from(header_shown);
-                    let (probe_urls, linked_channels, context_menu_enabled) = {
+                    let (probe_urls, context_menu_enabled) = {
                         let topic = entity.read(cx);
                         match topic.topic_messages.get(row_ix) {
                             Some(message) => (
                                 super::audio_meta::urls_needing_probe(&message.attachments, cx),
-                                super::content::channel_links_needing_detail(&message.spans, cx),
                                 topic_context_menu_enabled(message, active_topic_bucket(cx)),
                             ),
-                            None => (Vec::new(), Vec::new(), false),
+                            None => (Vec::new(), false),
                         }
                     };
                     super::audio_meta::defer_audio_probe(probe_urls, cx);
-                    super::content::defer_linked_channel_resolve(linked_channels, cx);
                     let ctx = RowCtx {
                         app: cx,
                         theme: cx.theme(),
@@ -5385,18 +5383,16 @@ impl Render for ChannelMessages {
                             .into_any_element();
                     }
                     let msg_ix = ix - usize::from(header_shown);
-                    let (probe_urls, linked_channels) = {
+                    let probe_urls = {
                         let messages = store.read(cx);
                         match messages.viewport_messages().get(msg_ix) {
-                            Some(message) => (
-                                super::audio_meta::urls_needing_probe(&message.attachments, cx),
-                                super::content::channel_links_needing_detail(&message.spans, cx),
-                            ),
-                            None => (Vec::new(), Vec::new()),
+                            Some(message) => {
+                                super::audio_meta::urls_needing_probe(&message.attachments, cx)
+                            }
+                            None => Vec::new(),
                         }
                     };
                     super::audio_meta::defer_audio_probe(probe_urls, cx);
-                    super::content::defer_linked_channel_resolve(linked_channels, cx);
                     let ctx = RowCtx {
                         app: cx,
                         theme: cx.theme(),

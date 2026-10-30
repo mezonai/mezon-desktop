@@ -9,7 +9,9 @@ use gpui::{
 };
 use mezon_store::{may_be_transcoded, open_media_url_external, transcoded_hls_playlist};
 #[cfg(any(windows, target_os = "macos"))]
-use mezon_video::{PreparedVideo, needs_prepared_open};
+use mezon_video::PreparedVideo;
+#[cfg(any(windows, target_os = "macos", target_os = "linux"))]
+use mezon_video::needs_prepared_open;
 use mezon_video::{VideoFrame, VideoPlayer};
 
 use crate::app::shell::Shell;
@@ -19,6 +21,7 @@ use crate::theme::ActiveTheme;
 
 const SEEK_STEP_SECONDS: f64 = 5.0;
 const SEEK_MIN_INTERVAL: Duration = Duration::from_millis(80);
+const FRAME_REFRESH_AFTER_SEEK: Duration = Duration::from_secs(2);
 const REPLAY_THRESHOLD_SECONDS: f64 = 0.05;
 const STUCK_PLAYING_END_SECONDS: f64 = 0.02;
 const THEATER_FILL: f32 = 0.92;
@@ -130,6 +133,7 @@ pub struct VideoPlayerView {
     _open_task: Option<Task<()>>,
     last_seek_at: Option<Instant>,
     pending_seek: Option<f64>,
+    frame_refresh_until: Option<Instant>,
     signed: Option<mezon_client::cdn_signature::SignedUrl>,
     resigned: bool,
     source: VideoSource,
@@ -181,6 +185,7 @@ impl VideoPlayerView {
             _open_task: None,
             last_seek_at: None,
             pending_seek: None,
+            frame_refresh_until: None,
             signed: None,
             resigned: false,
             source: VideoSource::Detect,
@@ -279,6 +284,21 @@ impl VideoPlayerView {
                 });
                 return;
             }
+
+            #[cfg(target_os = "linux")]
+            let url = if needs_prepared_open(url.as_ref()) {
+                let copy_url = url.clone();
+                let local = cx
+                    .background_executor()
+                    .spawn(async move { mezon_video::prepare_local_copy(copy_url.as_ref()) })
+                    .await;
+                match local {
+                    Ok(Some(local)) => SharedString::from(local),
+                    Ok(None) | Err(_) => url,
+                }
+            } else {
+                url
+            };
 
             let _ = this.update(cx, |this, cx| {
                 this.finish_open(VideoPlayer::open(url.as_ref(), decode_max_size), cx);
@@ -420,6 +440,7 @@ impl VideoPlayerView {
             _open_task: None,
             last_seek_at: None,
             pending_seek: None,
+            frame_refresh_until: None,
             signed: None,
             resigned: false,
             source: VideoSource::Detect,
@@ -433,6 +454,11 @@ impl VideoPlayerView {
         let focus_handle = view.read(cx).focus_handle.clone();
         window.focus(&focus_handle, cx);
         Shell::global(cx).update(cx, |shell, cx| shell.show_modal(view.into(), cx));
+    }
+
+    fn is_refreshing_frame(&self) -> bool {
+        self.frame_refresh_until
+            .is_some_and(|until| Instant::now() < until)
     }
 
     fn poll_frame(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -458,7 +484,15 @@ impl VideoPlayerView {
             player.pause();
             playing = false;
         }
-        let new_frame = if playing { player.copy_frame() } else { None };
+        let refreshing = self.is_refreshing_frame();
+        let new_frame = if playing || refreshing {
+            player.copy_frame()
+        } else {
+            None
+        };
+        if new_frame.is_some() || !refreshing {
+            self.frame_refresh_until = None;
+        }
         let new_frame = new_frame.map(|frame| Self::adopt_frame(&self.shared, frame, window, cx));
         let previous = {
             let mut shared = self.shared.borrow_mut();
@@ -524,6 +558,7 @@ impl VideoPlayerView {
         self.last_label_seconds = (0, 0);
         self.last_seek_at = None;
         self.pending_seek = None;
+        self.frame_refresh_until = None;
         self.reset_source_plan();
         {
             let mut shared = self.shared.borrow_mut();
@@ -540,6 +575,7 @@ impl VideoPlayerView {
         self._open_task = None;
         self._plugin_task = None;
         self.pending_seek = None;
+        self.frame_refresh_until = None;
         self.load_state = VideoLoadState::Loading;
         self.autoplay_when_ready = false;
         if let Some(player) = self.player.take() {
@@ -659,6 +695,7 @@ impl VideoPlayerView {
         self.pending_seek = None;
         let was_playing = player.is_playing();
         player.seek(target);
+        self.frame_refresh_until = Some(now + FRAME_REFRESH_AFTER_SEEK);
         if was_playing {
             player.play();
             self.shared.borrow_mut().playing = true;
@@ -1223,7 +1260,7 @@ impl Render for VideoPlayerView {
                 .into_any_element();
         }
 
-        if playing && window.is_window_active() {
+        if (playing || self.is_refreshing_frame()) && window.is_window_active() {
             window.request_animation_frame();
         }
 

@@ -578,7 +578,7 @@ pub(crate) fn build_topic_row_view(topic: &TopicDiscussion, cx: &App) -> TopicRo
         });
     TopicRowView {
         avatar_url,
-        reply_preview: topic.reply_preview(),
+        reply_preview: topic.original_message_preview(),
     }
 }
 
