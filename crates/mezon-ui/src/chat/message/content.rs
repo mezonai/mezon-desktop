@@ -2491,6 +2491,17 @@ fn hashtag_chip_from_meta(
     chip
 }
 
+pub(crate) fn hidden_hashtag_label(
+    display: &str,
+    channel_id: Option<&str>,
+    meta: Option<&HashtagMeta>,
+    locale: &str,
+    cx: &App,
+) -> Option<SharedString> {
+    let chip = hashtag_chip(display, channel_id, meta, locale, cx);
+    matches!(chip.icon, IconName::LockedPrivate).then_some(chip.label)
+}
+
 fn private_channel_chip(
     channel_id: Option<ChannelId>,
     clan_hint: Option<ClanId>,
