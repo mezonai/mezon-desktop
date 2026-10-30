@@ -499,10 +499,25 @@ pub(crate) fn render_rich_layout(
         let clear_message_id = message_id;
         let hover_epoch = row_memo.borrow().rich_link_hover_epoch;
         let itext_id = (msg.row_anchor_id.0 as u64) << 32 | u64::from(hover_epoch);
+        let menu_layout = styled.layout().clone();
+        let menu_ranges = plan.click_ranges.clone();
+        let menu_actions = plan.actions.clone();
+        let menu_host = ctx.video_host.clone();
         div()
             .id(("msg-link-hover", msg.row_anchor_id.0 as usize))
             .max_w_full()
             .min_w_0()
+            .on_mouse_down(gpui::MouseButton::Right, move |event, _, cx| {
+                let Some(Ok(index)) = menu_layout.try_index_for_position(event.position) else {
+                    return;
+                };
+                let Some(url) = rich_link_at(&menu_ranges, &menu_actions, index) else {
+                    return;
+                };
+                let _ = menu_host.update(cx, |this, _| {
+                    this.note_context_link(message_id, event.position, url.to_string());
+                });
+            })
             .on_hover(move |hovered, _, cx| {
                 if *hovered {
                     return;
@@ -841,7 +856,7 @@ fn render_selectable_segmented_spans(
                 base = end;
             }
             MessageSpan::Link { text, url, kind } if *kind == LinkKind::Plain => {
-                let resolved = resolve_link_url(url, text);
+                let resolved = SharedString::from(resolve_link_url(url, text));
                 let mut line_base = 0usize;
                 for (line_index, line) in text.split('\n').enumerate() {
                     if line_index > 0 {
@@ -862,9 +877,13 @@ fn render_selectable_segmented_spans(
                                 .id(("msg-link", link_key))
                                 .cursor_pointer()
                                 .text_color(ctx.theme.tokens.mention_color)
+                                .on_mouse_down(
+                                    gpui::MouseButton::Right,
+                                    note_context_link(ctx, msg.id, resolved.clone()),
+                                )
                                 .on_click(move |_, _, cx| {
                                     if !selection.borrow().has_selection() {
-                                        open_message_link(target.clone(), cx);
+                                        open_message_link(target.to_string(), cx);
                                     }
                                 })
                                 .child(styled),
@@ -922,7 +941,8 @@ fn render_selectable_segmented_spans(
                     .map(|poster| (poster, ctx.social_cache.clone()));
                 row = row.child(render_social_link_card(
                     *kind,
-                    &ctx.selection,
+                    ctx,
+                    Some(msg.id),
                     resolved,
                     card_key,
                     url_col,
@@ -1833,7 +1853,8 @@ fn append_span(
             *span_key += 1;
             row.child(render_social_link_card(
                 *kind,
-                &ctx.selection,
+                ctx,
+                None,
                 SharedString::from(resolve_link_url(url, text)),
                 key,
                 render_social_link_url_row(text, theme),
@@ -2087,7 +2108,8 @@ fn social_card_launch_url(url: &str, cx: &gpui::App) -> String {
 
 fn render_social_link_card(
     kind: LinkKind,
-    selection: &SharedSelection,
+    ctx: &RowCtx,
+    message_id: Option<MessageId>,
     resolved: SharedString,
     // Keyed by position, not by url: the same social link twice in one message would otherwise
     // hash to one id and the two cards would share their interactive state.
@@ -2102,7 +2124,7 @@ fn render_social_link_card(
         LinkKind::Plain => return gpui::Empty.into_any_element(),
     };
     let id = ("msg-social", key);
-    let selection = selection.clone();
+    let selection = ctx.selection.clone();
     let card_width = poster.as_ref().map_or(SOCIAL_CARD_WIDTH, |(poster, _)| {
         (poster.width + SOCIAL_CARD_PADDING * 2.).max(SOCIAL_CARD_WIDTH)
     });
@@ -2129,6 +2151,12 @@ fn render_social_link_card(
                 .bg(rgb(SOCIAL_CARD_BG))
                 .overflow_hidden()
                 .cursor_pointer()
+                .when_some(message_id, |card, message_id| {
+                    card.on_mouse_down(
+                        gpui::MouseButton::Right,
+                        note_context_link(ctx, message_id, resolved.clone()),
+                    )
+                })
                 .on_click(move |_, _, cx| {
                     if !selection.borrow().has_selection() {
                         PlatformStore::open_app_window(social_card_launch_url(&resolved, cx), cx);
@@ -2929,10 +2957,11 @@ fn render_plain_text_spans(msg: &Message, ctx: &RowCtx, color: gpui::Rgba) -> An
 }
 
 fn resolve_link_url(url: &str, text: &str) -> String {
-    if !url.is_empty() {
-        return url.to_string();
-    }
-    text.to_string()
+    link_target(url, text).to_string()
+}
+
+fn link_target<'a>(url: &'a str, text: &'a str) -> &'a str {
+    if url.is_empty() { text } else { url }
 }
 
 /// The first detected link in a message's rich-text spans, if any (for the
@@ -2942,6 +2971,43 @@ pub(crate) fn first_link(msg: &Message) -> Option<String> {
         MessageSpan::Link { text, url, .. } => Some(resolve_link_url(url, text)),
         _ => None,
     })
+}
+
+pub(crate) fn clicked_menu_link(msg: &Message, clicked_link: Option<&str>) -> Option<String> {
+    let clicked = clicked_link?;
+    msg.spans.iter().find_map(|span| match span {
+        MessageSpan::Link { text, url, .. } if link_target(url, text) == clicked => {
+            Some(clicked.to_string())
+        }
+        _ => None,
+    })
+}
+
+fn rich_link_at(
+    ranges: &[Range<usize>],
+    actions: &[RichClick],
+    index: usize,
+) -> Option<SharedString> {
+    ranges
+        .iter()
+        .zip(actions)
+        .find_map(|(range, action)| match action {
+            RichClick::Link(url) if range.contains(&index) => Some(url.clone()),
+            _ => None,
+        })
+}
+
+fn note_context_link(
+    ctx: &RowCtx,
+    message_id: MessageId,
+    url: SharedString,
+) -> impl Fn(&gpui::MouseDownEvent, &mut gpui::Window, &mut App) + 'static {
+    let host = ctx.video_host.clone();
+    move |event, _, cx| {
+        let _ = host.update(cx, |this, _| {
+            this.note_context_link(message_id, event.position, url.to_string());
+        });
+    }
 }
 
 pub(crate) fn open_message_link(url: String, cx: &mut App) {

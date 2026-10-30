@@ -755,6 +755,16 @@ fn pagination_direction(
     }
 }
 
+fn link_for_menu(
+    pending: Option<(MessageId, Point<Pixels>, String)>,
+    message_id: MessageId,
+    position: Point<Pixels>,
+) -> Option<String> {
+    pending
+        .filter(|(id, at, _)| *id == message_id && *at == position)
+        .map(|(_, _, url)| url)
+}
+
 fn hover_show_target(pointer: Option<MessageId>, shown: Option<MessageId>) -> Option<MessageId> {
     pointer.filter(|target| shown != Some(*target))
 }
@@ -1180,6 +1190,28 @@ mod pagination_tests {
 }
 
 #[cfg(test)]
+mod link_for_menu_tests {
+    use super::*;
+    use gpui::point;
+
+    #[test]
+    fn only_the_link_under_this_right_click_reaches_the_menu() {
+        let at = point(px(880.), px(604.));
+        let noted = || Some((MessageId(1), at, "https://b.example/two".to_string()));
+        assert_eq!(
+            link_for_menu(noted(), MessageId(1), at).as_deref(),
+            Some("https://b.example/two")
+        );
+        assert_eq!(
+            link_for_menu(noted(), MessageId(1), point(px(480.), px(604.))),
+            None
+        );
+        assert_eq!(link_for_menu(noted(), MessageId(2), at), None);
+        assert_eq!(link_for_menu(None, MessageId(1), at), None);
+    }
+}
+
+#[cfg(test)]
 mod hover_schedule_tests {
     use super::*;
 
@@ -1373,6 +1405,8 @@ pub struct ChannelMessages {
     context_menu_target: Option<(MessageId, Point<Pixels>)>,
     pending_context_image: Option<(MessageId, String)>,
     context_menu_image: Option<String>,
+    pending_context_link: Option<(MessageId, Point<Pixels>, String)>,
+    context_menu_link: Option<String>,
     context_menu_forward_all: bool,
     reaction_submenu_open: bool,
     quick_menu_submenu_open: bool,
@@ -2038,6 +2072,8 @@ impl ChannelMessages {
             context_menu_target: None,
             pending_context_image: None,
             context_menu_image: None,
+            pending_context_link: None,
+            context_menu_link: None,
             context_menu_forward_all: false,
             reaction_submenu_open: false,
             quick_menu_submenu_open: false,
@@ -2696,12 +2732,23 @@ impl ChannelMessages {
             .take()
             .filter(|(id, _)| *id == message_id)
             .map(|(_, url)| url);
+        self.context_menu_link =
+            link_for_menu(self.pending_context_link.take(), message_id, position);
         self.context_menu_target = Some((message_id, position));
         cx.notify();
     }
 
     pub(crate) fn note_context_image(&mut self, message_id: MessageId, url: String) {
         self.pending_context_image = Some((message_id, url));
+    }
+
+    pub(crate) fn note_context_link(
+        &mut self,
+        message_id: MessageId,
+        position: Point<Pixels>,
+        url: String,
+    ) {
+        self.pending_context_link = Some((message_id, position, url));
     }
 
     pub(crate) fn close_context_menu(&mut self, cx: &mut Context<Self>) {
@@ -5105,6 +5152,7 @@ impl ChannelMessages {
                     self.quick_menu_submenu_open,
                     selected_text,
                     self.context_menu_image.as_deref(),
+                    self.context_menu_link.as_deref(),
                     cx.entity().downgrade(),
                     cx,
                 );
@@ -5510,6 +5558,7 @@ impl Render for ChannelMessages {
                     self.quick_menu_submenu_open,
                     selected_text,
                     self.context_menu_image.as_deref(),
+                    self.context_menu_link.as_deref(),
                     cx.entity().downgrade(),
                     cx,
                 );
