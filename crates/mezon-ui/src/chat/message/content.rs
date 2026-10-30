@@ -24,6 +24,7 @@ use super::selection::{
     SelectableRegion, SharedSelection, TextSegment, merge_selection_background,
 };
 use crate::app::shell::Shell;
+use crate::chat::mention_input::CopiedMention;
 use crate::chat::user_profile_popover::{ClickableContainer, UserProfilePopover};
 use crate::components::primitives::{CopyButton, Icon, IconName};
 use crate::image_cache::LruImageCache;
@@ -1168,7 +1169,12 @@ impl SelectableSectionCursor {
     }
 }
 
-pub(crate) fn selectable_spans_text(spans: &[MessageSpan], locale: &str, cx: &App) -> String {
+fn selectable_spans_walk(
+    spans: &[MessageSpan],
+    locale: &str,
+    cx: &App,
+    mut mentions: Option<&mut Vec<(Range<usize>, CopiedMention)>>,
+) -> String {
     let mut text = String::new();
     for span in spans {
         match span {
@@ -1177,9 +1183,26 @@ pub(crate) fn selectable_spans_text(spans: &[MessageSpan], locale: &str, cx: &Ap
             }
             MessageSpan::CodeBlock { text: value, .. }
             | MessageSpan::Link { text: value, .. }
-            | MessageSpan::Mention { display: value, .. }
             | MessageSpan::Emoji { name: value, .. }
             | MessageSpan::Heading { text: value, .. } => text.push_str(value),
+            MessageSpan::Mention {
+                display,
+                user_id,
+                role_id,
+            } => {
+                let start = text.len();
+                text.push_str(display);
+                if let Some(out) = mentions.as_deref_mut() {
+                    out.push((
+                        start..text.len(),
+                        CopiedMention {
+                            display: display.to_string(),
+                            user_id: user_id.clone().unwrap_or_default(),
+                            role_id: role_id.clone().unwrap_or_default(),
+                        },
+                    ));
+                }
+            }
             MessageSpan::Hashtag {
                 display,
                 channel_id,
@@ -1195,6 +1218,20 @@ pub(crate) fn selectable_spans_text(spans: &[MessageSpan], locale: &str, cx: &Ap
         }
     }
     text
+}
+
+pub(crate) fn selectable_spans_text(spans: &[MessageSpan], locale: &str, cx: &App) -> String {
+    selectable_spans_walk(spans, locale, cx, None)
+}
+
+pub(crate) fn selectable_spans_mentions(
+    spans: &[MessageSpan],
+    locale: &str,
+    cx: &App,
+) -> Vec<(Range<usize>, CopiedMention)> {
+    let mut mentions = Vec::new();
+    let _ = selectable_spans_walk(spans, locale, cx, Some(&mut mentions));
+    mentions
 }
 
 pub(crate) fn code_block_copy_overlay(
@@ -3775,7 +3812,7 @@ mod emoji_layout_tests {
         EMOJI_JUMBO_TOP_PADDING, GG_SANS_SPACE_ADVANCE, emoji_box, emoji_image, emoji_image_in_box,
         emoji_image_size, emoji_width, empty_message_content, follows_emoji_that_takes_it,
         gap_after, gap_width, inline_gap, message_content_row, rich_content_row,
-        separates_inline_spans,
+        selectable_spans_mentions, selectable_spans_text, separates_inline_spans,
     };
 
     const EMOJI: Pixels = px(48.);
@@ -4140,5 +4177,41 @@ mod emoji_layout_tests {
         };
 
         assert!(!separates(&[code_block, text(" "), emoji()], 1));
+    }
+
+    #[gpui::test]
+    fn selectable_spans_mentions_ranges_slice_selectable_spans_text(cx: &mut TestAppContext) {
+        let spans = [
+            MessageSpan::Text(SharedString::from("see ")),
+            MessageSpan::Hashtag {
+                display: SharedString::from("#general"),
+                channel_id: None,
+                meta: None,
+            },
+            MessageSpan::Text(SharedString::from(" cc ")),
+            MessageSpan::Mention {
+                display: SharedString::from("@Phạm Quang Trường"),
+                user_id: Some("100".to_string()),
+                role_id: None,
+            },
+            MessageSpan::Text(SharedString::from(" and ")),
+            MessageSpan::Mention {
+                display: SharedString::from("@Dev"),
+                user_id: None,
+                role_id: Some("200".to_string()),
+            },
+        ];
+        cx.read(|cx| {
+            let full = selectable_spans_text(&spans, "en", cx);
+            let mentions = selectable_spans_mentions(&spans, "en", cx);
+            assert_eq!(mentions.len(), 2);
+            for (range, mention) in &mentions {
+                assert_eq!(&full[range.clone()], mention.display);
+            }
+            assert_eq!(mentions[0].1.user_id, "100");
+            assert_eq!(mentions[0].1.role_id, "");
+            assert_eq!(mentions[1].1.user_id, "");
+            assert_eq!(mentions[1].1.role_id, "200");
+        });
     }
 }

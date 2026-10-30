@@ -19,6 +19,7 @@ use gpui::{
 };
 use unicode_segmentation::UnicodeSegmentation;
 
+use super::{CopiedMention, copied_mentions};
 use crate::components::primitives::text_actions::{
     Backspace, Copy, Cut, Delete, DeleteToLineEnd, DeleteToLineStart, DeleteToNextWordEnd,
     DeleteToPreviousWordStart, Down, End, Enter, Home, Left, MoveToDocEnd, MoveToDocStart,
@@ -197,6 +198,7 @@ pub(crate) enum MentionFieldEvent {
     NavUp,
     NavDown,
     Paste(String),
+    PasteWithMentions(String, Vec<CopiedMention>),
     PasteImages(Vec<Image>),
     PastePaths(Vec<PathBuf>, ClipboardItem),
 }
@@ -847,8 +849,21 @@ impl MentionInputState {
             .iter()
             .any(|entry| matches!(entry, ClipboardEntry::String(_)));
         if has_text && let Some(text) = item.text() {
-            cx.emit(MentionFieldEvent::Paste(normalize_pasted(&text)));
+            let mentions = copied_mentions(&item);
+            if mentions.is_empty() {
+                cx.emit(MentionFieldEvent::Paste(normalize_pasted(&text)));
+            } else {
+                cx.emit(MentionFieldEvent::PasteWithMentions(
+                    normalize_pasted(&text),
+                    mentions,
+                ));
+            }
         }
+    }
+
+    pub(crate) fn insert_offset(&self) -> usize {
+        let range = ime_replace_range(&self.selected_range, self.marked_range.as_ref());
+        self.clamp_range(range).start
     }
 
     pub(crate) fn insert_text(&mut self, text: &str, window: &mut Window, cx: &mut Context<Self>) {

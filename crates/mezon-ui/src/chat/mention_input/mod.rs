@@ -4,17 +4,19 @@ mod text_field;
 
 use std::any::Any;
 use std::cell::Cell;
+use std::ops::Range;
 use std::path::PathBuf;
 use std::rc::Rc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::router::{Route, Router};
 use gpui::{
-    AnyElement, AnyWindowHandle, App, Bounds, ClipboardItem, Context, DismissEvent, Div, Entity,
-    EventEmitter, Focusable, FontWeight, HighlightStyle, Hsla, Image, ImageFormat, IntoElement,
-    KeyBinding, MouseButton, MouseMoveEvent, PathPromptOptions, Pixels, Rgba, ScrollStrategy,
-    SharedString, Stateful, StyledText, Subscription, Task, UniformListScrollHandle, Window,
-    actions, canvas, deferred, div, img, prelude::*, px, uniform_list,
+    AnyElement, AnyWindowHandle, App, Bounds, ClipboardEntry, ClipboardItem, Context, DismissEvent,
+    Div, Entity, EventEmitter, Focusable, FontWeight, HighlightStyle, Hsla, Image, ImageFormat,
+    IntoElement, KeyBinding, MouseButton, MouseMoveEvent, PathPromptOptions, Pixels, Rgba,
+    ScrollStrategy, SharedString, Stateful, StyledText, Subscription, Task,
+    UniformListScrollHandle, Window, actions, canvas, deferred, div, img, prelude::*, px,
+    uniform_list,
 };
 use mezon_client::transport::QUICK_MENU_TYPE_FLASH;
 use mezon_grammar::client::{MAX_CORRECTION_CHAR_COUNT, MezonGrammarClient};
@@ -969,6 +971,84 @@ fn trim_paste_to_utf16_cap<'a>(current: &str, pasted: &'a str, cap: usize) -> &'
     &pasted[..end]
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub(crate) struct CopiedMention {
+    pub(crate) display: String,
+    pub(crate) user_id: String,
+    pub(crate) role_id: String,
+}
+
+#[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
+pub(crate) struct CopiedMentions {
+    pub(crate) mezon_mentions: Vec<CopiedMention>,
+}
+
+pub(crate) fn clipboard_item_with_mentions(
+    text: String,
+    mentions: Vec<CopiedMention>,
+) -> ClipboardItem {
+    if mentions.is_empty() {
+        ClipboardItem::new_string(text)
+    } else {
+        ClipboardItem::new_string_with_json_metadata(
+            text,
+            CopiedMentions {
+                mezon_mentions: mentions,
+            },
+        )
+    }
+}
+
+pub(crate) fn copied_mentions(item: &ClipboardItem) -> Vec<CopiedMention> {
+    item.entries()
+        .iter()
+        .find_map(|entry| match entry {
+            ClipboardEntry::String(s) => Some(
+                s.metadata_json::<CopiedMentions>()
+                    .map(|m| m.mezon_mentions)
+                    .unwrap_or_default(),
+            ),
+            _ => None,
+        })
+        .unwrap_or_default()
+}
+
+fn trigger_is_committed(committed: &[CommittedToken], at: usize) -> bool {
+    committed.iter().any(|token| token.start == at)
+}
+
+fn rebuild_pasted_mentions(
+    pasted: &str,
+    mentions: &[CopiedMention],
+    resolve: impl Fn(&CopiedMention) -> Option<(String, TokenKind)>,
+) -> (String, Vec<(Range<usize>, String, TokenKind)>) {
+    let mut out = String::with_capacity(pasted.len());
+    let mut tokens = Vec::new();
+    let mut cursor = 0usize;
+    for mention in mentions {
+        if mention.display.is_empty() {
+            continue;
+        }
+        let Some(rel) = pasted[cursor..].find(&mention.display) else {
+            continue;
+        };
+        let match_start = cursor + rel;
+        let match_end = match_start + mention.display.len();
+        if let Some((resolved_display, kind)) = resolve(mention) {
+            out.push_str(&pasted[cursor..match_start]);
+            let token_start = out.len();
+            out.push_str(&resolved_display);
+            let token_end = out.len();
+            tokens.push((token_start..token_end, resolved_display, kind));
+        } else {
+            out.push_str(&pasted[cursor..match_end]);
+        }
+        cursor = match_end;
+    }
+    out.push_str(&pasted[cursor..]);
+    (out, tokens)
+}
+
 /// The recipient sees this name in chat, so keep it readable; the counter keeps two
 /// conversions in the same millisecond from sharing a temp path.
 fn next_converted_text_filename() -> String {
@@ -1101,7 +1181,12 @@ impl MentionInput {
                 MentionFieldEvent::PressEnter => this.on_enter(window, cx),
                 MentionFieldEvent::NavUp => this.on_nav_up(cx),
                 MentionFieldEvent::NavDown => this.on_nav_down(cx),
-                MentionFieldEvent::Paste(text) => this.on_paste(text.clone(), window, cx),
+                MentionFieldEvent::Paste(text) => {
+                    this.on_paste(text.clone(), Vec::new(), window, cx)
+                }
+                MentionFieldEvent::PasteWithMentions(text, mentions) => {
+                    this.on_paste(text.clone(), mentions.clone(), window, cx)
+                }
                 MentionFieldEvent::PasteImages(images) => {
                     this.on_paste_images(images.clone(), window, cx)
                 }
@@ -1674,7 +1759,55 @@ impl MentionInput {
         }
     }
 
-    fn on_paste(&mut self, text: String, window: &mut Window, cx: &mut Context<Self>) {
+    fn resolve_copied_mention(&self, mention: &CopiedMention) -> Option<(String, TokenKind)> {
+        if !mention.user_id.is_empty() {
+            if mention.user_id == MENTION_HERE_USER_ID {
+                return Some((
+                    "@here".to_string(),
+                    TokenKind::Mention {
+                        user_id: MENTION_HERE_USER_ID.into(),
+                        role_id: String::new(),
+                    },
+                ));
+            }
+            let display = self
+                .session_members
+                .iter()
+                .chain(self.remote_members.iter())
+                .find(|member| member.user_id == mention.user_id)
+                .map(|member| format!("@{}", member.display))
+                .unwrap_or_else(|| mention.display.clone());
+            return Some((
+                display,
+                TokenKind::Mention {
+                    user_id: mention.user_id.clone(),
+                    role_id: String::new(),
+                },
+            ));
+        }
+        if !mention.role_id.is_empty() {
+            let role = self
+                .session_roles
+                .iter()
+                .find(|role| role.role_id == mention.role_id)?;
+            return Some((
+                format!("@{}", role.title),
+                TokenKind::Mention {
+                    user_id: String::new(),
+                    role_id: mention.role_id.clone(),
+                },
+            ));
+        }
+        None
+    }
+
+    fn on_paste(
+        &mut self,
+        text: String,
+        mentions: Vec<CopiedMention>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         if text.is_empty() {
             return;
         }
@@ -1700,6 +1833,33 @@ impl MentionInput {
             Self::show_paste_truncated(cx);
         }
         if pasted.is_empty() {
+            return;
+        }
+        if !mentions.is_empty() && !self.composer_anonymous(cx) {
+            let scope = mention_scope(cx);
+            if self.pooled[Sigil::At.slot()] != Some(scope) {
+                self.refresh_pool(Sigil::At, cx);
+                self.pooled[Sigil::At.slot()] = (!self.pool_is_empty(Sigil::At)).then_some(scope);
+            }
+            let (rebuilt, tokens) = rebuild_pasted_mentions(pasted, &mentions, |mention| {
+                self.resolve_copied_mention(mention)
+            });
+            let start = self.input.read(cx).insert_offset();
+            self.input
+                .update(cx, |input, cx| input.insert_text(&rebuilt, window, cx));
+            for (range, display, kind) in tokens {
+                self.committed.push(CommittedToken {
+                    kind,
+                    display,
+                    start: start + range.start,
+                    end: start + range.end,
+                });
+            }
+            self.committed.sort_by_key(|token| (token.start, token.end));
+            self.hide(cx);
+            self.sync_ranges(cx);
+            self.sync_history_payload(cx);
+            cx.notify();
             return;
         }
         self.input
@@ -2450,6 +2610,11 @@ impl MentionInput {
             self.end_mention(cx);
             return;
         };
+
+        if trigger_is_committed(&self.committed, at) {
+            self.end_mention(cx);
+            return;
+        }
 
         if sigil == Sigil::Slash && at != 0 {
             self.end_mention(cx);
@@ -4921,6 +5086,245 @@ mod draft_tests {
         assert!(matches!(restored[0].kind, TokenKind::Mention { .. }));
         assert!(matches!(restored[1].kind, TokenKind::Hashtag { .. }));
         assert!(matches!(restored[2].kind, TokenKind::Emoji { .. }));
+    }
+
+    #[test]
+    fn copied_mentions_round_trips_and_returns_empty_for_plain_string() {
+        use super::{CopiedMention, clipboard_item_with_mentions, copied_mentions};
+        use gpui::ClipboardItem;
+
+        let plain = ClipboardItem::new_string("hello".to_string());
+        assert!(copied_mentions(&plain).is_empty());
+
+        let empty_item = clipboard_item_with_mentions("hello".to_string(), Vec::new());
+        assert!(copied_mentions(&empty_item).is_empty());
+
+        let expected = vec![
+            CopiedMention {
+                display: "@alice".to_string(),
+                user_id: "42".to_string(),
+                role_id: String::new(),
+            },
+            CopiedMention {
+                display: "@mod".to_string(),
+                user_id: String::new(),
+                role_id: "99".to_string(),
+            },
+        ];
+        let item = clipboard_item_with_mentions("hi @alice and @mod".to_string(), expected.clone());
+        assert_eq!(copied_mentions(&item), expected);
+    }
+
+    #[test]
+    fn a_trigger_that_is_already_a_committed_token_opens_no_popup() {
+        use super::{CommittedToken, TokenKind, trigger_is_committed};
+
+        let committed = [CommittedToken {
+            kind: TokenKind::Mention {
+                user_id: "42".to_string(),
+                role_id: String::new(),
+            },
+            display: "@alice".to_string(),
+            start: 3,
+            end: 9,
+        }];
+        assert!(trigger_is_committed(&committed, 3));
+        assert!(!trigger_is_committed(&committed, 10));
+        assert!(!trigger_is_committed(&[], 3));
+    }
+
+    #[test]
+    fn rebuild_pasted_mentions_rewrites_display_and_shifts_following_ranges() {
+        use super::{CopiedMention, TokenKind, rebuild_pasted_mentions};
+
+        let mentions = [
+            CopiedMention {
+                display: "@Alice".to_string(),
+                user_id: "1".to_string(),
+                role_id: String::new(),
+            },
+            CopiedMention {
+                display: "@Bob".to_string(),
+                user_id: "2".to_string(),
+                role_id: String::new(),
+            },
+        ];
+        let (rebuilt, tokens) = rebuild_pasted_mentions("hi @Alice and @Bob!", &mentions, |m| {
+            match m.user_id.as_str() {
+                "1" => Some((
+                    "@Alice (Clan B)".to_string(),
+                    TokenKind::Mention {
+                        user_id: "1".to_string(),
+                        role_id: String::new(),
+                    },
+                )),
+                "2" => Some((
+                    "@Bob".to_string(),
+                    TokenKind::Mention {
+                        user_id: "2".to_string(),
+                        role_id: String::new(),
+                    },
+                )),
+                _ => None,
+            }
+        });
+        assert_eq!(rebuilt, "hi @Alice (Clan B) and @Bob!");
+        assert_eq!(tokens.len(), 2);
+        assert_eq!(&rebuilt[tokens[0].0.clone()], "@Alice (Clan B)");
+        assert_eq!(&rebuilt[tokens[1].0.clone()], "@Bob");
+    }
+
+    #[test]
+    fn rebuild_pasted_mentions_keeps_copied_display_when_user_not_in_pool() {
+        use super::{CopiedMention, TokenKind, rebuild_pasted_mentions};
+
+        let mentions = [CopiedMention {
+            display: "@Stranger".to_string(),
+            user_id: "77".to_string(),
+            role_id: String::new(),
+        }];
+        let (rebuilt, tokens) = rebuild_pasted_mentions("ping @Stranger", &mentions, |m| {
+            Some((
+                m.display.clone(),
+                TokenKind::Mention {
+                    user_id: m.user_id.clone(),
+                    role_id: String::new(),
+                },
+            ))
+        });
+        assert_eq!(rebuilt, "ping @Stranger");
+        assert_eq!(
+            tokens,
+            vec![(
+                5..14,
+                "@Stranger".to_string(),
+                TokenKind::Mention {
+                    user_id: "77".to_string(),
+                    role_id: String::new(),
+                },
+            )]
+        );
+    }
+
+    #[test]
+    fn rebuild_pasted_mentions_handles_known_and_unknown_roles() {
+        use super::{CopiedMention, TokenKind, rebuild_pasted_mentions};
+
+        let mentions = [
+            CopiedMention {
+                display: "@OldRole".to_string(),
+                user_id: String::new(),
+                role_id: "missing".to_string(),
+            },
+            CopiedMention {
+                display: "@Staff".to_string(),
+                user_id: String::new(),
+                role_id: "r1".to_string(),
+            },
+        ];
+        let (rebuilt, tokens) = rebuild_pasted_mentions("cc @OldRole and @Staff", &mentions, |m| {
+            (m.role_id == "r1").then(|| {
+                (
+                    "@Staff".to_string(),
+                    TokenKind::Mention {
+                        user_id: String::new(),
+                        role_id: "r1".to_string(),
+                    },
+                )
+            })
+        });
+        assert_eq!(rebuilt, "cc @OldRole and @Staff");
+        assert_eq!(
+            tokens,
+            vec![(
+                16..22,
+                "@Staff".to_string(),
+                TokenKind::Mention {
+                    user_id: String::new(),
+                    role_id: "r1".to_string(),
+                },
+            )]
+        );
+    }
+
+    #[test]
+    fn rebuild_pasted_mentions_skips_missing_display_and_matches_later_mentions() {
+        use super::{CopiedMention, TokenKind, rebuild_pasted_mentions};
+
+        let mentions = [
+            CopiedMention {
+                display: "@TrimmedOff".to_string(),
+                user_id: "1".to_string(),
+                role_id: String::new(),
+            },
+            CopiedMention {
+                display: "@Kept".to_string(),
+                user_id: "2".to_string(),
+                role_id: String::new(),
+            },
+        ];
+        let (rebuilt, tokens) = rebuild_pasted_mentions("hello @Kept", &mentions, |m| {
+            Some((
+                m.display.clone(),
+                TokenKind::Mention {
+                    user_id: m.user_id.clone(),
+                    role_id: String::new(),
+                },
+            ))
+        });
+        assert_eq!(rebuilt, "hello @Kept");
+        assert_eq!(tokens.len(), 1);
+        assert_eq!(&rebuilt[tokens[0].0.clone()], "@Kept");
+        assert_eq!(
+            tokens[0].2,
+            TokenKind::Mention {
+                user_id: "2".to_string(),
+                role_id: String::new(),
+            }
+        );
+    }
+
+    #[test]
+    fn rebuild_pasted_mentions_non_ascii_displays_produce_char_boundary_safe_ranges() {
+        use super::{CopiedMention, TokenKind, rebuild_pasted_mentions};
+
+        let mentions = [
+            CopiedMention {
+                display: "@Phạm Quang Trường".to_string(),
+                user_id: "1".to_string(),
+                role_id: String::new(),
+            },
+            CopiedMention {
+                display: "@Nguyễn Văn Ánh".to_string(),
+                user_id: "2".to_string(),
+                role_id: String::new(),
+            },
+        ];
+        let (rebuilt, tokens) = rebuild_pasted_mentions(
+            "chào @Phạm Quang Trường và @Nguyễn Văn Ánh nhé",
+            &mentions,
+            |mention| {
+                Some((
+                    if mention.user_id == "1" {
+                        "@Trường PQ".to_string()
+                    } else {
+                        mention.display.clone()
+                    },
+                    TokenKind::Mention {
+                        user_id: mention.user_id.clone(),
+                        role_id: String::new(),
+                    },
+                ))
+            },
+        );
+        assert_eq!(rebuilt, "chào @Trường PQ và @Nguyễn Văn Ánh nhé");
+        assert_eq!(tokens.len(), 2);
+        assert!(rebuilt.is_char_boundary(tokens[0].0.start));
+        assert!(rebuilt.is_char_boundary(tokens[0].0.end));
+        assert_eq!(&rebuilt[tokens[0].0.clone()], "@Trường PQ");
+        assert!(rebuilt.is_char_boundary(tokens[1].0.start));
+        assert!(rebuilt.is_char_boundary(tokens[1].0.end));
+        assert_eq!(&rebuilt[tokens[1].0.clone()], "@Nguyễn Văn Ánh");
     }
 }
 
