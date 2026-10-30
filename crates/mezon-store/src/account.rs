@@ -342,20 +342,7 @@ impl AccountStore {
                     }
                     this.reconcile_realtime_display_name(&mut account);
                     this.last_profile_update = None;
-                    let profile = crate::clan_members::User {
-                        id: crate::ids::UserId(account.user_id),
-                        username: account.username.clone(),
-                        display_name: account.display_name.clone(),
-                        avatar_url: account.avatar_url.clone().unwrap_or_default(),
-                        about_me: account.about_me.clone().unwrap_or_default(),
-                        create_time_seconds: account.create_time_seconds,
-                        ..Default::default()
-                    };
-                    if let Some(store) = crate::users_by_user::UsersByUserStore::try_global(cx) {
-                        store.update(cx, |store, cx| store.apply_user_profile(profile, cx));
-                    } else {
-                        crate::user_profile::apply_user_profile(&profile, cx);
-                    }
+                    sync_account_profile(&account, cx);
                     Self::spawn_persist_cache(&account, cx);
                     this.account = Some(account);
                     this.account_freshness.mark_fetched();
@@ -468,6 +455,7 @@ impl AccountStore {
                             account.logo = logo_url.filter(|url| !url.is_empty());
                         }
                         if let Some(account) = &this.account {
+                            sync_account_profile(account, cx);
                             Self::spawn_persist_cache(account, cx);
                         }
                         cx.emit(AccountEvent::AccountSaved);
@@ -1185,6 +1173,23 @@ fn adult_date(born: NaiveDate) -> Option<NaiveDate> {
     let year = born.year() + ADULT_AGE_YEARS;
     born.with_year(year)
         .or_else(|| NaiveDate::from_ymd_opt(year, 3, 1))
+}
+
+fn sync_account_profile(account: &UserAccount, cx: &mut App) {
+    let profile = crate::clan_members::User {
+        id: crate::ids::UserId(account.user_id),
+        username: account.username.clone(),
+        display_name: account.display_name.clone(),
+        avatar_url: account.avatar_url.clone().unwrap_or_default(),
+        about_me: account.about_me.clone().unwrap_or_default(),
+        create_time_seconds: account.create_time_seconds,
+        ..Default::default()
+    };
+    if let Some(store) = crate::users_by_user::UsersByUserStore::try_global(cx) {
+        store.update(cx, |store, cx| store.apply_user_profile(profile, cx));
+    } else {
+        crate::user_profile::apply_user_profile(&profile, cx);
+    }
 }
 
 fn logged_device_from_proto(d: mezon_proto::api::LogedDevice) -> LoggedDevice {
