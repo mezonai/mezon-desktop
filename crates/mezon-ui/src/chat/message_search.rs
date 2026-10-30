@@ -1020,35 +1020,30 @@ fn render_search_message_content(
 }
 
 fn mask_hidden_hashtags(spans: &[MessageSpan], locale: &str, cx: &App) -> Option<Vec<MessageSpan>> {
-    let mut changed = false;
-    let masked: Vec<MessageSpan> = spans
-        .iter()
-        .map(|span| match span {
-            MessageSpan::Hashtag {
-                display,
-                channel_id,
-                meta,
-            } => match hidden_hashtag_label(
-                display,
-                channel_id.as_deref(),
-                meta.as_deref(),
-                locale,
-                cx,
-            ) {
-                Some(label) => {
-                    changed = true;
-                    MessageSpan::Hashtag {
-                        display: label,
-                        channel_id: None,
-                        meta: None,
-                    }
-                }
+    let hidden_label = |span: &MessageSpan| match span {
+        MessageSpan::Hashtag {
+            display,
+            channel_id,
+            meta,
+        } => hidden_hashtag_label(display, channel_id.as_deref(), meta.as_deref(), locale, cx),
+        _ => None,
+    };
+    if !spans.iter().any(|span| hidden_label(span).is_some()) {
+        return None;
+    }
+    Some(
+        spans
+            .iter()
+            .map(|span| match hidden_label(span) {
+                Some(label) => MessageSpan::Hashtag {
+                    display: label,
+                    channel_id: None,
+                    meta: None,
+                },
                 None => span.clone(),
-            },
-            other => other.clone(),
-        })
-        .collect();
-    changed.then_some(masked)
+            })
+            .collect(),
+    )
 }
 
 fn render_search_spans(
