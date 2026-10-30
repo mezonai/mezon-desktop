@@ -163,7 +163,16 @@ fn render_message_content_with_options(
 
     let has_tokens = msg.spans.iter().any(|s| !matches!(s, MessageSpan::Text(_)));
 
-    if !has_tokens && !msg.is_edited {
+    if !has_tokens {
+        if msg.is_edited {
+            return render_selectable_segmented_content(
+                msg,
+                ctx,
+                body_color,
+                px(EMOJI_SIZE),
+                selection_context,
+            );
+        }
         return render_plain_text_spans(msg, ctx, body_color);
     }
 
@@ -990,7 +999,7 @@ fn render_selectable_segmented_spans(
         }
     }
     if show_edited {
-        row = row.child(edited_marker(ctx.theme, ctx.locale));
+        row = row.child(div().ml(px(4.)).child(edited_marker(ctx.theme, ctx.locale)));
     }
     drop(context_segments);
     if let Some(segments) = owned_segments {
