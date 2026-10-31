@@ -321,6 +321,7 @@ impl ClanEventsModal {
             let logo = crate::util::imgproxy::proxied(cx, &event.logo, 400, 220, "fit");
             details = details.child(
                 img(logo)
+                    .id(("event-cover", event.id as usize))
                     .w(px(200.))
                     .h(px(110.))
                     .rounded(px(3.))
@@ -1267,7 +1268,6 @@ impl Render for ClanEventsModal {
 
         div()
             .relative()
-            .image_cache(self.image_cache.clone())
             .track_focus(&self.focus_handle)
             .key_context("menu")
             .on_action(cx.listener(|this, _: &::menu::Cancel, _window, cx| {

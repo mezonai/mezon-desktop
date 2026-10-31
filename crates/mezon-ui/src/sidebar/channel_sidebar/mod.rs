@@ -2300,6 +2300,7 @@ fn render_banner_and_events(
         col = col.child(
             div().w_full().h(px(136.)).mb_2().overflow_hidden().child(
                 gpui::img(crate::util::imgproxy::proxied(cx, url, 480, 272, "fill"))
+                    .id("clan-banner-image")
                     .w_full()
                     .h_full()
                     .object_fit(gpui::ObjectFit::Cover),

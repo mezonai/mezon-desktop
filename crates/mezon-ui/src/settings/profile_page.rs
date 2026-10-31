@@ -1177,6 +1177,7 @@ impl ProfilePage {
                                     .when_some(logo_url.clone(), |element, url| {
                                         element.child(
                                             img(crate::util::imgproxy::profile_url(cx, &url))
+                                                .id("dm_icon-preview-image")
                                                 .size_full()
                                                 .rounded_md()
                                                 .object_fit(gpui::ObjectFit::Cover),
