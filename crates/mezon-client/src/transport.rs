@@ -3231,6 +3231,11 @@ pub fn channel_message_send_realtime_proto_len(
     encoded_envelope_cid_last_len(&envelope)
 }
 
+fn channel_message_exceeds_realtime_cap(message: &realtime::ChannelMessageSend) -> bool {
+    let proto_len = channel_message_send_realtime_proto_len(message, i32::MAX);
+    crate::abridged_tcp_adapter::proto_exceeds_realtime_abridged_cap(proto_len)
+}
+
 pub fn forward_blocked_for_realtime_message(message: &realtime::ChannelMessageSend) -> bool {
     if message
         .attachments
@@ -8972,12 +8977,21 @@ impl MezonTransport {
         &self,
         message: realtime::ChannelMessageSend,
     ) -> Result<realtime::ChannelMessageAck> {
-        if self.http_fallback.read().is_some() && !self.is_open().await {
-            tracing::warn!(
-                target: "socket",
-                "api_socket_closed: action=ChannelMessageSend — sending over HTTP"
-            );
-            return self.send_channel_message_http(message).await;
+        if self.http_fallback.read().is_some() {
+            if channel_message_exceeds_realtime_cap(&message) {
+                tracing::info!(
+                    target: "socket",
+                    "realtime_frame_over_cap: action=ChannelMessageSend — sending over HTTP"
+                );
+                return self.send_channel_message_http(message).await;
+            }
+            if !self.is_open().await {
+                tracing::warn!(
+                    target: "socket",
+                    "api_socket_closed: action=ChannelMessageSend — sending over HTTP"
+                );
+                return self.send_channel_message_http(message).await;
+            }
         }
         self.write_chat_message(message).await
     }
@@ -13943,5 +13957,42 @@ mod tests {
         assert!(!named_msg.anonymous_message);
         assert!(named_msg.mention_everyone);
         assert_eq!(named_msg.mentions.len(), 2);
+    }
+
+    #[test]
+    fn channel_message_over_the_socket_frame_cap_is_routed_to_http() {
+        let mention = |i: i64| api::MessageMention {
+            user_id: 1_840_651_252_770_279_424 + i,
+            username: "nguyen.van.anh".to_string(),
+            s: 0,
+            e: 15,
+            ..Default::default()
+        };
+        let short = realtime::ChannelMessageSend {
+            clan_id: 1_840_651_252_770_279_424,
+            channel_id: 1_840_651_252_770_279_425,
+            content: serde_json::json!({ "t": "hello" }).to_string(),
+            mentions: vec![mention(0)],
+            mode: 2,
+            is_public: true,
+            ..Default::default()
+        };
+        assert!(!channel_message_exceeds_realtime_cap(&short));
+
+        let many_mentions = realtime::ChannelMessageSend {
+            mentions: (0..150).map(mention).collect(),
+            ..short.clone()
+        };
+        assert!(channel_message_exceeds_realtime_cap(&many_mentions));
+
+        let reply_to_long_message = realtime::ChannelMessageSend {
+            references: vec![api::MessageRef {
+                message_ref_id: 1_840_651_252_770_279_426,
+                content: serde_json::json!({ "t": "a".repeat(4000) }).to_string(),
+                ..Default::default()
+            }],
+            ..short
+        };
+        assert!(channel_message_exceeds_realtime_cap(&reply_to_long_message));
     }
 }
