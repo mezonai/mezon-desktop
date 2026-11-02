@@ -3596,6 +3596,8 @@
   "message.attachment.fromPrivateChannel": "Медиа из приватного канала",
   "message.attachment.uploading": "Загрузка...",
   "message.attachment.uploadFailed": "Не удалось загрузить",
+  "message.attachment.uploadFailedInvalidFile": "Не удалось загрузить: этот файл нельзя загрузить. Проверьте имя файла и попробуйте снова.",
+  "message.attachment.uploadFailedRetry": "Не удалось загрузить. Проверьте подключение и попробуйте снова.",
   "message.attachments.attachment": "Вложение",
   "message.attachments.audio": "Аудио",
   "message.attachments.contact": "Контакт",

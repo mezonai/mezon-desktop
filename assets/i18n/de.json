@@ -3358,6 +3358,8 @@
   "message.attachment.fromPrivateChannel": "Medien aus einem privaten Kanal",
   "message.attachment.uploading": "Wird hochgeladen...",
   "message.attachment.uploadFailed": "Hochladen fehlgeschlagen",
+  "message.attachment.uploadFailedInvalidFile": "Upload fehlgeschlagen: Diese Datei kann nicht hochgeladen werden. Bitte überprüfe den Dateinamen und versuche es erneut.",
+  "message.attachment.uploadFailedRetry": "Upload fehlgeschlagen. Bitte überprüfe deine Verbindung und versuche es erneut.",
   "message.attachments.attachment": "Anhang",
   "message.attachments.audio": "Sprachnachricht",
   "message.attachments.contact": "Visitenkarte",

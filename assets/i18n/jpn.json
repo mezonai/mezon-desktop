@@ -3358,6 +3358,8 @@
   "message.attachment.fromPrivateChannel": "プライベートチャンネルのメディア",
   "message.attachment.uploading": "アップロード中...",
   "message.attachment.uploadFailed": "アップロードに失敗しました",
+  "message.attachment.uploadFailedInvalidFile": "アップロードに失敗しました：このファイルはアップロードできません。ファイル名を確認してもう一度お試しください。",
+  "message.attachment.uploadFailedRetry": "アップロードに失敗しました。接続を確認してもう一度お試しください。",
   "message.attachments.attachment": "添付ファイル",
   "message.attachments.audio": "音声メッセージ",
   "message.attachments.contact": "名刺",

@@ -43,8 +43,8 @@ mod video_player;
 pub use channel_messages::{ChannelMessages, ChannelMessagesEvent};
 pub(crate) use content::{RichRunPalette, rich_run_highlight_with_link_underline};
 pub(crate) use content::{
-    SELECTION_BG, code_block_copy_overlay, heading_line_height, heading_size, inline_code_chip,
-    interactive_link_text, meeting_code, open_message_link, pin_link_element,
+    SELECTION_BG, code_block_copy_overlay, heading_line_height, heading_size, hidden_hashtag_label,
+    inline_code_chip, interactive_link_text, meeting_code, open_message_link, pin_link_element,
     render_pin_rich_layout_element, resolve_message_link_url,
 };
 pub use context::DEFAULT_DISPLAY_NAME_COLOR;

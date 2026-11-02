@@ -169,6 +169,12 @@ impl PlayerImpl {
         }
     }
 
+    pub fn skip_frame(&self) {
+        if let PlayerBackend::MediaFoundation(player) = &self.inner {
+            player.skip_frame();
+        }
+    }
+
     pub fn play(&self) {
         match &self.inner {
             PlayerBackend::MediaFoundation(player) => player.play(),
@@ -328,6 +334,14 @@ impl MediaFoundationPlayer {
                 duration_hint: None,
                 temp_file: None,
             })
+        }
+    }
+
+    fn skip_frame(&self) {
+        if let Ok(pts) = unsafe { self.engine.OnVideoStreamTick() }
+            && pts != 0
+        {
+            self.last_pts.set(pts);
         }
     }
 

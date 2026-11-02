@@ -1,9 +1,9 @@
 use crate::ids::{ChannelId, ClanId, MessageId, RoleId, UserId};
 use regex::Regex;
 use std::cell::RefCell;
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, LazyLock};
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use futures::FutureExt as _;
 use futures::future::Shared;
@@ -48,13 +48,14 @@ const CLAN_JOIN_MAX_ATTEMPTS: u32 = 3;
 const WEB_CHANNEL_DESC_FETCH_LIMIT: usize = 500;
 const CLAN_JOIN_RETRY_BACKOFF: Duration = Duration::from_millis(500);
 const FAVORITES_PAINT_BUDGET: Duration = Duration::from_millis(1500);
-const LINKED_CHANNEL_MAX_CONCURRENT: usize = 2;
-const LINKED_CHANNEL_MAX_PER_WINDOW: usize = 10;
-const LINKED_CHANNEL_WINDOW: Duration = Duration::from_secs(60);
 const CHANNEL_DETAIL_MAX_ATTEMPTS: u32 = 3;
 const CHANNEL_DETAIL_RETRY_BACKOFF: Duration = Duration::from_secs(1);
 const THREAD_ARCHIVE_DURATION_SECONDS: i64 = 7 * 24 * 60 * 60;
 const ADDED_THREAD_UNREAD_WINDOW_SECONDS: i64 = 1000;
+
+fn retries_channel_detail(error: &anyhow::Error) -> bool {
+    api_status_from_error(error).is_none()
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ChannelType {
@@ -729,12 +730,8 @@ pub struct ChannelList {
     archived_threads_to_open: HashSet<ChannelId>,
     detached_channel_details: HashMap<(ClanId, ChannelId), Channel>,
     linked_channels: HashMap<ChannelId, Channel>,
-    linked_channel_pending: HashSet<ChannelId>,
+    linked_channel_loading: HashMap<ChannelId, Shared<Task<Option<ClanId>>>>,
     linked_channel_failed: HashSet<ChannelId>,
-    linked_channel_queue: VecDeque<ChannelId>,
-    linked_channel_running: usize,
-    linked_channel_starts: VecDeque<Instant>,
-    linked_channel_pump: Option<Task<()>>,
     _previous_channels_persist: Task<()>,
     _clan_sub: Subscription,
     _conn_watch: Task<()>,
@@ -914,12 +911,8 @@ impl ChannelList {
         self.archived_threads_to_open.clear();
         self.detached_channel_details.clear();
         self.linked_channels.clear();
-        self.linked_channel_pending.clear();
+        self.linked_channel_loading.clear();
         self.linked_channel_failed.clear();
-        self.linked_channel_queue.clear();
-        self.linked_channel_running = 0;
-        self.linked_channel_starts.clear();
-        self.linked_channel_pump = None;
         self.active_clan_id = None;
         if self.active_channel_id.take().is_some() {
             cx.emit(ChannelEvent::ActiveChannelChanged(None));
@@ -1042,12 +1035,8 @@ impl ChannelList {
             archived_threads_to_open: HashSet::new(),
             detached_channel_details: HashMap::new(),
             linked_channels: HashMap::new(),
-            linked_channel_pending: HashSet::new(),
+            linked_channel_loading: HashMap::new(),
             linked_channel_failed: HashSet::new(),
-            linked_channel_queue: VecDeque::new(),
-            linked_channel_running: 0,
-            linked_channel_starts: VecDeque::new(),
-            linked_channel_pump: None,
             _previous_channels_persist: Task::ready(()),
             _clan_sub: clan_sub,
             _conn_watch: conn_watch,
@@ -2006,81 +1995,63 @@ impl ChannelList {
             .collect()
     }
 
-    pub fn can_resolve_linked_channel(&self, channel_id: ChannelId) -> bool {
-        !self.linked_channels.contains_key(&channel_id)
-            && !self.linked_channel_pending.contains(&channel_id)
-            && !self.linked_channel_failed.contains(&channel_id)
-    }
-
-    pub fn resolve_linked_channels(&mut self, channel_ids: Vec<ChannelId>, cx: &mut Context<Self>) {
-        for channel_id in channel_ids {
-            if self.can_resolve_linked_channel(channel_id) {
-                self.linked_channel_pending.insert(channel_id);
-                self.linked_channel_queue.push_back(channel_id);
-            }
+    pub fn channel_link_detail(
+        &mut self,
+        channel_id: ChannelId,
+        cx: &mut Context<Self>,
+    ) -> Shared<Task<Option<ClanId>>> {
+        if let Some(clan_id) = self.clan_id_for_channel(channel_id).or_else(|| {
+            self.user_channel(channel_id)
+                .or_else(|| self.linked_channel(channel_id))
+                .map(|channel| channel.clan_id)
+        }) {
+            return Task::ready(Some(clan_id)).shared();
         }
-        self.pump_linked_channels(cx);
-    }
-
-    fn pump_linked_channels(&mut self, cx: &mut Context<Self>) {
-        let now = Instant::now();
-        while self
-            .linked_channel_starts
-            .front()
-            .is_some_and(|start| now.duration_since(*start) >= LINKED_CHANNEL_WINDOW)
-        {
-            self.linked_channel_starts.pop_front();
+        if self.linked_channel_failed.contains(&channel_id) {
+            return Task::ready(None).shared();
         }
-        while self.linked_channel_running < LINKED_CHANNEL_MAX_CONCURRENT
-            && self.linked_channel_starts.len() < LINKED_CHANNEL_MAX_PER_WINDOW
-        {
-            let Some(channel_id) = self.linked_channel_queue.pop_front() else {
-                break;
-            };
-            self.linked_channel_running += 1;
-            self.linked_channel_starts.push_back(now);
-            self.fetch_linked_channel(channel_id, cx);
+        if let Some(task) = self.linked_channel_loading.get(&channel_id) {
+            return task.clone();
         }
-        if self.linked_channel_queue.is_empty() || self.linked_channel_pump.is_some() {
-            return;
-        }
-        let Some(oldest) = self.linked_channel_starts.front().copied() else {
-            return;
-        };
-        let wait = LINKED_CHANNEL_WINDOW.saturating_sub(now.duration_since(oldest));
-        self.linked_channel_pump = Some(cx.spawn(async move |this, cx| {
-            cx.background_executor().timer(wait).await;
-            let _ = this.update(cx, |this, cx| {
-                this.linked_channel_pump = None;
-                this.pump_linked_channels(cx);
-            });
-        }));
-    }
-
-    fn fetch_linked_channel(&mut self, channel_id: ChannelId, cx: &mut Context<Self>) {
         let api = self.api.clone();
         let generation = self.reset_generation;
-        cx.spawn(async move |this, cx| {
-            let result = api.list_channel_detail(channel_id.get()).await;
-            let _ = this.update(cx, |this, cx| {
-                if this.reset_generation != generation {
-                    return;
-                }
-                this.linked_channel_running = this.linked_channel_running.saturating_sub(1);
-                this.linked_channel_pending.remove(&channel_id);
-                match result {
-                    Ok(desc) => this.apply_linked_channel(channel_id, desc, cx),
-                    Err(e) => {
-                        tracing::debug!(
-                            "list_channel_detail for a channel link {channel_id} failed: {e}"
-                        );
-                        this.linked_channel_failed.insert(channel_id);
+        let task = cx
+            .spawn(async move |this, cx| {
+                let result = api.list_channel_detail(channel_id.get()).await;
+                this.update(cx, |this, cx| {
+                    if this.reset_generation != generation {
+                        return None;
                     }
-                }
-                this.pump_linked_channels(cx);
-            });
-        })
-        .detach();
+                    this.linked_channel_loading.remove(&channel_id);
+                    match result {
+                        Ok(desc) => {
+                            this.apply_linked_channel(channel_id, desc.clone(), cx);
+                            let clan_id = this
+                                .linked_channel(channel_id)
+                                .map(|channel| channel.clan_id);
+                            if let Some(clan_id) = clan_id {
+                                this.allow_archived_thread(channel_id);
+                                this.apply_channel_detail(clan_id, desc, cx);
+                            }
+                            clan_id
+                        }
+                        Err(e) => {
+                            tracing::debug!(
+                                "list_channel_detail for a channel link {channel_id} failed: {e}"
+                            );
+                            if !retries_channel_detail(&e) {
+                                this.linked_channel_failed.insert(channel_id);
+                            }
+                            None
+                        }
+                    }
+                })
+                .ok()
+                .flatten()
+            })
+            .shared();
+        self.linked_channel_loading.insert(channel_id, task.clone());
+        task
     }
 
     fn apply_linked_channel(
@@ -2202,7 +2173,7 @@ impl ChannelList {
                     Ok(desc) => break Some(desc),
                     Err(e) => {
                         attempt += 1;
-                        if attempt >= CHANNEL_DETAIL_MAX_ATTEMPTS {
+                        if !retries_channel_detail(&e) || attempt >= CHANNEL_DETAIL_MAX_ATTEMPTS {
                             tracing::warn!(
                                 "list_channel_detail failed for {channel_id} after {attempt} attempts: {e}"
                             );
@@ -16376,19 +16347,30 @@ mod tests {
         }
     }
 
+    #[test]
+    fn retries_channel_detail_stops_on_server_status_errors() {
+        use mezon_client::ApiStatusError;
+        let not_found: anyhow::Error = ApiStatusError {
+            code: ApiStatusError::NOT_FOUND,
+        }
+        .into();
+        let denied: anyhow::Error = ApiStatusError {
+            code: ApiStatusError::PERMISSION_DENIED,
+        }
+        .into();
+        let timeout = anyhow::anyhow!("request timed out");
+
+        assert!(!retries_channel_detail(&not_found));
+        assert!(!retries_channel_detail(&denied));
+        assert!(retries_channel_detail(&timeout));
+    }
+
     #[gpui::test]
     fn linked_channel_resolves_without_joining_any_channel_list(cx: &mut gpui::TestAppContext) {
         cx.update(|cx| {
             let channels = init_channel_list(cx);
             channels.update(cx, |channels, cx| {
                 channels.apply_clan_structure(ClanId(1), structure_with_two_channels(), None, cx);
-                assert!(channels.can_resolve_linked_channel(ChannelId(900)));
-
-                channels.resolve_linked_channels(vec![ChannelId(900), ChannelId(900)], cx);
-                assert!(channels.linked_channel_pending.contains(&ChannelId(900)));
-                assert!(!channels.can_resolve_linked_channel(ChannelId(900)));
-
-                channels.linked_channel_pending.remove(&ChannelId(900));
                 channels.apply_linked_channel(
                     ChannelId(900),
                     linked_channel_desc(900, 5, CHANNEL_ACTIVE_JOINED),
@@ -16401,7 +16383,6 @@ mod tests {
                 assert_eq!(linked.name, "voice elsewhere");
                 assert_eq!(linked.clan_id, ClanId(5));
                 assert_eq!(linked.channel_type, ChannelType::Voice);
-                assert!(!channels.can_resolve_linked_channel(ChannelId(900)));
                 assert!(channels.user_channel(ChannelId(900)).is_none());
                 assert!(
                     channels
@@ -16443,7 +16424,7 @@ mod tests {
 
                 for id in [902, 904] {
                     assert!(channels.linked_channel(ChannelId(id)).is_none());
-                    assert!(!channels.can_resolve_linked_channel(ChannelId(id)));
+                    assert!(channels.linked_channel_failed.contains(&ChannelId(id)));
                 }
             });
         });
@@ -16472,12 +16453,13 @@ mod tests {
 
                 channels.linked_channel_failed.insert(ChannelId(920));
                 channels.resync(cx);
-                assert!(channels.can_resolve_linked_channel(ChannelId(920)));
+                assert!(!channels.linked_channel_failed.contains(&ChannelId(920)));
                 assert!(channels.linked_channel(ChannelId(910)).is_some());
 
+                channels.linked_channel_failed.insert(ChannelId(910));
                 channels.reset(cx);
                 assert!(channels.linked_channel(ChannelId(910)).is_none());
-                assert!(channels.can_resolve_linked_channel(ChannelId(910)));
+                assert!(!channels.linked_channel_failed.contains(&ChannelId(910)));
             });
         });
     }
@@ -16526,29 +16508,39 @@ mod tests {
     }
 
     #[gpui::test]
-    fn linked_channel_lookups_run_two_at_a_time_and_ten_per_window(cx: &mut gpui::TestAppContext) {
+    fn channel_link_detail_returns_known_clan_and_skips_failed_channel(
+        cx: &mut gpui::TestAppContext,
+    ) {
         cx.update(|cx| {
             let channels = init_channel_list(cx);
             channels.update(cx, |channels, cx| {
-                let ids: Vec<ChannelId> = (1000..1025).map(ChannelId).collect();
-                channels.resolve_linked_channels(ids, cx);
-                assert_eq!(channels.linked_channel_running, 2);
-                assert_eq!(channels.linked_channel_queue.len(), 23);
+                channels.apply_clan_structure(ClanId(1), structure_with_two_channels(), None, cx);
+                channels.apply_linked_channel(
+                    ChannelId(900),
+                    linked_channel_desc(900, 5, CHANNEL_ACTIVE_JOINED),
+                    cx,
+                );
+                channels.linked_channel_failed.insert(ChannelId(920));
 
-                for _ in 0..10 {
-                    channels.linked_channel_running = 0;
-                    channels.pump_linked_channels(cx);
-                }
-                assert_eq!(channels.linked_channel_starts.len(), 10);
-                assert_eq!(channels.linked_channel_queue.len(), 15);
-                assert!(channels.linked_channel_pump.is_some());
-                assert!(!channels.can_resolve_linked_channel(ChannelId(1024)));
-
-                channels.reset(cx);
-                assert!(channels.linked_channel_queue.is_empty());
-                assert_eq!(channels.linked_channel_running, 0);
-                assert!(channels.linked_channel_pump.is_none());
-                assert!(channels.can_resolve_linked_channel(ChannelId(1024)));
+                assert_eq!(
+                    channels
+                        .channel_link_detail(ChannelId(1), cx)
+                        .now_or_never(),
+                    Some(Some(ClanId(1)))
+                );
+                assert_eq!(
+                    channels
+                        .channel_link_detail(ChannelId(900), cx)
+                        .now_or_never(),
+                    Some(Some(ClanId(5)))
+                );
+                assert_eq!(
+                    channels
+                        .channel_link_detail(ChannelId(920), cx)
+                        .now_or_never(),
+                    Some(None)
+                );
+                assert!(channels.linked_channel_loading.is_empty());
             });
         });
     }

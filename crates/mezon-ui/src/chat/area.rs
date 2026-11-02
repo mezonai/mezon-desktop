@@ -1962,6 +1962,17 @@ impl ChatArea {
                 &MessagesStore::global(cx),
                 window,
                 |this: &mut crate::ChatLayout, store, event: &MessagesEvent, window, cx| {
+                    if let MessagesEvent::AttachmentUploadFailed { invalid_file } = event {
+                        let locale = this.chat_area.settings.read(cx).language.clone();
+                        let key = if *invalid_file {
+                            "message.attachment.uploadFailedInvalidFile"
+                        } else {
+                            "message.attachment.uploadFailedRetry"
+                        };
+                        let message = SharedString::from(mezon_i18n::t(&locale, key));
+                        Shell::global(cx).update(cx, |shell, cx| shell.error(message, cx));
+                        return;
+                    }
                     let failure_key = match event {
                         MessagesEvent::SendFailedWithoutRow => Some("message.toast.sendFailed"),
                         MessagesEvent::SendPermissionDenied => {

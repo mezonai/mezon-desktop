@@ -20,6 +20,15 @@ const FAILED_FETCH_BACKOFF: Duration = Duration::from_secs(30);
 pub const DEFAULT_ROLE_COLOR: &str = "#99aab5";
 pub const MAX_ROLE_ICON_BYTES: u64 = 256 * 1024;
 
+const DEFAULT_ROLE_PERMISSION_SLUGS: &[&str] = &[
+    crate::PERMISSION_SEND_MESSAGE,
+    crate::PERMISSION_VIEW_CHANNEL,
+];
+
+pub fn is_required_role_permission(slug: &str) -> bool {
+    DEFAULT_ROLE_PERMISSION_SLUGS.contains(&slug)
+}
+
 const ROLE_EVENT_CREATED: i32 = 1;
 const ROLE_EVENT_UPDATED: i32 = 2;
 const ROLE_EVENT_DELETED: i32 = 3;
@@ -92,6 +101,7 @@ pub enum RolesEvent {
     Created { clan_id: ClanId, role_id: RoleId },
     RoleSaved { clan_id: ClanId, role_id: RoleId },
     RoleSaveFailed { clan_id: ClanId, role_id: RoleId },
+    RoleCreateFailed { clan_id: ClanId },
     RoleOrderSaveFailed { clan_id: ClanId },
 }
 
@@ -109,6 +119,18 @@ pub struct RoleDraft {
     pub remove_permission_ids: Vec<i64>,
     pub add_user_ids: Vec<i64>,
     pub remove_user_ids: Vec<i64>,
+}
+
+impl RoleDraft {
+    fn require_permissions(&mut self, permission_ids: &[i64]) {
+        self.remove_permission_ids
+            .retain(|id| !permission_ids.contains(id));
+        for id in permission_ids {
+            if !self.add_permission_ids.contains(id) {
+                self.add_permission_ids.push(*id);
+            }
+        }
+    }
 }
 
 pub struct RolesStore {
@@ -814,35 +836,77 @@ impl RolesStore {
         if !self.saving.insert(clan_id) {
             return;
         }
+        let generation = self.reset_generation;
+        let Some(permissions) = PermissionStore::try_global(cx) else {
+            self.finish_create_role(
+                clan_id,
+                generation,
+                Err(anyhow::anyhow!("permission store is not initialized")),
+                cx,
+            );
+            return;
+        };
+        let catalog_task = permissions.update(cx, |store, cx| store.load_catalog_task(cx));
         let api = self.api.clone();
         cx.spawn(async move |this, cx| {
-            let request = api::CreateRoleRequest {
-                title: draft.title,
-                color: draft.color,
-                role_icon: draft.icon,
-                clan_id: clan_id.get(),
-                max_permission_id,
-                active_permission_ids: draft.add_permission_ids,
-                add_user_ids: draft.add_user_ids,
-                ..Default::default()
-            };
-            let result = api.create_role(request).await;
-            let _ = this.update(cx, |this, cx| {
-                this.saving.remove(&clan_id);
-                match result {
-                    Ok(role_proto) => {
-                        let role_id = RoleId(role_proto.id);
-                        this.upsert_role_from_proto(clan_id, role_proto);
-                        this.rebuild_role_styles(clan_id, cx);
-                        cx.emit(RolesEvent::Changed { clan_id });
-                        cx.emit(RolesEvent::Created { clan_id, role_id });
-                        this.refresh_active(clan_id, cx);
-                    }
-                    Err(err) => tracing::error!("create_role failed for {clan_id}: {err}"),
+            let resolved = catalog_task.await.and_then(|()| {
+                permissions
+                    .update(cx, |store, _| {
+                        default_role_permission_ids(
+                            store
+                                .permission_definitions()
+                                .iter()
+                                .map(|permission| (permission.slug.as_str(), permission.id)),
+                        )
+                    })
+                    .ok_or_else(|| "required role permissions are missing or invalid".to_string())
+            });
+            if !this
+                .update(cx, |this, _| this.reset_generation == generation)
+                .unwrap_or(false)
+            {
+                return;
+            }
+            let result = match resolved {
+                Ok(ids) => {
+                    api.create_role(create_role_request(clan_id, draft, max_permission_id, ids))
+                        .await
                 }
+                Err(err) => Err(anyhow::anyhow!(err)),
+            };
+            let _ = this.update(cx, |this, cx| {
+                this.finish_create_role(clan_id, generation, result, cx);
             });
         })
         .detach();
+    }
+
+    fn finish_create_role(
+        &mut self,
+        clan_id: ClanId,
+        generation: u64,
+        result: anyhow::Result<api::Role>,
+        cx: &mut Context<Self>,
+    ) {
+        if self.reset_generation != generation {
+            return;
+        }
+        self.saving.remove(&clan_id);
+        match result {
+            Ok(role_proto) => {
+                let role_id = RoleId(role_proto.id);
+                self.upsert_role_from_proto(clan_id, role_proto);
+                self.rebuild_role_styles(clan_id, cx);
+                cx.emit(RolesEvent::Changed { clan_id });
+                cx.emit(RolesEvent::Created { clan_id, role_id });
+                self.refresh_active(clan_id, cx);
+            }
+            Err(err) => {
+                tracing::error!("create_role failed for {clan_id}: {err}");
+                cx.emit(RolesEvent::RoleCreateFailed { clan_id });
+            }
+        }
+        cx.notify();
     }
 
     pub fn update_role(
@@ -856,23 +920,38 @@ impl RolesStore {
         if !self.saving.insert(clan_id) {
             return;
         }
+        let permissions = PermissionStore::try_global(cx);
+        let definitions = permissions
+            .as_ref()
+            .map(|store| store.read(cx).permission_definitions())
+            .unwrap_or_default();
+        let request = update_role_request(
+            clan_id,
+            role_id,
+            draft,
+            max_permission_id,
+            self.clan_role(clan_id, role_id),
+            definitions,
+        );
+        let request = match request {
+            Ok(request) => request,
+            Err(err) => {
+                self.saving.remove(&clan_id);
+                tracing::error!("prepare role update failed for {role_id}: {err}");
+                cx.emit(RolesEvent::RoleSaveFailed { clan_id, role_id });
+                cx.notify();
+                return;
+            }
+        };
+        let generation = self.reset_generation;
         let api = self.api.clone();
         cx.spawn(async move |this, cx| {
-            let request = api::UpdateRoleRequest {
-                role_id: role_id.get(),
-                title: Some(draft.title),
-                color: Some(draft.color),
-                role_icon: Some(draft.icon),
-                clan_id: clan_id.get(),
-                max_permission_id,
-                active_permission_ids: draft.add_permission_ids,
-                remove_permission_ids: draft.remove_permission_ids,
-                add_user_ids: draft.add_user_ids,
-                remove_user_ids: draft.remove_user_ids,
-                ..Default::default()
-            };
             let result = api.update_role(request).await;
             let _ = this.update(cx, |this, cx| {
+                if this.reset_generation != generation {
+                    return;
+                }
+
                 this.saving.remove(&clan_id);
                 match result {
                     Ok(()) => {
@@ -1134,6 +1213,88 @@ pub fn everyone_slug(clan_id: ClanId) -> String {
     format!("everyone-{}", clan_id.get())
 }
 
+fn default_role_permission_ids<'a>(
+    permissions: impl IntoIterator<Item = (&'a str, i64)>,
+) -> Option<Vec<i64>> {
+    let permissions: HashMap<&str, i64> = permissions.into_iter().collect();
+    let ids: Vec<i64> = DEFAULT_ROLE_PERMISSION_SLUGS
+        .iter()
+        .map(|slug| permissions.get(slug).copied().filter(|id| *id > 0))
+        .collect::<Option<_>>()?;
+    (ids.iter().copied().collect::<HashSet<_>>().len() == ids.len()).then_some(ids)
+}
+
+fn create_role_request(
+    clan_id: ClanId,
+    mut draft: RoleDraft,
+    max_permission_id: i64,
+    default_permission_ids: Vec<i64>,
+) -> api::CreateRoleRequest {
+    draft.require_permissions(&default_permission_ids);
+    api::CreateRoleRequest {
+        title: draft.title,
+        color: draft.color,
+        role_icon: draft.icon,
+        clan_id: clan_id.get(),
+        max_permission_id,
+        active_permission_ids: draft.add_permission_ids,
+        add_user_ids: draft.add_user_ids,
+        ..Default::default()
+    }
+}
+
+fn update_role_request(
+    clan_id: ClanId,
+    role_id: RoleId,
+    mut draft: RoleDraft,
+    max_permission_id: i64,
+    role: Option<&ClanRoleDetail>,
+    definitions: &[crate::PermissionDefinition],
+) -> anyhow::Result<api::UpdateRoleRequest> {
+    let role_permissions = role
+        .map(|role| role.permissions.as_slice())
+        .unwrap_or_default();
+    let slugs: HashMap<i64, &str> = role_permissions
+        .iter()
+        .filter(|permission| !permission.slug.is_empty())
+        .map(|permission| (permission.id, permission.slug.as_str()))
+        .chain(
+            definitions
+                .iter()
+                .filter(|permission| !permission.slug.is_empty())
+                .map(|permission| (permission.id, permission.slug.as_str())),
+        )
+        .collect();
+    for id in &draft.remove_permission_ids {
+        if !slugs.contains_key(id) {
+            anyhow::bail!("cannot resolve permission being removed");
+        }
+    }
+    draft.remove_permission_ids.retain(|id| {
+        !slugs
+            .get(id)
+            .is_some_and(|slug| is_required_role_permission(slug))
+    });
+    draft.add_permission_ids.retain(|id| {
+        !role_permissions
+            .iter()
+            .any(|permission| permission.id == *id && permission.active)
+    });
+    Ok(api::UpdateRoleRequest {
+        role_id: role_id.get(),
+        title: Some(draft.title),
+        color: Some(draft.color),
+        role_icon: Some(draft.icon),
+        clan_id: clan_id.get(),
+        max_permission_id,
+        active_permission_ids: draft.add_permission_ids,
+        remove_permission_ids: draft.remove_permission_ids,
+        add_user_ids: draft.add_user_ids,
+        remove_user_ids: draft.remove_user_ids,
+        ..Default::default()
+    })
+}
+
 fn role_user_from_proto(user: api::role_user_list::RoleUser) -> RoleUser {
     RoleUser {
         id: UserId(user.id),
@@ -1340,6 +1501,244 @@ mod tests {
     const TEST_CLAN: ClanId = ClanId(1);
     const TEST_SELF: i64 = 42;
     const TEST_ACTOR: i64 = 77;
+
+    fn role_draft() -> RoleDraft {
+        RoleDraft {
+            title: "Renamed role".into(),
+            color: "#112233".into(),
+            icon: "icon.png".into(),
+            add_permission_ids: vec![],
+            remove_permission_ids: vec![],
+            add_user_ids: vec![55],
+            remove_user_ids: vec![56],
+        }
+    }
+
+    fn role_with_permissions(active: bool) -> ClanRoleDetail {
+        let mut role = role_detail_from_proto(make_role(10, "Role", DEFAULT_ROLE_COLOR));
+        role.permissions = vec![
+            RolePermission {
+                id: 41,
+                slug: crate::PERMISSION_SEND_MESSAGE.into(),
+                title: String::new(),
+                active,
+            },
+            RolePermission {
+                id: 92,
+                slug: crate::PERMISSION_VIEW_CHANNEL.into(),
+                title: String::new(),
+                active,
+            },
+            RolePermission {
+                id: 8,
+                slug: "delete-message".into(),
+                title: String::new(),
+                active: true,
+            },
+        ];
+        role
+    }
+
+    #[test]
+    fn metadata_update_never_regrants_server_permissions_or_requires_catalog() {
+        for role in [
+            None,
+            Some(role_with_permissions(true)),
+            Some(role_with_permissions(false)),
+        ] {
+            let request =
+                update_role_request(TEST_CLAN, RoleId(10), role_draft(), 7, role.as_ref(), &[])
+                    .unwrap();
+            assert!(request.active_permission_ids.is_empty());
+            assert!(request.remove_permission_ids.is_empty());
+            assert_eq!(request.title.as_deref(), Some("Renamed role"));
+            assert_eq!(request.color.as_deref(), Some("#112233"));
+            assert_eq!(request.role_icon.as_deref(), Some("icon.png"));
+            assert_eq!(request.add_user_ids, vec![55]);
+            assert_eq!(request.remove_user_ids, vec![56]);
+            assert_eq!(request.role_id, 10);
+            assert_eq!(request.clan_id, TEST_CLAN.get());
+        }
+    }
+
+    #[test]
+    fn permission_update_blocks_required_removals_and_preserves_other_changes() {
+        let role = role_with_permissions(true);
+        let mut draft = role_draft();
+        draft.add_permission_ids = vec![41, 92, 99];
+        draft.remove_permission_ids = vec![41, 92, 8];
+        let request =
+            update_role_request(TEST_CLAN, RoleId(10), draft, 7, Some(&role), &[]).unwrap();
+        assert_eq!(request.active_permission_ids, vec![99]);
+        assert_eq!(request.remove_permission_ids, vec![8]);
+    }
+
+    #[test]
+    fn missing_required_permissions_are_added_only_by_an_explicit_edit() {
+        let role = role_with_permissions(false);
+        let mut draft = role_draft();
+        draft.add_permission_ids = vec![41, 92];
+        let request =
+            update_role_request(TEST_CLAN, RoleId(10), draft, 7, Some(&role), &[]).unwrap();
+        assert_eq!(request.active_permission_ids, vec![41, 92]);
+        assert!(request.remove_permission_ids.is_empty());
+    }
+
+    #[test]
+    fn unknown_permission_removal_fails_without_guessing_ids() {
+        let mut draft = role_draft();
+        draft.remove_permission_ids = vec![999];
+        assert!(update_role_request(TEST_CLAN, RoleId(10), draft, 7, None, &[]).is_err());
+    }
+
+    #[gpui::test]
+    fn missing_permission_store_reports_create_failure_and_allows_retry(cx: &mut TestAppContext) {
+        let store = cx.update(init_roles_store);
+        let failures = std::rc::Rc::new(std::cell::Cell::new(0));
+        let events = failures.clone();
+        let _subscription = cx.update(|cx| {
+            cx.subscribe(&store, move |_, event: &RolesEvent, _| {
+                if let RolesEvent::RoleCreateFailed { clan_id } = event {
+                    assert_eq!(*clan_id, TEST_CLAN);
+                    events.set(events.get() + 1);
+                }
+            })
+        });
+        for expected in [1, 2] {
+            store.update(cx, |store, cx| {
+                store.create_role(TEST_CLAN, role_draft(), 7, cx);
+                assert!(!store.is_saving(TEST_CLAN));
+            });
+            cx.run_until_parked();
+            assert_eq!(failures.get(), expected);
+        }
+    }
+
+    #[gpui::test]
+    fn late_create_completion_does_not_touch_a_new_session(cx: &mut TestAppContext) {
+        let store = cx.update(init_roles_store);
+        let events = std::rc::Rc::new(std::cell::Cell::new(0));
+        let observed = events.clone();
+        let _subscription = cx.update(|cx| {
+            cx.subscribe(&store, move |_, _: &RolesEvent, _| {
+                observed.set(observed.get() + 1)
+            })
+        });
+        store.update(cx, |store, cx| {
+            let generation = store.reset_generation;
+            store.reset(cx);
+            store.saving.insert(TEST_CLAN);
+            store.finish_create_role(
+                TEST_CLAN,
+                generation,
+                Ok(make_role(10, "Old", DEFAULT_ROLE_COLOR)),
+                cx,
+            );
+            store.finish_create_role(
+                TEST_CLAN,
+                generation,
+                Err(anyhow::anyhow!("late failure")),
+                cx,
+            );
+            assert!(store.is_saving(TEST_CLAN));
+            assert!(store.clan_role(TEST_CLAN, RoleId(10)).is_none());
+        });
+        cx.run_until_parked();
+        assert_eq!(events.get(), 0);
+    }
+
+    #[gpui::test]
+    fn failed_create_completion_emits_error_and_clears_saving(cx: &mut TestAppContext) {
+        let store = cx.update(init_roles_store);
+        let failed = std::rc::Rc::new(std::cell::Cell::new(false));
+        let observed = failed.clone();
+        let _subscription = cx.update(|cx| {
+            cx.subscribe(&store, move |_, event: &RolesEvent, _| {
+                if let RolesEvent::RoleCreateFailed { clan_id } = event {
+                    assert_eq!(*clan_id, TEST_CLAN);
+                    observed.set(true);
+                }
+            })
+        });
+        store.update(cx, |store, cx| {
+            store.saving.insert(TEST_CLAN);
+            store.finish_create_role(
+                TEST_CLAN,
+                store.reset_generation,
+                Err(anyhow::anyhow!("create failed")),
+                cx,
+            );
+            assert!(!store.is_saving(TEST_CLAN));
+        });
+        cx.run_until_parked();
+        assert!(failed.get());
+    }
+
+    #[test]
+    fn only_send_and_view_are_required_role_permissions() {
+        assert!(is_required_role_permission("send-message"));
+        assert!(is_required_role_permission("view-channel"));
+        for slug in ["administrator", "delete-message", "manage-clan", ""] {
+            assert!(!is_required_role_permission(slug));
+        }
+    }
+
+    #[test]
+    fn create_role_request_grants_defaults_and_preserves_explicit_fields() {
+        let defaults = default_role_permission_ids([
+            ("send-message", 41),
+            ("view-channel", 92),
+            ("administrator", 7),
+        ])
+        .unwrap();
+        for permissions in [vec![], vec![7, 41]] {
+            let request = create_role_request(
+                ClanId(123),
+                RoleDraft {
+                    title: "New role".into(),
+                    color: DEFAULT_ROLE_COLOR.into(),
+                    icon: "icon.png".into(),
+                    add_permission_ids: permissions.clone(),
+                    remove_permission_ids: vec![],
+                    add_user_ids: vec![55],
+                    remove_user_ids: vec![],
+                },
+                7,
+                defaults.clone(),
+            );
+            let mut expected = permissions;
+            for id in [41, 92] {
+                if !expected.contains(&id) {
+                    expected.push(id);
+                }
+            }
+            assert_eq!(request.active_permission_ids, expected);
+            assert_eq!(request.clan_id, 123);
+            assert_eq!(request.max_permission_id, 7);
+            assert_eq!(request.title, "New role");
+            assert_eq!(request.color, DEFAULT_ROLE_COLOR);
+            assert_eq!(request.role_icon, "icon.png");
+            assert_eq!(request.add_user_ids, vec![55]);
+        }
+    }
+
+    #[test]
+    fn default_role_permissions_require_a_complete_valid_catalog() {
+        for catalog in [
+            vec![],
+            vec![("administrator", 7)],
+            vec![("send-message", 41)],
+            vec![("send-message", 0), ("view-channel", 92)],
+            vec![("send-message", 41), ("view-channel", -1)],
+            vec![("send-message", 41), ("view-channel", 41)],
+        ] {
+            assert_eq!(default_role_permission_ids(catalog), None);
+        }
+        assert_eq!(
+            default_role_permission_ids([("view-channel", 200), ("send-message", 100)]),
+            Some(vec![100, 200])
+        );
+    }
 
     fn test_api() -> Arc<AppApi> {
         Arc::new(AppApi::new(

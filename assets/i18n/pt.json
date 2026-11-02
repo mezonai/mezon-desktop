@@ -3358,6 +3358,8 @@
   "message.attachment.fromPrivateChannel": "Mídia de um canal privado",
   "message.attachment.uploading": "Enviando...",
   "message.attachment.uploadFailed": "Falha no envio",
+  "message.attachment.uploadFailedInvalidFile": "Falha no envio: não é possível enviar este arquivo. Verifique o nome do arquivo e tente novamente.",
+  "message.attachment.uploadFailedRetry": "Falha no envio. Verifique sua conexão e tente novamente.",
   "message.attachments.attachment": "Anexo",
   "message.attachments.audio": "Mensagem de voz",
   "message.attachments.contact": "Contato",

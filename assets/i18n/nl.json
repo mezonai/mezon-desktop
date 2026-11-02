@@ -3357,6 +3357,8 @@
   "message.attachment.fromPrivateChannel": "Media uit een privékanaal",
   "message.attachment.uploading": "Aan het uploaden...",
   "message.attachment.uploadFailed": "Uploaden mislukt",
+  "message.attachment.uploadFailedInvalidFile": "Uploaden mislukt: dit bestand kan niet worden geüpload. Controleer de bestandsnaam en probeer het opnieuw.",
+  "message.attachment.uploadFailedRetry": "Uploaden mislukt. Controleer je verbinding en probeer het opnieuw.",
   "message.attachments.attachment": "Bijlage",
   "message.attachments.audio": "Stembericht",
   "message.attachments.contact": "Contactkaartje",

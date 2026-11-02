@@ -3366,6 +3366,8 @@
   "message.attachment.fromPrivateChannel": "Шәхси каналдан медиа",
   "message.attachment.uploading": "Йөкләү...",
   "message.attachment.uploadFailed": "Йөкләп булмады",
+  "message.attachment.uploadFailedInvalidFile": "Йөкләп булмады: бу файлны йөкләп булмый. Файл исемен тикшерегез һәм яңадан тырышыгыз.",
+  "message.attachment.uploadFailedRetry": "Йөкләп булмады. Тоташуны тикшерегез һәм яңадан тырышыгыз.",
   "message.attachments.attachment": "Кушымта",
   "message.attachments.audio": "Аудио",
   "message.attachments.contact": "Контакт",

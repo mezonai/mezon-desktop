@@ -8,6 +8,8 @@ mod image_scale_linux;
 mod image_scale_windows;
 #[cfg(target_os = "linux")]
 mod linux;
+#[cfg(target_os = "linux")]
+mod local_copy;
 #[cfg(target_os = "macos")]
 mod macos;
 #[cfg(target_os = "macos")]
@@ -131,11 +133,20 @@ pub fn needs_prepared_open(url: &str) -> bool {
     {
         webm_player::is_webm_source(url)
     }
-    #[cfg(not(any(windows, target_os = "macos")))]
+    #[cfg(target_os = "linux")]
+    {
+        local_copy::is_remote_video(url)
+    }
+    #[cfg(not(any(windows, target_os = "macos", target_os = "linux")))]
     {
         let _ = url;
         false
     }
+}
+
+#[cfg(target_os = "linux")]
+pub fn prepare_local_copy(url: &str) -> Result<Option<String>, PlayerError> {
+    local_copy::prepare(url)
 }
 
 #[cfg(any(windows, target_os = "macos"))]
@@ -184,6 +195,14 @@ impl VideoPlayer {
         Ok(Self { inner })
     }
 
+    pub fn open_live(url: &str) -> Result<Self, PlayerError> {
+        #[cfg(target_os = "linux")]
+        let inner = platform::PlayerImpl::open_live(url)?;
+        #[cfg(not(target_os = "linux"))]
+        let inner = platform::PlayerImpl::open(url, None)?;
+        Ok(Self { inner })
+    }
+
     #[cfg(any(windows, target_os = "macos"))]
     pub fn from_prepared(prepared: PreparedVideo) -> Result<Self, PlayerError> {
         let inner = match prepared.inner {
@@ -211,6 +230,11 @@ impl VideoPlayer {
 
     pub fn copy_frame(&self) -> Option<VideoFrame> {
         self.inner.copy_frame()
+    }
+
+    pub fn skip_frame(&self) {
+        #[cfg(any(windows, target_os = "linux"))]
+        self.inner.skip_frame();
     }
 
     pub fn play(&self) {

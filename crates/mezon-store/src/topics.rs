@@ -24,9 +24,7 @@ use crate::presign;
 use crate::realtime::{RealtimeDispatch, RealtimeKind};
 use crate::topic_badges::{TopicBadgeStore, TopicListing};
 use crate::upload_jobs::UploadJob;
-use crate::users_by_user::message_avatar::{
-    MessageAvatarKey, avatar_request_permits, fetch_avatar_message,
-};
+use crate::users_by_user::message_avatar::avatar_request_permits;
 use crate::{AppConfig, CACHE_TTL, ChannelId, ClanId, Message, MessageId, MessageRef, UserId};
 
 const TOPICS_LIMIT: i32 = 50;
@@ -397,6 +395,13 @@ enum InboxMessageAvatar {
     Failed,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum InboxLsent {
+    Loading,
+    User(UserId),
+    Failed,
+}
+
 impl InboxMessageAvatar {
     fn update_identity(&mut self, name: &str, avatar: &str) -> bool {
         if avatar.is_empty() {
@@ -418,6 +423,7 @@ impl InboxMessageAvatar {
 
 pub struct TopicsStore {
     inbox_message_avatars: std::collections::HashMap<(ChannelId, MessageId), InboxMessageAvatar>,
+    inbox_lsent: std::collections::HashMap<String, InboxLsent>,
     inbox_message_generation: u64,
     inbox_avatar_permits: Arc<tokio::sync::Semaphore>,
     data: TopicsData,
@@ -465,6 +471,7 @@ impl TopicsStore {
         });
         Self {
             inbox_message_avatars: Default::default(),
+            inbox_lsent: Default::default(),
             inbox_message_generation: 0,
             inbox_avatar_permits: avatar_request_permits(cx),
             data: TopicsData::default(),
@@ -549,6 +556,7 @@ impl TopicsStore {
 
     pub fn reset(&mut self, cx: &mut Context<Self>) {
         self.inbox_message_avatars.clear();
+        self.inbox_lsent.clear();
         self.inbox_message_generation = self.inbox_message_generation.wrapping_add(1);
         self.data.clear();
         self.clan_id = None;
@@ -828,9 +836,17 @@ impl TopicsStore {
             .topic_by_id(&message.topic_id.to_string())
             .and_then(inbox_message_key);
         if message.code == 2 && message.topic_id > 0 {
+            self.inbox_lsent.remove(&message.topic_id.to_string());
             self.hydrated_preview_topic_id = None;
             self.hydrate_latest_topic_preview(cx);
         } else if self.data.note_topic_message(message) {
+            let topic_key = message.topic_id.to_string();
+            if message.sender_id > 0 {
+                self.inbox_lsent
+                    .insert(topic_key, InboxLsent::User(UserId(message.sender_id)));
+            } else {
+                self.inbox_lsent.remove(&topic_key);
+            }
             let next_key = (ChannelId(message.topic_id), MessageId(message.message_id));
             if let Some(key) = previous_avatar_key.filter(|key| *key != next_key) {
                 self.inbox_message_avatars.remove(&key);
@@ -1906,6 +1922,7 @@ impl TopicsStore {
         }
         if self.clan_id.as_deref() != Some(clan_id) {
             self.inbox_message_avatars.clear();
+            self.inbox_lsent.clear();
             self.inbox_message_generation = self.inbox_message_generation.wrapping_add(1);
             self.data.clear_topics();
             self.clan_id = Some(clan_id.to_string());
@@ -1971,6 +1988,7 @@ impl TopicsStore {
                     self.data.upsert_topics(topics);
                 } else {
                     self.inbox_message_avatars.clear();
+                    self.inbox_lsent.clear();
                     self.inbox_message_generation = self.inbox_message_generation.wrapping_add(1);
                     self.data.set_topics(topics);
                 }
@@ -2012,7 +2030,20 @@ impl TopicsStore {
         if self.clan_id.as_deref() != Some(topic.clan_id.as_str()) {
             return None;
         }
-        inbox_member_avatar(topic, cx).or_else(|| self.inbox_message_avatar(topic))
+        let sender = self.inbox_display_sender(topic);
+        if let Some(avatar) = clan_member_avatar(&topic.clan_id, sender, cx) {
+            return Some(avatar);
+        }
+        let key = inbox_message_key(topic)?;
+        let topic_channel = topic.id.parse::<ChannelId>().ok()?;
+        if key.0 != topic_channel {
+            return None;
+        }
+        self.inbox_message_avatar(topic)
+    }
+
+    fn inbox_display_sender(&self, topic: &TopicDiscussion) -> UserId {
+        inbox_topic_sender(self.inbox_lsent.get(&topic.id), topic)
     }
 
     fn apply_inbox_message_avatar(
@@ -2062,6 +2093,8 @@ impl TopicsStore {
         if self.clan_id.as_deref() == Some(clan_id) {
             self.inbox_message_avatars
                 .retain(|_, state| *state != InboxMessageAvatar::Failed);
+            self.inbox_lsent
+                .retain(|_, state| !matches!(state, InboxLsent::Failed));
         }
         self.load_inbox_message_avatars(clan_id, cx);
     }
@@ -2076,101 +2109,192 @@ impl TopicsStore {
         if clan.get() <= 0 {
             return;
         }
-        let keys: Vec<_> = self
-            .data
-            .topics()
-            .iter()
-            .filter_map(|topic| {
-                Some((
-                    inbox_message_key(topic)?,
-                    topic.channel_id.parse::<ChannelId>().ok()?,
-                    inbox_member_avatar(topic, cx).is_some(),
-                ))
-            })
-            .collect();
-        let mut missing = Vec::new();
+        let topics = self.data.topics().to_vec();
+        let active_topic_ids: std::collections::HashSet<_> =
+            topics.iter().map(|topic| topic.id.clone()).collect();
+        self.inbox_lsent
+            .retain(|topic_id, _| active_topic_ids.contains(topic_id));
         let active_keys: std::collections::HashSet<_> =
-            keys.iter().map(|(key, _, _)| *key).collect();
+            topics.iter().filter_map(inbox_message_key).collect();
         self.inbox_message_avatars
             .retain(|key, _| active_keys.contains(key));
-        for (key, parent, has_member_avatar) in keys {
-            if has_member_avatar {
-                self.inbox_message_avatars.remove(&key);
+        let mut missing = Vec::new();
+        for topic in &topics {
+            let Some(topic_id) = topic.id.parse::<i64>().ok().filter(|id| *id > 0) else {
+                continue;
+            };
+            let Some(parent) = topic.channel_id.parse::<i64>().ok().filter(|id| *id > 0) else {
+                continue;
+            };
+            let topic_channel = ChannelId(topic_id);
+            let avatar_key = inbox_message_key(topic).filter(|key| key.0 == topic_channel);
+            let authoritative_sender = topic
+                .last_sender_is_authoritative
+                .then(|| topic.last_sender_id.parse::<UserId>().ok())
+                .flatten()
+                .filter(|sender| sender.get() > 0);
+            let Some(sender) = authoritative_sender else {
+                continue;
+            };
+            if clan_member_avatar(&topic.clan_id, sender, cx).is_some() {
+                if let Some(key) = avatar_key {
+                    self.inbox_message_avatars.remove(&key);
+                }
                 continue;
             }
-            if self.inbox_message_avatars.contains_key(&key) {
+            if matches!(
+                self.inbox_lsent.get(&topic.id),
+                Some(InboxLsent::User(recorded)) if *recorded == sender
+            ) {
                 continue;
             }
-            self.inbox_message_avatars
-                .insert(key, InboxMessageAvatar::Loading);
-            missing.push((key, parent));
+            if matches!(
+                self.inbox_lsent.get(&topic.id),
+                Some(InboxLsent::Loading | InboxLsent::Failed)
+            ) {
+                continue;
+            }
+            self.inbox_lsent
+                .insert(topic.id.clone(), InboxLsent::Loading);
+            if let Some(key) = avatar_key {
+                self.inbox_message_avatars
+                    .insert(key, InboxMessageAvatar::Loading);
+            }
+            missing.push((topic.id.clone(), topic_id, parent));
         }
         if missing.is_empty() {
             return;
         }
-        self.refresh_inbox_message_avatars(&MessagesEvent::Updated { message_id: None }, cx);
         let generation = self.inbox_message_generation;
+        let clan_id = clan.get();
         let permits = self.inbox_avatar_permits.clone();
         let api = self.api.clone();
         cx.spawn(async move |this, cx| {
             let request_entity = this.clone();
             let request_cx = cx.clone();
-            let requests = stream::iter(missing.into_iter().map(move |(key, parent)| {
-                let this = request_entity.clone();
-                let cx = request_cx.clone();
-                let api = api.clone();
-                let permits = permits.clone();
-                async move {
-                    let _permit = permits.acquire_owned().await.ok()?;
-                    let loading = this.read_with(&cx, |store, _| {
-                        store.inbox_message_generation == generation
-                            && store.inbox_message_avatars.get(&key)
-                                == Some(&InboxMessageAvatar::Loading)
-                    });
-                    if !matches!(loading, Ok(true)) {
-                        return None;
+            let requests = stream::iter(missing.into_iter().map(
+                move |(topic_key, topic_id, parent)| {
+                    let this = request_entity.clone();
+                    let cx = request_cx.clone();
+                    let api = api.clone();
+                    let permits = permits.clone();
+                    async move {
+                        let _permit = permits.acquire_owned().await.ok()?;
+                        let loading = this.read_with(&cx, |store, _| {
+                            store.inbox_message_generation == generation
+                                && matches!(
+                                    store.inbox_lsent.get(&topic_key),
+                                    Some(InboxLsent::Loading)
+                                )
+                        });
+                        if !matches!(loading, Ok(true)) {
+                            return None;
+                        }
+                        let page = api
+                            .list_topic_messages(clan_id, parent, topic_id, 0, 0, 1)
+                            .await;
+                        Some((topic_key, page))
                     }
-                    let page = fetch_avatar_message(
-                        &api,
-                        MessageAvatarKey {
-                            clan_id: clan,
-                            parent_id: parent,
-                            channel_id: key.0,
-                            message_id: key.1,
-                        },
-                    )
-                    .await;
-                    Some((key, page))
-                }
-            }))
+                },
+            ))
             .buffer_unordered(INBOX_AVATAR_LOOKUP_CONCURRENCY);
             futures::pin_mut!(requests);
             while let Some(result) = requests.next().await {
-                let Some((key, page)) = result else {
+                let Some((topic_key, page)) = result else {
                     continue;
                 };
-                let state = match page {
-                    Ok(Some(message)) => {
-                        message_avatar_from_messages(key.1, std::slice::from_ref(&message))
-                    }
-                    Ok(None) => InboxMessageAvatar::Missing,
-                    Err(error) => {
-                        tracing::warn!(
-                            message_id = key.1.get(),
-                            %error,
-                            "failed to load inbox topic message avatar"
-                        );
-                        InboxMessageAvatar::Failed
-                    }
-                };
                 let _ = this.update(cx, |store, cx| {
-                    if store.apply_inbox_message_avatar(generation, key, state) {
-                        store.schedule_updated_notify(cx);
+                    if store.inbox_message_generation != generation
+                        || !matches!(store.inbox_lsent.get(&topic_key), Some(InboxLsent::Loading))
+                    {
+                        return;
+                    }
+                    match page {
+                        Ok(page) => {
+                            let (sender_id, message_id) = inbox_last_sent_identity(
+                                page.last_sent_sender_id,
+                                page.last_sent_message_id,
+                                &page.messages,
+                            );
+                            store.note_inbox_last_sent(
+                                &topic_key,
+                                sender_id,
+                                message_id,
+                                &page.messages,
+                            );
+                            store.schedule_updated_notify(cx);
+                        }
+                        Err(error) => {
+                            if mezon_client::api_status_from_error(&error).is_some() {
+                                store
+                                    .inbox_lsent
+                                    .insert(topic_key, InboxLsent::User(UserId(0)));
+                            } else {
+                                tracing::warn!(%error, "failed to load inbox topic last sender");
+                                store.inbox_lsent.insert(topic_key, InboxLsent::Failed);
+                            }
+                            store.schedule_updated_notify(cx);
+                        }
                     }
                 });
             }
         })
         .detach();
+    }
+
+    fn note_inbox_last_sent(
+        &mut self,
+        topic_key: &str,
+        sender_id: i64,
+        message_id: i64,
+        messages: &[mezon_client::transport::ApiMessage],
+    ) {
+        let Some(index) = self.data.topic_index.get(topic_key).copied() else {
+            self.inbox_lsent.remove(topic_key);
+            return;
+        };
+        let Some(topic) = self.data.topics.get_mut(index) else {
+            self.inbox_lsent.remove(topic_key);
+            return;
+        };
+        let current_message = topic.last_message_id.parse::<i64>().unwrap_or(0);
+        let current_sender = topic.last_sender_id.parse::<UserId>().unwrap_or(UserId(0));
+        let keep_newer = topic.last_sender_is_authoritative
+            && message_id > 0
+            && current_message > message_id
+            && current_sender.get() > 0;
+        if !keep_newer && sender_id > 0 {
+            topic.last_sender_id = sender_id.to_string();
+            topic.last_sender_is_authoritative = true;
+            if message_id > 0 {
+                topic.last_message_id = message_id.to_string();
+            }
+        }
+        let recorded = if keep_newer {
+            current_sender
+        } else if sender_id > 0 {
+            UserId(sender_id)
+        } else {
+            UserId(0)
+        };
+        self.inbox_lsent
+            .insert(topic_key.to_string(), InboxLsent::User(recorded));
+        if keep_newer || sender_id <= 0 || message_id <= 0 {
+            return;
+        }
+        let key = (
+            ChannelId(topic_key.parse::<i64>().unwrap_or(0)),
+            MessageId(message_id),
+        );
+        if key.0.get() <= 0 {
+            return;
+        }
+        let state = message_avatar_from_messages(MessageId(message_id), messages);
+        if matches!(state, InboxMessageAvatar::Ready(_, _)) {
+            self.inbox_message_avatars.insert(key, state);
+        } else {
+            self.apply_inbox_message_avatar(self.inbox_message_generation, key, state);
+        }
     }
 
     /// The topic listing is sufficient for ordering, but its `last_sent_message` is not
@@ -2280,24 +2404,28 @@ fn inbox_message_key(topic: &TopicDiscussion) -> Option<(ChannelId, MessageId)> 
     (channel.get() > 0 && message.get() > 0).then_some((channel, message))
 }
 
-fn inbox_member_avatar<'a>(topic: &TopicDiscussion, cx: &'a App) -> Option<(&'a str, &'a str)> {
-    let clan = topic.clan_id.parse::<ClanId>().ok()?;
-    let sender = if topic.last_sender_is_authoritative
-        && topic
-            .last_message_id
-            .parse::<MessageId>()
-            .is_ok_and(|id| id.get() > 0)
-    {
-        topic.last_sender_id.parse::<UserId>().ok()?
-    } else {
-        let key = inbox_message_key(topic)?;
-        MessagesStore::try_global(cx)?
-            .read(cx)
-            .message_in_channel(key.0, key.1)?
-            .sender_id
-            .parse::<UserId>()
-            .ok()?
-    };
+fn inbox_topic_sender(recorded: Option<&InboxLsent>, topic: &TopicDiscussion) -> UserId {
+    if let Some(InboxLsent::User(id)) = recorded {
+        if id.get() > 0 {
+            return *id;
+        }
+        return topic.creator_id.parse().unwrap_or(UserId(0));
+    }
+    if topic.last_sender_is_authoritative {
+        let sender = topic.last_sender_id.parse::<UserId>().unwrap_or(UserId(0));
+        if sender.get() > 0 {
+            return sender;
+        }
+    }
+    topic.creator_id.parse().unwrap_or(UserId(0))
+}
+
+fn clan_member_avatar<'a>(
+    clan_id: &str,
+    sender: UserId,
+    cx: &'a App,
+) -> Option<(&'a str, &'a str)> {
+    let clan = clan_id.parse::<ClanId>().ok()?;
     if clan.get() <= 0 || sender.get() <= 0 {
         return None;
     }
@@ -2305,6 +2433,20 @@ fn inbox_member_avatar<'a>(topic: &TopicDiscussion, cx: &'a App) -> Option<(&'a 
         .read(cx)
         .member(clan, sender)?;
     (!member.avatar().is_empty()).then(|| (member.name(), member.avatar()))
+}
+
+fn inbox_last_sent_identity(
+    header_sender_id: i64,
+    header_message_id: i64,
+    messages: &[mezon_client::transport::ApiMessage],
+) -> (i64, i64) {
+    messages
+        .iter()
+        .filter(|message| message.code != 2 && message.sender_id > 0)
+        .max_by_key(|message| message.message_id)
+        .filter(|message| message.message_id >= header_message_id)
+        .map(|message| (message.sender_id, message.message_id))
+        .unwrap_or((header_sender_id, header_message_id))
 }
 
 fn message_avatar_from_messages(
@@ -2819,6 +2961,18 @@ mod tests {
     }
 
     #[test]
+    fn inbox_last_sent_identity_prefers_the_newest_listed_message_over_a_stale_header() {
+        let messages = vec![
+            original_test_message(50, 8, "a.png", 0),
+            original_test_message(51, 9, "b.png", 2),
+        ];
+        assert_eq!(inbox_last_sent_identity(0, 0, &messages), (8, 50));
+        assert_eq!(inbox_last_sent_identity(3, 40, &messages), (8, 50));
+        assert_eq!(inbox_last_sent_identity(3, 60, &messages), (3, 60));
+        assert_eq!(inbox_last_sent_identity(0, 0, &[]), (0, 0));
+    }
+
+    #[test]
     fn inbox_message_avatar_matches_message_not_creator_or_last_sender() {
         let messages = vec![
             original_test_message(40, 3, "creator.png", 0),
@@ -2850,6 +3004,80 @@ mod tests {
                 InboxMessageAvatar::Missing
             );
         }
+    }
+
+    #[test]
+    fn inbox_topic_sender_prefers_recorded_last_sender_then_creator() {
+        let topic = topic(10, 42, "8", "body", 100);
+        assert_eq!(inbox_topic_sender(None, &topic), UserId(3));
+        let mut authoritative = topic.clone();
+        authoritative.last_sender_is_authoritative = true;
+        assert_eq!(inbox_topic_sender(None, &authoritative), UserId(8));
+        assert_eq!(
+            inbox_topic_sender(Some(&InboxLsent::User(UserId(9))), &authoritative),
+            UserId(9)
+        );
+        assert_eq!(
+            inbox_topic_sender(Some(&InboxLsent::User(UserId(0))), &authoritative),
+            UserId(3)
+        );
+        assert_eq!(
+            inbox_topic_sender(Some(&InboxLsent::Loading), &authoritative),
+            UserId(8)
+        );
+    }
+
+    #[gpui::test]
+    fn inbox_avatar_uses_topic_creator_not_the_original_message_author(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        cx.update(|cx| {
+            let (topics, messages) = inbox_test_stores(cx);
+            crate::ClanMembersStore::global(cx).update(cx, |store, _| {
+                store.seed_members_for_test(
+                    ClanId(9),
+                    vec![
+                        crate::ClanMember {
+                            user: crate::clan_members::User {
+                                id: UserId(3),
+                                username: "creator".into(),
+                                avatar_url: "creator.png".into(),
+                                ..Default::default()
+                            },
+                            ..Default::default()
+                        },
+                        crate::ClanMember {
+                            user: crate::clan_members::User {
+                                id: UserId(8),
+                                username: "author".into(),
+                                avatar_url: "author.png".into(),
+                                ..Default::default()
+                            },
+                            ..Default::default()
+                        },
+                    ],
+                );
+            });
+            messages.update(cx, |store, cx| {
+                store.append_topic_message(
+                    5,
+                    original_test_message(42, 8, "author.png", 0),
+                    false,
+                    vec![],
+                    false,
+                    cx,
+                );
+            });
+            topics.update(cx, |store, cx| {
+                store
+                    .data
+                    .set_topics(vec![topic(10, 42, "8", r#"{"t":"original body"}"#, 100)]);
+                assert_eq!(
+                    store.inbox_avatar(&store.data.topics()[0], cx),
+                    Some(("creator", "creator.png"))
+                );
+            });
+        });
     }
 
     #[test]

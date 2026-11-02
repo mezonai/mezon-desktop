@@ -13,6 +13,10 @@ use crate::image_cache::LruImageCache;
 
 const FRAME_POLL: Duration = Duration::from_millis(8);
 const HIDDEN_POLL: Duration = Duration::from_millis(250);
+#[cfg(not(target_os = "macos"))]
+const HIDDEN_TICK: Duration = Duration::from_millis(33);
+#[cfg(target_os = "macos")]
+const HIDDEN_TICK: Duration = HIDDEN_POLL;
 const HIDDEN_AFTER: Duration = Duration::from_secs(2);
 
 #[derive(Default)]
@@ -81,7 +85,10 @@ impl StreamVideoView {
             .pending_since
             .is_some_and(|at| at.elapsed() >= HIDDEN_AFTER);
         if hidden {
-            return HIDDEN_POLL;
+            if let Some(player) = self.stream.read(cx).player() {
+                player.skip_frame();
+            }
+            return HIDDEN_TICK;
         }
         let (player, generation) = {
             let store = self.stream.read(cx);

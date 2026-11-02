@@ -7,7 +7,7 @@ use mezon_store::{
 };
 
 use super::channel_messages::ChannelMessages;
-use super::content::{first_link, open_message_link};
+use super::content::{clicked_menu_link, first_link, open_message_link};
 use super::forward_modal::ForwardMessageModal;
 use super::pin_confirm_modals::ConfirmPinMessageModal;
 use super::report_modal::ReportMessageModal;
@@ -216,6 +216,16 @@ pub(crate) fn message_is_editable(msg: &Message, current_user_id: &str) -> bool 
         )
 }
 
+pub(crate) fn topic_edit_blocked(msg: &Message, is_topic_box: bool, cx: &App) -> bool {
+    if is_topic_box {
+        TopicsStore::global(cx)
+            .read(cx)
+            .is_init_topic_message(msg.id)
+    } else {
+        channel_delete_blocked(msg, cx)
+    }
+}
+
 fn can_delete_message(msg: &Message, current_user_id: &str, is_topic_box: bool, cx: &App) -> bool {
     if is_topic_box {
         if is_first_topic_message(msg, cx) {
@@ -254,6 +264,7 @@ pub(crate) fn build(
     quick_menu_submenu_open: bool,
     selected_text: Option<String>,
     clicked_image: Option<&str>,
+    clicked_link: Option<&str>,
     host: WeakEntity<ChannelMessages>,
     cx: &App,
 ) -> ContextMenu {
@@ -283,6 +294,7 @@ pub(crate) fn build(
         quick_menu_submenu_open,
         selected_text,
         clicked_image,
+        clicked_link,
         host,
         cx,
     )
@@ -447,7 +459,7 @@ fn build_topic_menu(
         );
     }
 
-    let show_edit = message_is_editable(msg, current_user_id);
+    let show_edit = message_is_editable(msg, current_user_id) && !topic_edit_blocked(msg, true, cx);
     if show_edit {
         let host = host.clone();
         let message_id = msg.id;
@@ -592,6 +604,7 @@ fn build_channel_menu(
     quick_menu_submenu_open: bool,
     selected_text: Option<String>,
     clicked_image: Option<&str>,
+    clicked_link: Option<&str>,
     host: WeakEntity<ChannelMessages>,
     cx: &App,
 ) -> ContextMenu {
@@ -642,7 +655,8 @@ fn build_channel_menu(
         );
     }
 
-    let show_edit = message_is_editable(msg, current_user_id);
+    let show_edit =
+        message_is_editable(msg, current_user_id) && !topic_edit_blocked(msg, false, cx);
     if show_edit {
         let host = host.clone();
         let message_id = msg.id;
@@ -821,7 +835,7 @@ fn build_channel_menu(
     let link = if clicked.is_some() {
         None
     } else {
-        first_link(msg)
+        clicked_menu_link(msg, clicked_link).or_else(|| first_link(msg))
     };
     let image = clicked
         .or_else(|| first_menu_image(msg))
@@ -966,6 +980,40 @@ mod menu_image_tests {
         assert_eq!(pick(Some("https://cdn/c.png")), Some("https://cdn/a.png"));
         assert_eq!(pick(Some("https://other/x.png")), Some("https://cdn/a.png"));
         assert!(clicked_menu_image(&msg, Some("https://cdn/c.png")).is_none());
+    }
+}
+
+#[cfg(test)]
+mod menu_link_tests {
+    use super::{clicked_menu_link, first_link};
+    use mezon_store::{LinkKind, Message, MessageId, MessageSpan};
+
+    fn link(url: &str) -> MessageSpan {
+        MessageSpan::Link {
+            text: url.to_string().into(),
+            url: String::new(),
+            kind: LinkKind::Plain,
+        }
+    }
+
+    #[test]
+    fn the_right_clicked_link_wins_over_the_first_one() {
+        let mut msg = Message::new(MessageId(1), "", "1", "Alice", 0);
+        msg.spans = vec![
+            link("https://a.example/one"),
+            MessageSpan::Text(" and ".into()),
+            link("https://b.example/two"),
+        ];
+        let pick = |clicked| clicked_menu_link(&msg, clicked).or_else(|| first_link(&msg));
+        assert_eq!(
+            pick(Some("https://b.example/two")).as_deref(),
+            Some("https://b.example/two")
+        );
+        assert_eq!(pick(None).as_deref(), Some("https://a.example/one"));
+        assert_eq!(
+            pick(Some("https://other.example/x")).as_deref(),
+            Some("https://a.example/one")
+        );
     }
 }
 

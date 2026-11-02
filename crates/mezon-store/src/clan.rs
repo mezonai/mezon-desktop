@@ -335,12 +335,17 @@ pub struct ClanOverviewDraft {
 }
 
 impl ClanOverviewDraft {
-    fn update_request(&self, clan_id: ClanId, clan: &Clan) -> UpdateClanDescRequest {
+    fn update_request(
+        &self,
+        clan_id: ClanId,
+        clan: &Clan,
+        saved: &ClanOverviewDraft,
+    ) -> UpdateClanDescRequest {
         UpdateClanDescRequest {
             clan_id: clan_id.get(),
             clan_name: self.clan_name.trim().to_string(),
-            logo: Some(self.logo.clone()),
-            banner: Some(self.banner.clone()),
+            logo: (self.logo != saved.logo).then(|| self.logo.clone()),
+            banner: (self.banner != saved.banner).then(|| self.banner.clone()),
             prevent_anonymous: self.prevent_anonymous,
             welcome_channel_id: proto_channel_id(
                 self.welcome_channel_id.or(clan.welcome_channel_id),
@@ -1177,7 +1182,7 @@ impl ClanList {
         &mut self,
         clan_id: ClanId,
         draft: ClanOverviewDraft,
-        saved_name: &str,
+        saved: &ClanOverviewDraft,
         cx: &mut Context<Self>,
     ) -> Task<Result<(), ClanSaveError>> {
         let api = self.api.clone();
@@ -1186,9 +1191,9 @@ impl ClanList {
             return cx.spawn(async move |_, _| Err(ClanSaveError::Other("clan not found".into())));
         };
         let trimmed_name = draft.clan_name.trim().to_string();
-        let change = name_change(&trimmed_name, saved_name, &clan.name);
+        let change = name_change(&trimmed_name, &saved.clan_name, &clan.name);
         let name_edited = change != NameChange::Unchanged;
-        let mut request = draft.update_request(clan_id, &clan);
+        let mut request = draft.update_request(clan_id, &clan, saved);
         if !name_edited {
             request.clan_name.clear();
         }
@@ -1831,6 +1836,51 @@ mod tests {
         assert_eq!(c[0].about, "about");
         assert_eq!(c[0].description, "desc");
         assert_eq!(c[0].short_url, "vanity");
+    }
+
+    fn make_draft(logo: &str, banner: &str) -> ClanOverviewDraft {
+        ClanOverviewDraft {
+            clan_name: "One".into(),
+            logo: logo.into(),
+            banner: banner.into(),
+            welcome_channel_id: None,
+            prevent_anonymous: false,
+        }
+    }
+
+    #[test]
+    fn overview_request_leaves_out_untouched_images() {
+        let clan = make_clan(1, "One", Some("logo.png"));
+        let saved = make_draft("logo.png", "banner.png");
+        let draft = saved.clone();
+        let request = draft.update_request(ClanId(1), &clan, &saved);
+        assert_eq!(request.logo, None);
+        assert_eq!(request.banner, None);
+    }
+
+    #[test]
+    fn overview_request_sends_only_the_changed_image() {
+        let clan = make_clan(1, "One", Some("A"));
+        let saved = make_draft("A", "B");
+        let logo_changed = make_draft("C", "B");
+        let request = logo_changed.update_request(ClanId(1), &clan, &saved);
+        assert_eq!(request.logo.as_deref(), Some("C"));
+        assert_eq!(request.banner, None);
+
+        let banner_changed = make_draft("A", "D");
+        let request = banner_changed.update_request(ClanId(1), &clan, &saved);
+        assert_eq!(request.logo, None);
+        assert_eq!(request.banner.as_deref(), Some("D"));
+    }
+
+    #[test]
+    fn overview_request_sends_a_cleared_image() {
+        let clan = make_clan(1, "One", Some("A"));
+        let saved = make_draft("A", "B");
+        let draft = make_draft("", "B");
+        let request = draft.update_request(ClanId(1), &clan, &saved);
+        assert_eq!(request.logo.as_deref(), Some(""));
+        assert_eq!(request.banner, None);
     }
 
     #[test]
