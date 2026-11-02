@@ -3012,6 +3012,7 @@
   "eventCreator.eventDetail.shareLink": "Поделитесь этой ссылкой с другими, чтобы дать доступ к этому клану",
   "eventCreator.eventDetail.tenMinutesLeft": "{{minutes}} минут осталось. Присоединяйтесь!",
   "eventCreator.eventDetail.thread": "ветка:",
+  "eventCreator.fields.VoiceChannel.privateAudienceTip": "Совет: Чтобы все участники аудитории могли присоединиться к событию, добавьте их в {{channelName}}.",
   "eventCreator.fields.VoiceChannel.title": "Выберите голосовой канал",
   "eventCreator.fields.address.placeholder": "Поделиться локацией, ссылкой или чем-то ещё",
   "eventCreator.fields.address.title": "Локации",

@@ -2782,6 +2782,7 @@
   "eventCreator.eventDetail.shareLink": "Бу кланга керү мөмкинлеге бирү өчен бу сылтаманы башкалар белән уртаклашыгыз",
   "eventCreator.eventDetail.tenMinutesLeft": "{{minutes}} минут калды. Кушылыгыз!",
   "eventCreator.eventDetail.thread": "ботаклама:",
+  "eventCreator.fields.VoiceChannel.privateAudienceTip": "Киңәш: Барлык тыңлаучылар да чарага кушыла алсын өчен, аларны {{channelName}} каналына өстәгез.",
   "eventCreator.fields.VoiceChannel.title": "Тавышлы канал сайлагыз",
   "eventCreator.fields.address.placeholder": "Урын, сылтама яки башка нәрсә белән уртаклашу",
   "eventCreator.fields.address.title": "Урыннар",

@@ -2773,6 +2773,7 @@
   "eventCreator.eventDetail.shareLink": "Deel deze link met anderen om toegang te krijgen tot deze server",
   "eventCreator.eventDetail.tenMinutesLeft": "Nog {{minutes}} minuten. Neem deel nu!",
   "eventCreator.eventDetail.thread": "discussiereeks:",
+  "eventCreator.fields.VoiceChannel.privateAudienceTip": "Tip: Voeg alle toehoorders toe aan {{channelName}} zodat ze aan het evenement kunnen deelnemen.",
   "eventCreator.fields.VoiceChannel.title": "Spraakkanaal selecteren",
   "eventCreator.fields.address.placeholder": "Voeg locatie, link of iets toe",
   "eventCreator.fields.address.title": "Locatie",

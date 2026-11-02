@@ -2774,6 +2774,7 @@
   "eventCreator.eventDetail.shareLink": "서버 액세스 권한을 부여하려면 이 링크를 다른 사람과 공유하세요",
   "eventCreator.eventDetail.tenMinutesLeft": "{{minutes}} 분 남았습니다. 지금 참여하세요!",
   "eventCreator.eventDetail.thread": "토론 스트림:",
+  "eventCreator.fields.VoiceChannel.privateAudienceTip": "팁: 모든 청중이 이벤트에 참여할 수 있도록 {{channelName}}에 추가하세요.",
   "eventCreator.fields.VoiceChannel.title": "음성 채널 선택",
   "eventCreator.fields.address.placeholder": "위치, 링크 또는 무언가 추가",
   "eventCreator.fields.address.title": "위치",

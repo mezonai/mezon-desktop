@@ -2773,6 +2773,7 @@
   "eventCreator.eventDetail.shareLink": "Chia sẻ liên kết này với người khác để cấp quyền truy cập vào máy chủ này",
   "eventCreator.eventDetail.tenMinutesLeft": "Còn {{minutes}} phút. Tham gia ngay!",
   "eventCreator.eventDetail.thread": "chuỗi thảo luận:",
+  "eventCreator.fields.VoiceChannel.privateAudienceTip": "Tips: Để đảm bảo tất cả khán giả đều có thể tham gia sự kiện, hãy thêm họ vào {{channelName}}.",
   "eventCreator.fields.VoiceChannel.title": "Chọn kênh thoại",
   "eventCreator.fields.address.placeholder": "Thêm địa điểm, liên kết hoặc cái gì đó",
   "eventCreator.fields.address.title": "Địa điểm",

@@ -2773,6 +2773,7 @@
   "eventCreator.eventDetail.shareLink": "Partagez ce lien avec d'autres personnes pour leur donner accès à ce clan",
   "eventCreator.eventDetail.tenMinutesLeft": "Plus que {{minutes}} minutes. Rejoignez-le maintenant !",
   "eventCreator.eventDetail.thread": "fil de discussion :",
+  "eventCreator.fields.VoiceChannel.privateAudienceTip": "Conseil : Pour que tous les membres du public puissent participer à l’événement, ajoutez-les à {{channelName}}.",
   "eventCreator.fields.VoiceChannel.title": "Sélectionner un salon vocal",
   "eventCreator.fields.address.placeholder": "Ajoutez un emplacement, un lien ou quelque chose",
   "eventCreator.fields.address.title": "Emplacement",
