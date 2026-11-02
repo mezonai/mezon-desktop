@@ -171,6 +171,7 @@ fn render_message_content_with_options(
                 body_color,
                 px(EMOJI_SIZE),
                 selection_context,
+                false,
             );
         }
         return render_plain_text_spans(msg, ctx, body_color);
@@ -216,6 +217,7 @@ fn render_message_content_with_options(
             body_color,
             emoji_size,
             selection_context,
+            false,
         );
     }
     let mut row = rich_content_row(body_color, options.inline);
@@ -409,6 +411,16 @@ fn rich_highlights_with_link_hover(
 }
 
 fn render_rich_styled(msg: &Message, ctx: &RowCtx, body_color: gpui::Rgba) -> AnyElement {
+    if msg.is_edited {
+        return render_selectable_segmented_content(
+            msg,
+            ctx,
+            body_color,
+            px(EMOJI_SIZE),
+            None,
+            true,
+        );
+    }
     let Some(layout) = msg.rich_layout.as_ref() else {
         return div().into_any_element();
     };
@@ -633,6 +645,7 @@ fn render_selectable_segmented_content(
     body_color: gpui::Rgba,
     emoji_size: Pixels,
     selection_context: Option<&SelectableTextContext>,
+    rich_style: bool,
 ) -> AnyElement {
     let selection_layout = selection_context
         .is_none()
@@ -653,6 +666,7 @@ fn render_selectable_segmented_content(
         msg.is_edited,
         selection_context,
         false,
+        rich_style,
     )
 }
 
@@ -668,6 +682,7 @@ fn render_selectable_segmented_spans(
     show_edited: bool,
     selection_context: Option<&SelectableTextContext>,
     block_layout: bool,
+    rich_style: bool,
 ) -> AnyElement {
     let selected = selection_context.map_or_else(
         || ctx.selection.borrow().range_for_message(msg.id, canonical),
@@ -796,20 +811,32 @@ fn render_selectable_segmented_spans(
                     role_id.as_deref(),
                     ctx,
                     styled,
+                    rich_style,
                 ));
                 base = end;
             }
             MessageSpan::Bold(text) => {
                 let end = base + text.len();
-                let styled = selectable_segment(text, base, selected.as_ref());
-                segments.push(TextSegment::text(styled.layout().clone(), base..end));
-                row = row.child(
-                    div()
-                        .max_w_full()
-                        .min_w_0()
-                        .font_weight(FontWeight::BOLD)
-                        .child(styled),
-                );
+                for piece in memoized_selectable_text_pieces(text, ctx).iter() {
+                    match piece {
+                        CachedSelectableTextPiece::LineBreak => {
+                            row = row.child(div().w_full().h_0())
+                        }
+                        CachedSelectableTextPiece::EmptyLine => {
+                            row = row.child(div().w_full().child(SharedString::default()))
+                        }
+                        CachedSelectableTextPiece::Text { text, range } => {
+                            let start = base + range.start;
+                            let styled =
+                                selectable_segment_shared(text.clone(), start, selected.as_ref());
+                            segments.push(TextSegment::text(
+                                styled.layout().clone(),
+                                start..start + text.len(),
+                            ));
+                            row = row.child(div().font_weight(FontWeight::BOLD).child(styled));
+                        }
+                    }
+                }
                 base = end;
             }
             MessageSpan::Code(text) => {
@@ -871,6 +898,7 @@ fn render_selectable_segmented_spans(
                                 .id(("msg-link", link_key))
                                 .cursor_pointer()
                                 .text_color(ctx.theme.tokens.mention_color)
+                                .when(rich_style, |link| link.hover(|style| style.underline()))
                                 .on_click(move |_, _, cx| {
                                     if !selection.borrow().has_selection() {
                                         open_message_link(target.clone(), cx);
@@ -1031,6 +1059,7 @@ pub(crate) fn render_selectable_embed_description(
         false,
         Some(selection_context),
         true,
+        false,
     )
 }
 
@@ -1782,6 +1811,7 @@ pub fn append_selectable_system_mention_spans(
                 role_id.as_deref(),
                 ctx,
                 selection_context.text_node(display, range),
+                false,
             ));
         }
     }
@@ -2258,7 +2288,7 @@ fn render_mention_chip(
     role_id: Option<&str>,
     ctx: &RowCtx,
 ) -> AnyElement {
-    render_mention_chip_with_child(user_id, role_id, ctx, display.into())
+    render_mention_chip_with_child(user_id, role_id, ctx, display.into(), false)
 }
 
 fn render_mention_chip_with_child(
@@ -2266,6 +2296,7 @@ fn render_mention_chip_with_child(
     role_id: Option<&str>,
     ctx: &RowCtx,
     child: impl IntoElement,
+    rich_style: bool,
 ) -> AnyElement {
     let theme = ctx.theme;
     let is_role = role_id.is_some_and(|r| !r.is_empty());
@@ -2288,12 +2319,14 @@ fn render_mention_chip_with_child(
     let chip = div()
         .max_w_full()
         .min_w_0()
-        .px(px(1.))
-        .rounded_sm()
-        .font_weight(FontWeight::MEDIUM)
         .bg(bg)
         .text_color(color)
-        .hover(move |s| s.bg(hover_bg).text_color(hover_color))
+        .when(!rich_style, |chip| {
+            chip.px(px(1.))
+                .rounded_sm()
+                .font_weight(FontWeight::MEDIUM)
+                .hover(move |s| s.bg(hover_bg).text_color(hover_color))
+        })
         .child(child);
 
     if is_role {
