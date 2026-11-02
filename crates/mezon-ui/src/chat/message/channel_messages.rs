@@ -7,12 +7,12 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use gpui::{
-    Anchor, Animation, AnimationExt as _, AnyElement, App, ClipboardItem, Context, DismissEvent,
-    DispatchPhase, Element, ElementId, Entity, EventEmitter, FocusHandle, Focusable,
-    GlobalElementId, Hitbox, HitboxBehavior, InspectorElementId, KeyDownEvent, LayoutId,
-    ListAlignment, ListState, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels,
-    Point, SharedString, Subscription, Task, TextLayout, WeakEntity, Window, anchored, deferred,
-    div, ease_in_out, list, prelude::*, px,
+    Anchor, Animation, AnimationExt as _, AnyElement, App, Context, DismissEvent, DispatchPhase,
+    Element, ElementId, Entity, EventEmitter, FocusHandle, Focusable, GlobalElementId, Hitbox,
+    HitboxBehavior, InspectorElementId, KeyDownEvent, LayoutId, ListAlignment, ListState,
+    MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Point, SharedString,
+    Subscription, Task, TextLayout, WeakEntity, Window, anchored, deferred, div, ease_in_out, list,
+    prelude::*, px,
 };
 use ui::{ScrollAxes, Scrollbars, WithScrollbar};
 
@@ -42,7 +42,9 @@ use super::skeleton::message_skeleton;
 use super::system_row::{build_onboarding_context, build_welcome_context};
 use super::video_player::{VideoActivation, VideoPlayerView};
 use crate::app::shell::Shell;
-use crate::chat::mention_input::{MentionInput, MentionInputEvent};
+use crate::chat::mention_input::{
+    CopiedMention, MentionInput, MentionInputEvent, clipboard_item_with_mentions,
+};
 use crate::chat::user_profile_popover::UserProfilePopover;
 use crate::components::primitives::text_actions::Copy;
 use crate::components::primitives::{
@@ -403,10 +405,12 @@ fn selected_text_for_messages(
     locale: &str,
     current_user_id: &str,
     cx: &App,
-) -> Option<String> {
+) -> Option<(String, Vec<CopiedMention>)> {
     use super::selection::floor_char_boundary;
 
     let mut parts = Vec::new();
+    let mut mentions = Vec::new();
+    let mut joined_len = 0usize;
     for message in messages {
         if !state.includes_message(message.id) {
             continue;
@@ -420,20 +424,53 @@ fn selected_text_for_messages(
         if start < end
             && let Some(cleaned) = clipboard_selection_slice(&full[start..end])
         {
+            let part_start = if parts.is_empty() { 0 } else { joined_len + 1 };
+            joined_len = part_start + cleaned.len();
             parts.push(cleaned);
+            if !message.spans.is_empty()
+                && !message.is_deleted_placeholder
+                && message.call_log.is_none()
+                && message.poll.is_none()
+                && message.token_transaction.is_none()
+                && !matches!(
+                    message.code,
+                    MessageCode::SendToken
+                        | MessageCode::CreatePin
+                        | MessageCode::CreateThread
+                        | MessageCode::DeleteThread
+                )
+            {
+                for (span_range, mut mention) in
+                    super::content::selectable_spans_mentions(&message.spans, locale, cx)
+                {
+                    if span_range.start < start || span_range.end > end {
+                        continue;
+                    }
+                    let Some(before) = full.get(start..span_range.start) else {
+                        continue;
+                    };
+                    mention.at = part_start + clipboard_selection_len(before);
+                    mentions.push(mention);
+                }
+            }
         }
     }
-    (!parts.is_empty()).then(|| parts.join("\n"))
+    (!parts.is_empty()).then(|| (parts.join("\n"), mentions))
+}
+
+fn is_clipboard_placeholder(c: char) -> bool {
+    c == super::content::INLINE_ICON_PLACEHOLDER || c == super::content::ATTACHMENT_PLACEHOLDER
+}
+
+fn clipboard_selection_len(text: &str) -> usize {
+    text.chars()
+        .filter(|&c| !is_clipboard_placeholder(c))
+        .map(char::len_utf8)
+        .sum()
 }
 
 fn clipboard_selection_slice(text: &str) -> Option<String> {
-    let cleaned = text.replace(
-        [
-            super::content::INLINE_ICON_PLACEHOLDER,
-            super::content::ATTACHMENT_PLACEHOLDER,
-        ],
-        "",
-    );
+    let cleaned = text.replace(is_clipboard_placeholder, "");
     (!cleaned.is_empty()).then_some(cleaned)
 }
 
@@ -462,6 +499,137 @@ mod selection_copy_tests {
             clipboard_selection_slice("lãi 5\u{2030} một tháng"),
             Some("lãi 5\u{2030} một tháng".to_string())
         );
+    }
+
+    #[gpui::test]
+    fn selection_only_carries_mentions_fully_inside_the_range(cx: &mut gpui::TestAppContext) {
+        use super::{SelPoint, selected_text_for_messages};
+        use crate::chat::mention_input::CopiedMention;
+        use crate::chat::message::selection::MessageSelectionState;
+        use gpui::SharedString;
+        use mezon_store::{Message, MessageId, MessageSpan};
+
+        let mut msg = Message::new(MessageId(1), "hi @Alice and @Bob", "1", "Sender", 0);
+        msg.spans = vec![
+            MessageSpan::Text(SharedString::from("hi ")),
+            MessageSpan::Mention {
+                display: SharedString::from("@Alice"),
+                user_id: Some("10".to_string()),
+                role_id: None,
+            },
+            MessageSpan::Text(SharedString::from(" and ")),
+            MessageSpan::Mention {
+                display: SharedString::from("@Bob"),
+                user_id: Some("20".to_string()),
+                role_id: None,
+            },
+        ];
+        let messages = [msg];
+
+        cx.read(|cx| {
+            let mut half = MessageSelectionState::default();
+            half.anchor = Some(SelPoint {
+                message_id: MessageId(1),
+                offset: 5,
+            });
+            half.head = Some(SelPoint {
+                message_id: MessageId(1),
+                offset: 18,
+            });
+            let (text, mentions) =
+                selected_text_for_messages(&half, &messages, "en", "1", cx).unwrap();
+            assert_eq!(text, "lice and @Bob");
+            assert_eq!(
+                mentions,
+                vec![CopiedMention {
+                    display: "@Bob".to_string(),
+                    user_id: "20".to_string(),
+                    role_id: String::new(),
+                    at: 9,
+                }]
+            );
+
+            let mut full = MessageSelectionState::default();
+            full.anchor = Some(SelPoint {
+                message_id: MessageId(1),
+                offset: 0,
+            });
+            full.head = Some(SelPoint {
+                message_id: MessageId(1),
+                offset: 18,
+            });
+            let (text, mentions) =
+                selected_text_for_messages(&full, &messages, "en", "1", cx).unwrap();
+            assert_eq!(text, "hi @Alice and @Bob");
+            assert_eq!(
+                mentions,
+                vec![
+                    CopiedMention {
+                        display: "@Alice".to_string(),
+                        user_id: "10".to_string(),
+                        role_id: String::new(),
+                        at: 3,
+                    },
+                    CopiedMention {
+                        display: "@Bob".to_string(),
+                        user_id: "20".to_string(),
+                        role_id: String::new(),
+                        at: 14,
+                    },
+                ]
+            );
+        });
+    }
+
+    #[gpui::test]
+    fn selection_mention_offsets_point_into_the_joined_clipboard_text(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        use super::{SelPoint, selected_text_for_messages};
+        use crate::chat::message::selection::MessageSelectionState;
+        use gpui::SharedString;
+        use mezon_store::{Message, MessageId, MessageSpan};
+
+        let mention = |display: &str, user_id: &str| MessageSpan::Mention {
+            display: SharedString::from(display.to_string()),
+            user_id: Some(user_id.to_string()),
+            role_id: None,
+        };
+        let mut first = Message::new(MessageId(1), "see @An", "1", "Sender", 0);
+        first.spans = vec![
+            MessageSpan::Text(SharedString::from("see ")),
+            mention("@An", "10"),
+        ];
+        let mut second = Message::new(MessageId(2), "youtube.com/@AnTV @An", "1", "Sender", 0);
+        second.spans = vec![
+            MessageSpan::Text(SharedString::from("youtube.com/@AnTV ")),
+            mention("@An", "10"),
+        ];
+        let messages = [first, second];
+
+        cx.read(|cx| {
+            let mut state = MessageSelectionState::default();
+            state.anchor = Some(SelPoint {
+                message_id: MessageId(1),
+                offset: 0,
+            });
+            state.head = Some(SelPoint {
+                message_id: MessageId(2),
+                offset: 21,
+            });
+            state.order_map =
+                std::collections::HashMap::from([(MessageId(1), 0), (MessageId(2), 1)]);
+            let (text, mentions) =
+                selected_text_for_messages(&state, &messages, "en", "1", cx).unwrap();
+            assert_eq!(text, "see @An\nyoutube.com/@AnTV @An");
+            assert_eq!(
+                mentions.iter().map(|m| m.at).collect::<Vec<_>>(),
+                vec![4, 26]
+            );
+            for m in &mentions {
+                assert_eq!(&text[m.at..m.at + m.display.len()], m.display);
+            }
+        });
     }
 }
 
@@ -4778,10 +4946,10 @@ impl ChannelMessages {
                 )
             }
         };
-        let Some(text) = text else {
+        let Some((text, mentions)) = text else {
             return false;
         };
-        cx.write_to_clipboard(ClipboardItem::new_string(text));
+        cx.write_to_clipboard(clipboard_item_with_mentions(text, mentions));
         true
     }
 
