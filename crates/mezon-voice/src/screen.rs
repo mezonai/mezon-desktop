@@ -409,6 +409,7 @@ pub fn start_screen(
             let mut src_w = 0u32;
             let mut src_h = 0u32;
             let mut sent_track = false;
+            let mut constrained_fps = 0u32;
             #[cfg(not(target_os = "macos"))]
             let mut invalid_frames = 0u64;
             let mut display_buf = Vec::new();
@@ -531,6 +532,14 @@ pub fn start_screen(
                     }
                     sent_track = true;
                     tracing::info!("screen capture started: {src_w}x{src_h}");
+                }
+
+                let fps = thread_control.fps();
+                if fps != constrained_fps
+                    && let Some(source) = &source
+                {
+                    source.set_frame_rate_constraints(0.0, f64::from(fps));
+                    constrained_fps = fps;
                 }
 
                 if width != src_w || height != src_h {

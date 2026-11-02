@@ -89,6 +89,10 @@ pub mod native {
             self.handle.take_keyframe_request()
         }
 
+        pub fn set_frame_rate_constraints(&self, min_fps: f64, max_fps: f64) {
+            self.handle.set_frame_rate_constraints(min_fps, max_fps);
+        }
+
         /// Returns and clears the pending rate-control target raised by the
         /// pass-through encoder.
         pub fn take_rate_control_request(&self) -> Option<EncodedRateControl> {

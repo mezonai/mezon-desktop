@@ -300,6 +300,15 @@ bool VideoTrackSource::capture_encoded_frame(
   return source_->on_captured_frame(frame, frame_metadata);
 }
 
+void VideoTrackSource::set_frame_rate_constraints(double min_fps,
+                                                  double max_fps) const {
+  webrtc::VideoTrackSourceConstraints constraints;
+  constraints.min_fps = min_fps;
+  constraints.max_fps = max_fps;
+  static_cast<webrtc::VideoTrackSourceInterface*>(source_.get())
+      ->ProcessConstraints(constraints);
+}
+
 bool VideoTrackSource::take_keyframe_request() const {
   return source_->keyframe_request_flag()->exchange(false,
                                                     std::memory_order_relaxed);

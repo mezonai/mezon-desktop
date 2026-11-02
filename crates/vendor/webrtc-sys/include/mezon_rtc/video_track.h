@@ -142,6 +142,7 @@ class VideoTrackSource {
   // pass-through encoder (PLI/FIR or post-reconfigure). Poll from the
   // capture loop.
   bool take_keyframe_request() const;
+  void set_frame_rate_constraints(double min_fps, double max_fps) const;
   EncodedRateControlRequest take_rate_control_request() const;
 
   void set_packet_trailer_handler(
