@@ -577,7 +577,7 @@ impl BadgeService {
                             seen_message_id,
                             cx,
                         );
-                        cl.apply_topic_read(channel_id, cx);
+                        cl.apply_topic_read_in(clan_id, channel_id, None, cx);
                     });
                 }
                 if !seen_message_id.is_zero() {

@@ -155,6 +155,18 @@ impl TopicBadgeStore {
             .unwrap_or(0)
     }
 
+    pub fn parent_of(&self, topic_id: &str) -> Option<ChannelId> {
+        self.topic_parent_map
+            .get(topic_id)
+            .map(|entry| entry.parent_channel_id.as_str())
+            .or_else(|| {
+                self.checked_unread
+                    .get(topic_id)
+                    .map(|topic| topic.parent_channel_id.as_str())
+            })
+            .and_then(|parent| parent.parse().ok())
+    }
+
     pub fn unread_parent_ids(&self, clan_id: ClanId) -> HashSet<ChannelId> {
         let clan_key = clan_id.to_string();
         self.topic_parent_map

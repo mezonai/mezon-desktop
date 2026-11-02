@@ -1031,6 +1031,7 @@ async fn dbus_notify(
         "desktop-entry",
         zbus::zvariant::Value::Str(LINUX_DESKTOP_ENTRY.into()),
     );
+    hints.insert("transient", zbus::zvariant::Value::Bool(true));
     if replaces_id == 0 {
         hints.insert(
             "sound-name",
