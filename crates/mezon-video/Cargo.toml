@@ -44,6 +44,7 @@ ureq = { version = "3", default-features = false, features = ["rustls"] }
 matroska-demuxer = "0.7"
 oxideav-vp8 = "0.2"
 parking_lot.workspace = true
+unsafe-libopus = "0.2"
 ureq = { version = "3", default-features = false, features = ["rustls"] }
 yuv = { workspace = true }
 windows-core.workspace = true

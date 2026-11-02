@@ -45,6 +45,7 @@ fn ensure_media_foundation() -> windows::core::Result<()> {
     static READY: AtomicBool = AtomicBool::new(false);
     INIT.call_once(|| {
         if unsafe { MFStartup(MF_VERSION, MFSTARTUP_FULL) }.is_ok() {
+            crate::opus_mft_windows::register_opus_decoder();
             READY.store(true, Ordering::SeqCst);
         }
     });
