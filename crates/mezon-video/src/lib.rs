@@ -14,6 +14,8 @@ mod local_copy;
 mod macos;
 #[cfg(target_os = "macos")]
 mod matroska_remux;
+#[cfg(windows)]
+mod opus_mft_windows;
 #[cfg(not(target_os = "macos"))]
 mod poster;
 #[cfg(target_os = "linux")]
