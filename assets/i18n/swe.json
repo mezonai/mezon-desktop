@@ -4904,5 +4904,13 @@
   "chat.activityStrip.messageFrom": "Meddelande från {{name}}: {{message}}",
   "chat.activityStrip.hideAction": "Dölj fältet för fästa meddelanden och ämnen",
   "chat.activityStrip.hideConfirm.title": "Dölj fältet för fästa meddelanden och ämnen",
-  "chat.activityStrip.hideConfirm.description": "Dölj fältet för fästa meddelanden och ämnen i den här kanalen? Det visas automatiskt igen vid en ny fästning eller ett nytt ämne."
+  "chat.activityStrip.hideConfirm.description": "Dölj fältet för fästa meddelanden och ämnen i den här kanalen? Det visas automatiskt igen vid en ny fästning eller ett nytt ämne.",
+  "setting.account.qrProfile.centerLogo": "QR-centerlogotyp",
+  "setting.account.qrProfile.chooseFromDevice": "Välj från enhet",
+  "setting.account.qrProfile.resetDefaultLogo": "Återställ Mezon-logotyp",
+  "setting.account.qrProfile.qrDownloaded": "QR-kodsbild nedladdad",
+  "setting.account.qrProfile.brandName": "MEZON",
+  "setting.account.qrProfile.verifiedByMezon": "VERIFIED BY MEZON",
+  "setting.account.qrProfile.errorExport": "Det gick inte att exportera profilens QR-kod",
+  "setting.account.qrProfile.errorImage": "Det gick inte att läsa in bilden"
 }

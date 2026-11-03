@@ -4906,5 +4906,13 @@
   "chat.activityStrip.messageFrom": "{{name}}からのメッセージ: {{message}}",
   "chat.activityStrip.hideAction": "ピンとトピックのバーを非表示",
   "chat.activityStrip.hideConfirm.title": "ピンとトピックのバーを非表示",
-  "chat.activityStrip.hideConfirm.description": "このチャンネルのピンとトピックのバーを非表示にしますか？新しいピンまたはトピックがあると自動的に再表示されます。"
+  "chat.activityStrip.hideConfirm.description": "このチャンネルのピンとトピックのバーを非表示にしますか？新しいピンまたはトピックがあると自動的に再表示されます。",
+  "setting.account.qrProfile.centerLogo": "QR中央ロゴ",
+  "setting.account.qrProfile.chooseFromDevice": "端末から選択",
+  "setting.account.qrProfile.resetDefaultLogo": "Mezonロゴにリセット",
+  "setting.account.qrProfile.qrDownloaded": "QRコード画像をダウンロードしました",
+  "setting.account.qrProfile.brandName": "MEZON",
+  "setting.account.qrProfile.verifiedByMezon": "VERIFIED BY MEZON",
+  "setting.account.qrProfile.errorExport": "プロフィールのQRコードを出力できません",
+  "setting.account.qrProfile.errorImage": "画像を読み込めません"
 }

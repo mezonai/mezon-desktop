@@ -4904,5 +4904,13 @@
   "chat.activityStrip.messageFrom": "Messaggio da {{name}}: {{message}}",
   "chat.activityStrip.hideAction": "Nascondi barra dei pin e topic",
   "chat.activityStrip.hideConfirm.title": "Nascondi barra dei pin e topic",
-  "chat.activityStrip.hideConfirm.description": "Nascondere la barra dei pin e topic per questo canale? Riapparirà automaticamente quando ci sarà un nuovo pin o topic."
+  "chat.activityStrip.hideConfirm.description": "Nascondere la barra dei pin e topic per questo canale? Riapparirà automaticamente quando ci sarà un nuovo pin o topic.",
+  "setting.account.qrProfile.centerLogo": "Logo centrale QR",
+  "setting.account.qrProfile.chooseFromDevice": "Scegli dal dispositivo",
+  "setting.account.qrProfile.resetDefaultLogo": "Reimposta logo Mezon",
+  "setting.account.qrProfile.qrDownloaded": "Immagine QR scaricata",
+  "setting.account.qrProfile.brandName": "MEZON",
+  "setting.account.qrProfile.verifiedByMezon": "VERIFIED BY MEZON",
+  "setting.account.qrProfile.errorExport": "Impossibile esportare il QR del profilo",
+  "setting.account.qrProfile.errorImage": "Impossibile caricare l’immagine"
 }

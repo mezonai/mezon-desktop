@@ -4904,5 +4904,13 @@
   "chat.activityStrip.messageFrom": "Nachricht von {{name}}: {{message}}",
   "chat.activityStrip.hideAction": "Anheftungs- und Themenleiste ausblenden",
   "chat.activityStrip.hideConfirm.title": "Anheftungs- und Themenleiste ausblenden",
-  "chat.activityStrip.hideConfirm.description": "Die Leiste mit Anheftungen und Themen für diesen Kanal ausblenden? Sie wird bei einer neuen Anheftung oder einem neuen Thema automatisch wieder angezeigt."
+  "chat.activityStrip.hideConfirm.description": "Die Leiste mit Anheftungen und Themen für diesen Kanal ausblenden? Sie wird bei einer neuen Anheftung oder einem neuen Thema automatisch wieder angezeigt.",
+  "setting.account.qrProfile.centerLogo": "QR-Zentrum-Logo",
+  "setting.account.qrProfile.chooseFromDevice": "Vom Gerät auswählen",
+  "setting.account.qrProfile.resetDefaultLogo": "Mezon-Logo zurücksetzen",
+  "setting.account.qrProfile.qrDownloaded": "QR-Code-Bild heruntergeladen",
+  "setting.account.qrProfile.brandName": "MEZON",
+  "setting.account.qrProfile.verifiedByMezon": "VERIFIED BY MEZON",
+  "setting.account.qrProfile.errorExport": "Profil-QR kann nicht exportiert werden",
+  "setting.account.qrProfile.errorImage": "Bild kann nicht geladen werden"
 }

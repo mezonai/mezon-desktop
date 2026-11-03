@@ -4904,5 +4904,13 @@
   "chat.activityStrip.messageFrom": "{{name}}님의 메시지: {{message}}",
   "chat.activityStrip.hideAction": "고정 및 토픽 표시줄 숨기기",
   "chat.activityStrip.hideConfirm.title": "고정 및 토픽 표시줄 숨기기",
-  "chat.activityStrip.hideConfirm.description": "이 채널의 고정 및 토픽 표시줄을 숨기시겠습니까? 새 고정이나 토픽이 생기면 자동으로 다시 나타납니다."
+  "chat.activityStrip.hideConfirm.description": "이 채널의 고정 및 토픽 표시줄을 숨기시겠습니까? 새 고정이나 토픽이 생기면 자동으로 다시 나타납니다.",
+  "setting.account.qrProfile.centerLogo": "QR 중앙 로고",
+  "setting.account.qrProfile.chooseFromDevice": "기기에서 선택",
+  "setting.account.qrProfile.resetDefaultLogo": "Mezon 로고로 초기화",
+  "setting.account.qrProfile.qrDownloaded": "QR 코드 이미지가 다운로드되었습니다",
+  "setting.account.qrProfile.brandName": "MEZON",
+  "setting.account.qrProfile.verifiedByMezon": "VERIFIED BY MEZON",
+  "setting.account.qrProfile.errorExport": "프로필 QR 코드를 내보낼 수 없습니다",
+  "setting.account.qrProfile.errorImage": "이미지를 불러올 수 없습니다"
 }

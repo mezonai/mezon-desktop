@@ -11,6 +11,7 @@ mod notifications_page;
 mod password_modal;
 mod phone_modal;
 mod profile_page;
+mod qr_profile_modal;
 mod screen;
 mod server_page;
 mod streaming_page;
