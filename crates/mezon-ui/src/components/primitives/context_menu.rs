@@ -1,8 +1,8 @@
 use std::rc::Rc;
 
 use gpui::{
-    Anchor, App, ClickEvent, MouseButton, MouseDownEvent, Pixels, Point, SharedString, Window,
-    anchored, deferred, div, img, prelude::*, px, relative, svg,
+    Anchor, AnyElement, App, ClickEvent, MouseButton, MouseDownEvent, Pixels, Point, SharedString,
+    Window, anchored, deferred, div, img, prelude::*, px, relative, svg,
 };
 
 use super::icon::{Icon, IconName};
@@ -52,6 +52,7 @@ enum Item {
         checked: bool,
         on_click: MenuHandler,
     },
+    Element(AnyElement),
     Separator,
 }
 
@@ -204,6 +205,11 @@ impl ContextMenu {
 
     pub fn separator(mut self) -> Self {
         self.items.push(Item::Separator);
+        self
+    }
+
+    pub fn element(mut self, element: impl IntoElement) -> Self {
+        self.items.push(Item::Element(element.into_any_element()));
         self
     }
 
@@ -437,6 +443,12 @@ impl ContextMenu {
                     disabled: false,
                     options: Vec::new(),
                 },
+                Item::Element(_) => ContextMenuProbeItem {
+                    kind: "element",
+                    label: String::new(),
+                    disabled: false,
+                    options: Vec::new(),
+                },
             })
             .collect()
     }
@@ -504,6 +516,7 @@ impl ContextMenu {
                 Ok(())
             }
             Item::Separator => anyhow::bail!("menu item at index {index} is a separator"),
+            Item::Element(_) => anyhow::bail!("menu item at index {index} is a custom element"),
             Item::ReactionSubmenu { .. } => {
                 anyhow::bail!("menu item at index {index} is the reaction submenu")
             }
@@ -625,6 +638,9 @@ impl RenderOnce for ContextMenu {
             match item {
                 Item::Separator => {
                     panel = panel.child(div().my(px(5.)).h(px(1.)).w_full().bg(border));
+                }
+                Item::Element(element) => {
+                    panel = panel.child(element);
                 }
                 Item::Entry {
                     label,

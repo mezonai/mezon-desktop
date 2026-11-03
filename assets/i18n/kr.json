@@ -2426,6 +2426,7 @@
   "contextMenu.unmuteCategory": "카테고리 알림 켜기",
   "contextMenu.unpinMessage": "메시지 고정 해제",
   "contextMenu.useClanDefault": "클랜 기본값 사용",
+  "contextMenu.userVolume": "사용자 볼륨",
   "contextMenu.viewMore": "더 보기",
   "createChannel.buttons.cancel": "취소",
   "createChannel.buttons.create": "채널 만들기",
