@@ -148,7 +148,11 @@ impl futures::Stream for StreamReader {
         }
 
         match poll_read_buf(&mut reader, cx, &mut this.buf) {
-            Poll::Pending => Poll::Pending,
+            Poll::Pending => {
+                self.reader = Some(reader);
+
+                Poll::Pending
+            }
             Poll::Ready(Err(err)) => {
                 self.reader = None;
 
@@ -184,16 +188,11 @@ pub fn poll_read_buf(
         // Safety: `chunk_mut()` returns a `&mut UninitSlice`, and `UninitSlice` is a
         // transparent wrapper around `[MaybeUninit<u8>]`.
         let dst = unsafe { &mut *(dst as *mut _ as *mut [std::mem::MaybeUninit<u8>]) };
-        let mut buf = tokio::io::ReadBuf::uninit(dst);
-        let ptr = buf.filled().as_ptr();
-        let unfilled_portion = buf.initialize_unfilled();
+        let mut read_buf = tokio::io::ReadBuf::uninit(dst);
+        let unfilled_portion = read_buf.initialize_unfilled();
         // SAFETY: Pin projection
         let io_pin = unsafe { Pin::new_unchecked(io) };
-        std::task::ready!(io_pin.poll_read(cx, unfilled_portion)?);
-
-        // Ensure the pointer does not change from under us
-        assert_eq!(ptr, buf.filled().as_ptr());
-        buf.filled().len()
+        std::task::ready!(io_pin.poll_read(cx, unfilled_portion)?)
     };
 
     // Safety: This is guaranteed to be the number of initialized (and read)

@@ -16,10 +16,10 @@ use mezon_client::transport::{
     ApiRadioOption, ApiSelectComponent, ChannelLinkMeta, EPHEMERAL_MESSAGE_CODE, LOCATION_CODE,
     MESSAGE_BUZZ_CODE, OutgoingEmoji as TransportEmoji, OutgoingHashtag as TransportHashtag,
     OutgoingHashtags, OutgoingMention as TransportMention, OutgoingMessageFlags, OutgoingOgp,
-    OutgoingReply, SHARE_CONTACT_CODE, build_send_content, build_send_content_with_code,
-    build_share_contact_content_json, detect_markdown, emoji_content_tokens,
-    hashtag_content_tokens, is_here_user_id, markdown_content_tokens, mention_content_tokens,
-    with_create_time_seconds,
+    OutgoingReply, PresignMarkers, SHARE_CONTACT_CODE, build_send_content,
+    build_send_content_with_code, build_share_contact_content_json, detect_markdown,
+    emoji_content_tokens, hashtag_content_tokens, is_here_user_id, markdown_content_tokens,
+    mention_content_tokens, with_create_time_seconds,
 };
 use mezon_client::{
     ApiStatusError, AppApi, AttachmentUploadOutcome, ConnectionStatus, InboxCategory,
@@ -311,7 +311,7 @@ pub struct OutgoingAttachment {
 }
 
 impl OutgoingAttachment {
-    pub fn into_upload(self, channel_id: i64) -> UploadFile {
+    pub fn into_upload(self, channel_id: i64, stream_while_uploading: bool) -> UploadFile {
         let thumbnail = self.poster_jpeg.map(|jpeg| UploadThumbnail {
             filename: format!("{}.jpg", self.filename),
             data: jpeg,
@@ -325,6 +325,7 @@ impl OutgoingAttachment {
             duration: self.duration,
             thumbnail,
             channel_id,
+            stream_while_uploading,
         }
     }
 }
@@ -6396,7 +6397,7 @@ impl MessagesStore {
             if has_attachments {
                 let files: Vec<UploadFile> = attachments
                     .into_iter()
-                    .map(|attachment| attachment.into_upload(channel_id.get()))
+                    .map(|attachment| attachment.into_upload(channel_id.get(), !anonymous))
                     .collect();
                 let presigned = match api.presign_files(files).await {
                     Ok(presigned) => presigned,
@@ -6445,6 +6446,7 @@ impl MessagesStore {
                     .await;
                     return;
                 }
+                let ingest = PresignedAttachment::ingest_keys(&presigned, &keys);
                 let update_mentions = transport_mentions.clone();
                 let update_hashtags = transport_hashtags.clone();
                 let update_emojis = transport_emojis.clone();
@@ -6460,7 +6462,10 @@ impl MessagesStore {
                         transport_mentions,
                         transport_hashtags,
                         transport_emojis,
-                        Some(Vec::new()),
+                        Some(PresignMarkers {
+                            finish: Vec::new(),
+                            ingest,
+                        }),
                         send_flags,
                     )
                     .await
@@ -9859,7 +9864,7 @@ pub(crate) async fn upload_attachments_now(
     }
     let files: Vec<UploadFile> = attachments
         .into_iter()
-        .map(|attachment| attachment.into_upload(channel_id))
+        .map(|attachment| attachment.into_upload(channel_id, false))
         .collect();
     let presigned = api.presign_files(files).await?;
     let uploaded: Vec<mezon_proto::api::MessageAttachment> =
