@@ -103,19 +103,8 @@ class VideoTrackSource {
     }
 
    private:
-    bool deliver_raw_frame(
-        webrtc::scoped_refptr<webrtc::VideoFrameBuffer> buffer,
-        webrtc::VideoRotation rotation,
-        int64_t aligned_timestamp_us,
-        const FrameMetadata* frame_metadata)
-        RTC_EXCLUSIVE_LOCKS_REQUIRED(mutex_);
-
     mutable webrtc::Mutex mutex_;
     webrtc::TimestampAligner timestamp_aligner_;
-    webrtc::scoped_refptr<webrtc::VideoFrameBuffer> last_raw_buffer_;
-    webrtc::VideoRotation last_raw_rotation_ = webrtc::kVideoRotation_0;
-    int64_t last_raw_capture_us_ = 0;
-    int64_t last_raw_arrival_us_ = 0;
     VideoResolution resolution_;
     std::shared_ptr<PacketTrailerHandler> packet_trailer_handler_;
     std::shared_ptr<std::atomic<bool>> keyframe_request_flag_ =
@@ -123,6 +112,10 @@ class VideoTrackSource {
     std::shared_ptr<mezon_rtc::EncodedRateControlState> rate_control_state_ =
         std::make_shared<mezon_rtc::EncodedRateControlState>();
     bool is_screencast_;
+    webrtc::scoped_refptr<webrtc::VideoFrameBuffer> refresh_buffer_;
+    webrtc::VideoRotation refresh_rotation_ = webrtc::kVideoRotation_0;
+    int64_t refresh_capture_us_ = 0;
+    int64_t refresh_arrival_us_ = 0;
   };
 
  public:

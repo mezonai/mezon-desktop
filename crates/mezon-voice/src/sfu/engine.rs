@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use std::net::{IpAddr, Ipv6Addr, SocketAddr, UdpSocket};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context as _, Result};
@@ -219,8 +220,32 @@ pub struct ScreenTrack {
     pub track: RtcVideoTrack,
     pub width: u32,
     pub mode: ScreenShareMode,
-    pub repeat_source: Option<NativeVideoSource>,
-    pub fixed_capture_fps: Option<u32>,
+    pub repeat: Option<ScreenRepeat>,
+}
+
+#[derive(Clone)]
+pub struct ScreenRepeat {
+    source: NativeVideoSource,
+    fixed_capture_fps: Option<u32>,
+    applied_fps: Arc<AtomicU64>,
+}
+
+impl ScreenRepeat {
+    pub fn new(source: NativeVideoSource, fixed_capture_fps: Option<u32>) -> Self {
+        Self {
+            source,
+            fixed_capture_fps,
+            applied_fps: Arc::default(),
+        }
+    }
+
+    fn apply(&self, mode: ScreenShareMode, tier: usize) {
+        let capture_fps = self.fixed_capture_fps.unwrap_or_else(|| mode.capture_fps());
+        let fps = screen_repeat_fps(mode, capture_fps, tier);
+        if self.applied_fps.swap(fps.to_bits(), Ordering::Relaxed) != fps.to_bits() {
+            self.source.set_frame_rate_constraints(Some(0.0), Some(fps));
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -2701,15 +2726,9 @@ fn screen_scale_down(width: u32) -> f64 {
 
 fn tune_uplinks(pc: &PeerConnection, local: &LocalTracks, tiers: PublishTiers) {
     if let Some(screen) = &local.screen
-        && let Some(source) = &screen.repeat_source
+        && let Some(repeat) = &screen.repeat
     {
-        let capture_fps = screen
-            .fixed_capture_fps
-            .unwrap_or_else(|| screen.mode.capture_fps());
-        source.set_frame_rate_constraints(
-            Some(0.0),
-            Some(screen_repeat_fps(screen.mode, capture_fps, tiers.screen)),
-        );
+        repeat.apply(screen.mode, tiers.screen);
     }
     for transceiver in pc.transceivers() {
         let Some(mid) = transceiver.mid() else {
@@ -3738,7 +3757,7 @@ mod tests {
     }
 
     #[test]
-    fn still_screen_repeats_never_exceed_the_capture_rate_or_tier_cap() {
+    fn text_share_repeat_rate_follows_the_capture_rate_and_tier_cap() {
         let text = ScreenShareMode::Text;
         let repeat = |capture_fps| -> Vec<f64> {
             (0..TEXT_TIERS.len())
@@ -3746,9 +3765,7 @@ mod tests {
                 .collect()
         };
         assert_eq!(repeat(text.capture_fps()), [15.0, 12.0, 8.0, 5.0]);
-        assert_eq!(
-            repeat(ScreenShareMode::Video.capture_fps()),
-            [20.0, 12.0, 8.0, 5.0]
-        );
+        let portal_started_in_video_mode = ScreenShareMode::Video.capture_fps();
+        assert_eq!(repeat(portal_started_in_video_mode), [20.0, 12.0, 8.0, 5.0]);
     }
 }

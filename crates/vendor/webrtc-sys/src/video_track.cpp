@@ -152,9 +152,8 @@ bool VideoTrackSource::InternalSource::on_captured_frame(
     const FrameMetadata& frame_metadata) {
   webrtc::MutexLock lock(&mutex_);
 
-  int64_t now_us = webrtc::TimeMicros();
-  int64_t aligned_timestamp_us =
-      timestamp_aligner_.TranslateTimestamp(frame.timestamp_us(), now_us);
+  int64_t aligned_timestamp_us = timestamp_aligner_.TranslateTimestamp(
+      frame.timestamp_us(), webrtc::TimeMicros());
 
   // If a packet trailer was provided on this frame and we have a handler,
   // store the mapping keyed by the aligned timestamp.  This is the value
@@ -187,6 +186,7 @@ bool VideoTrackSource::InternalSource::on_captured_frame(
                                             : 0,
           frame_metadata.has_packet_trailer ? frame_metadata.frame_id : 0);
     }
+    refresh_buffer_ = nullptr;
     OnFrame(webrtc::VideoFrame::Builder()
                 .set_video_frame_buffer(buffer)
                 .set_rotation(frame.rotation())
@@ -195,34 +195,6 @@ bool VideoTrackSource::InternalSource::on_captured_frame(
     return true;
   }
 
-  if (buffer->type() != webrtc::VideoFrameBuffer::Type::kNative) {
-    last_raw_buffer_ = buffer;
-    last_raw_rotation_ = frame.rotation();
-    last_raw_capture_us_ = frame.timestamp_us();
-    last_raw_arrival_us_ = now_us;
-  }
-
-  return deliver_raw_frame(buffer, frame.rotation(), aligned_timestamp_us,
-                           &frame_metadata);
-}
-
-void VideoTrackSource::InternalSource::RequestRefreshFrame() {
-  webrtc::MutexLock lock(&mutex_);
-  if (!last_raw_buffer_) {
-    return;
-  }
-  int64_t now_us = webrtc::TimeMicros();
-  int64_t capture_us = last_raw_capture_us_ + (now_us - last_raw_arrival_us_);
-  deliver_raw_frame(last_raw_buffer_, last_raw_rotation_,
-                    timestamp_aligner_.TranslateTimestamp(capture_us, now_us),
-                    nullptr);
-}
-
-bool VideoTrackSource::InternalSource::deliver_raw_frame(
-    webrtc::scoped_refptr<webrtc::VideoFrameBuffer> buffer,
-    webrtc::VideoRotation rotation,
-    int64_t aligned_timestamp_us,
-    const FrameMetadata* frame_metadata) {
   int adapted_width, adapted_height, crop_width, crop_height, crop_x, crop_y;
   if (!AdaptFrame(buffer->width(), buffer->height(), aligned_timestamp_us,
                   &adapted_width, &adapted_height, &crop_width, &crop_height,
@@ -230,22 +202,32 @@ bool VideoTrackSource::InternalSource::deliver_raw_frame(
     return false;
   }
 
-  if (adapted_width != buffer->width() || adapted_height != buffer->height()) {
+  if (adapted_width != frame.width() || adapted_height != frame.height()) {
     buffer = buffer->CropAndScale(crop_x, crop_y, crop_width, crop_height,
                                   adapted_width, adapted_height);
   }
 
+  webrtc::VideoRotation rotation = frame.rotation();
   if (apply_rotation() && rotation != webrtc::kVideoRotation_0) {
     // If the buffer is I420, webrtc::AdaptedVideoTrackSource will handle the
     // rotation for us.
     buffer = buffer->ToI420();
   }
 
-  if (packet_trailer_handler_ && frame_metadata) {
+  if (packet_trailer_handler_) {
     packet_trailer_handler_->emit_publish_timing(
         VideoPublishTimingStage::EncoderUpload,
-        frame_metadata->has_packet_trailer ? frame_metadata->user_timestamp : 0,
-        frame_metadata->has_packet_trailer ? frame_metadata->frame_id : 0);
+        frame_metadata.has_packet_trailer ? frame_metadata.user_timestamp : 0,
+        frame_metadata.has_packet_trailer ? frame_metadata.frame_id : 0);
+  }
+
+  if (is_screencast_) {
+    refresh_buffer_ =
+        buffer->type() == webrtc::VideoFrameBuffer::Type::kNative ? nullptr
+                                                                  : buffer;
+    refresh_rotation_ = rotation;
+    refresh_capture_us_ = frame.timestamp_us();
+    refresh_arrival_us_ = webrtc::TimeMicros();
   }
 
   OnFrame(webrtc::VideoFrame::Builder()
@@ -255,6 +237,21 @@ bool VideoTrackSource::InternalSource::deliver_raw_frame(
               .build());
 
   return true;
+}
+
+void VideoTrackSource::InternalSource::RequestRefreshFrame() {
+  webrtc::MutexLock lock(&mutex_);
+  if (!refresh_buffer_) {
+    return;
+  }
+  int64_t now_us = webrtc::TimeMicros();
+  int64_t capture_us = refresh_capture_us_ + (now_us - refresh_arrival_us_);
+  OnFrame(webrtc::VideoFrame::Builder()
+              .set_video_frame_buffer(refresh_buffer_)
+              .set_rotation(refresh_rotation_)
+              .set_timestamp_us(
+                  timestamp_aligner_.TranslateTimestamp(capture_us, now_us))
+              .build());
 }
 
 void VideoTrackSource::InternalSource::set_packet_trailer_handler(
