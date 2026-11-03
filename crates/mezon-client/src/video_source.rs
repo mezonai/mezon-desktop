@@ -18,6 +18,24 @@ const HLS_PROBE_TIMEOUT: Duration = Duration::from_secs(5);
 const INGEST_PROBE_WINDOW_MS: u128 = 3000;
 const INIT_SEGMENT_MAX_BYTES: usize = 64 * 1024;
 const TRACK_MATRIX_ONE: i32 = 0x10000;
+const HLS_END_TAG: &str = "#EXT-X-ENDLIST";
+const PLAYLIST_MAX_BYTES: usize = 2 * 1024 * 1024;
+const GROWING_PLAYLIST_NEEDS_SNAPSHOT: bool = cfg!(target_os = "linux");
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct HlsSnapshot {
+    pub url: String,
+    pub path: std::path::PathBuf,
+    pub duration: f64,
+    pub segment_starts: Vec<f64>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum GrowingPlaylist {
+    Snapshot(HlsSnapshot),
+    Finished(Vec<f64>),
+    Unknown,
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum IngestStream {
@@ -79,6 +97,121 @@ pub async fn ingest_stream(url: &str) -> IngestStream {
     } else {
         IngestStream::Playable
     }
+}
+
+pub async fn growing_playlist(playlist: &str) -> GrowingPlaylist {
+    if !GROWING_PLAYLIST_NEEDS_SNAPSHOT {
+        return GrowingPlaylist::Unknown;
+    }
+    let Some(text) = crate::transport_runtime::fetch_text_unsigned(
+        &format!("{playlist}?probe={:x}", probe_nonce()),
+        PLAYLIST_MAX_BYTES,
+        HLS_PROBE_TIMEOUT,
+    )
+    .await
+    else {
+        return GrowingPlaylist::Unknown;
+    };
+    if text.contains(HLS_END_TAG) {
+        return GrowingPlaylist::Finished(segment_starts(&text));
+    }
+    snapshot_file(playlist, &text)
+        .await
+        .map_or(GrowingPlaylist::Unknown, GrowingPlaylist::Snapshot)
+}
+
+pub fn safe_resume_point(position: f64, segment_starts: &[f64]) -> f64 {
+    segment_starts
+        .iter()
+        .copied()
+        .filter(|start| *start > 0.0)
+        .find(|start| position > start - 0.1 && position < start + 0.6)
+        .map_or(position, |start| (start - 1.0).max(0.0))
+}
+
+fn segment_starts(text: &str) -> Vec<f64> {
+    let mut starts = Vec::new();
+    let mut at = 0.0;
+    for duration in text
+        .lines()
+        .filter_map(|line| line.trim().strip_prefix("#EXTINF:"))
+        .filter_map(|rest| rest.split(',').next()?.trim().parse::<f64>().ok())
+    {
+        starts.push(at);
+        at += duration;
+    }
+    starts
+}
+
+async fn snapshot_file(playlist: &str, text: &str) -> Option<HlsSnapshot> {
+    let (snapshot, duration) = snapshot_playlist(playlist, text)?;
+    let path = std::env::temp_dir()
+        .join("mezon-hls")
+        .join(format!("{:016x}.m3u8", stable_hash(playlist)));
+    let written = path.clone();
+    crate::transport_runtime::runtime()
+        .spawn_blocking(move || {
+            if let Some(dir) = written.parent() {
+                std::fs::create_dir_all(dir)?;
+            }
+            std::fs::write(&written, snapshot)
+        })
+        .await
+        .ok()?
+        .ok()?;
+    Some(HlsSnapshot {
+        url: format!("file://{}", path.display()),
+        path,
+        duration,
+        segment_starts: segment_starts(text),
+    })
+}
+
+fn snapshot_playlist(playlist: &str, text: &str) -> Option<(String, f64)> {
+    if !text.starts_with("#EXTM3U") || text.contains(HLS_END_TAG) {
+        return None;
+    }
+    let dir = playlist.split(['?', '#']).next()?.rsplit_once('/')?.0;
+    let absolute = |uri: &str| {
+        if uri.contains("://") {
+            uri.to_string()
+        } else {
+            format!("{dir}/{uri}")
+        }
+    };
+    let mut duration = 0.0;
+    let mut segments = 0usize;
+    let mut out: Vec<String> = Vec::new();
+    for line in text.lines().map(str::trim) {
+        if line.is_empty() {
+            continue;
+        }
+        if let Some(rest) = line.strip_prefix("#EXT-X-MAP:URI=\"") {
+            let (uri, tail) = rest.split_once('"')?;
+            out.push(format!("#EXT-X-MAP:URI=\"{}\"{tail}", absolute(uri)));
+        } else if line.starts_with("#EXT-X-PLAYLIST-TYPE") {
+            out.push("#EXT-X-PLAYLIST-TYPE:VOD".to_string());
+        } else if let Some(rest) = line.strip_prefix("#EXTINF:") {
+            duration += rest.split(',').next()?.trim().parse::<f64>().ok()?;
+            out.push(line.to_string());
+        } else if line.starts_with('#') {
+            out.push(line.to_string());
+        } else {
+            segments += 1;
+            out.push(absolute(line));
+        }
+    }
+    if segments == 0 {
+        return None;
+    }
+    out.push(HLS_END_TAG.to_string());
+    Some((out.join("\n") + "\n", duration))
+}
+
+fn stable_hash(text: &str) -> u64 {
+    text.bytes().fold(0xcbf2_9ce4_8422_2325, |hash, byte| {
+        (hash ^ u64::from(byte)).wrapping_mul(0x0100_0000_01b3)
+    })
 }
 
 fn hls_origins() -> Vec<&'static str> {
@@ -234,7 +367,8 @@ mod tests {
     use super::{
         CDN_MEZON_MINIO, HLS_TRANSCODE_MIN_SIZE, TRANSCODING_ORIGINS, has_turned_video_track,
         hls_playlist_candidate, hls_playlist_on, index_playlist_candidate, ingest_playlist_on,
-        may_be_transcoded, sibling_url, wants_hls_transcode,
+        may_be_transcoded, safe_resume_point, segment_starts, sibling_url, snapshot_playlist,
+        wants_hls_transcode,
     };
 
     const VIDEO: &str = "1cf93b197d401000/2080000000000000001_clip.mp4";
@@ -519,5 +653,47 @@ mod tests {
             0, 0, 0, 4, b'm', b'o', b'o', b'v'
         ]));
         assert!(!has_turned_video_track(&[]));
+    }
+
+    #[test]
+    fn a_growing_playlist_becomes_a_finished_one_with_absolute_uris() {
+        let playlist = "https://cdn.mezon.ai/hls/1cf9/208_clip.mp4/index.m3u8";
+        let growing = "#EXTM3U\n#EXT-X-VERSION:7\n#EXT-X-PLAYLIST-TYPE:EVENT\n#EXT-X-START:TIME-OFFSET=0\n#EXT-X-TARGETDURATION:4\n#EXT-X-MAP:URI=\"init.mp4\"\n#EXTINF:4.000,\nseg00000.m4s\n#EXTINF:3.5,\nseg00001.m4s\n";
+        let (text, duration) = snapshot_playlist(playlist, growing).expect("snapshot");
+        assert_eq!(duration, 7.5);
+        assert!(text.contains("#EXT-X-PLAYLIST-TYPE:VOD\n"));
+        assert!(
+            text.contains(
+                "#EXT-X-MAP:URI=\"https://cdn.mezon.ai/hls/1cf9/208_clip.mp4/init.mp4\"\n"
+            )
+        );
+        assert!(text.contains("\nhttps://cdn.mezon.ai/hls/1cf9/208_clip.mp4/seg00001.m4s\n"));
+        assert!(text.ends_with("#EXT-X-ENDLIST\n"));
+    }
+
+    #[test]
+    fn a_finished_or_empty_playlist_needs_no_snapshot() {
+        let playlist = "https://cdn.mezon.ai/hls/a/b.mp4/index.m3u8";
+        assert_eq!(
+            snapshot_playlist(playlist, "#EXTM3U\n#EXTINF:4,\nseg0.m4s\n#EXT-X-ENDLIST\n"),
+            None
+        );
+        assert_eq!(
+            snapshot_playlist(playlist, "#EXTM3U\n#EXT-X-VERSION:7\n"),
+            None
+        );
+        assert_eq!(snapshot_playlist(playlist, "<html>"), None);
+    }
+
+    #[test]
+    fn a_resume_never_lands_right_at_a_segment_start() {
+        let starts = segment_starts("#EXTM3U\n#EXTINF:4.0,\na\n#EXTINF:4.0,\nb\n#EXTINF:3.5,\nc\n");
+        assert_eq!(starts, vec![0.0, 4.0, 8.0]);
+        assert_eq!(safe_resume_point(4.0, &starts), 3.0);
+        assert_eq!(safe_resume_point(3.95, &starts), 3.0);
+        assert_eq!(safe_resume_point(8.3, &starts), 7.0);
+        assert_eq!(safe_resume_point(5.5, &starts), 5.5);
+        assert_eq!(safe_resume_point(0.0, &starts), 0.0);
+        assert_eq!(safe_resume_point(11.5, &starts), 11.5);
     }
 }

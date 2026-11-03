@@ -211,6 +211,13 @@ impl PlayerImpl {
         }
     }
 
+    pub fn live_end(&self) -> Option<f64> {
+        match &self.inner {
+            PlayerBackend::MediaFoundation(player) => player.live_end(),
+            PlayerBackend::Webm(_) => None,
+        }
+    }
+
     pub fn seek(&self, to_seconds: f64) {
         match &self.inner {
             PlayerBackend::MediaFoundation(player) => player.seek(to_seconds),
@@ -576,6 +583,19 @@ impl MediaFoundationPlayer {
         } else {
             self.duration_hint.unwrap_or(0.0)
         }
+    }
+
+    fn live_end(&self) -> Option<f64> {
+        if !unsafe { self.engine.GetDuration() }.is_infinite() {
+            return None;
+        }
+        let ranges = unsafe { self.engine.GetSeekable() }.ok()?;
+        let count = unsafe { ranges.GetLength() };
+        if count == 0 {
+            return Some(0.0);
+        }
+        let end = unsafe { ranges.GetEnd(count - 1) }.ok()?;
+        Some(if end.is_finite() { end.max(0.0) } else { 0.0 })
     }
 
     fn seek(&self, to_seconds: f64) {

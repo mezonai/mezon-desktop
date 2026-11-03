@@ -259,12 +259,23 @@ impl VideoPlayer {
         self.inner.duration()
     }
 
+    pub fn ready_to_seek(&self) -> bool {
+        #[cfg(target_os = "linux")]
+        {
+            self.inner.ready_to_seek()
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            self.inner.duration() > 0.0
+        }
+    }
+
     pub fn live_end(&self) -> Option<f64> {
-        #[cfg(target_os = "macos")]
+        #[cfg(any(target_os = "macos", windows))]
         {
             self.inner.live_end()
         }
-        #[cfg(not(target_os = "macos"))]
+        #[cfg(not(any(target_os = "macos", windows)))]
         {
             None
         }

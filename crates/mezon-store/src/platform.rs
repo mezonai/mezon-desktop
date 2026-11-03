@@ -169,6 +169,12 @@ async fn signed_media_url(url: String) -> String {
         .map_or(url, |signed| signed.url)
 }
 
+pub use mezon_client::video_source::{GrowingPlaylist, HlsSnapshot};
+
+pub async fn growing_playlist(playlist: &str) -> GrowingPlaylist {
+    mezon_client::video_source::growing_playlist(playlist).await
+}
+
 pub async fn playable_hls_stream(url: &str, ingest: bool) -> Option<String> {
     mezon_client::video_source::playable_hls_stream(url, ingest).await
 }
