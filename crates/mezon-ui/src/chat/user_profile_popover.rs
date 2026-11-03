@@ -727,7 +727,12 @@ impl Render for UserProfilePopover {
         };
         let mut avatar = Avatar::new()
             .size_px(px(AVATAR_SIZE))
-            .anonymous(matches!(self.context, ProfileContext::Clan(_)) && profile.is_none())
+            .anonymous(match self.context {
+                ProfileContext::Clan(clan_id) => ClanMembersStore::global(cx)
+                    .read(cx)
+                    .is_known_non_member(clan_id, self.user_id),
+                ProfileContext::Direct(_) => false,
+            })
             .image_cache(self.avatar_image_cache.clone());
         if !avatar_proxied.is_empty() {
             avatar = avatar

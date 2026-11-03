@@ -99,6 +99,10 @@ struct ClanBucket {
 }
 
 impl ClanBucket {
+    fn is_known_non_member(&self, user_id: UserId) -> bool {
+        !self.cut_by_server && !self.by_id.contains_key(&user_id)
+    }
+
     fn upsert(&mut self, member: ClanMember) {
         let id = member.user.id;
         if self.by_id.insert(id, member).is_none() {
@@ -215,6 +219,12 @@ impl ClanMembersStore {
 
     pub fn member(&self, clan_id: ClanId, user_id: UserId) -> Option<&ClanMember> {
         self.cache.get(&clan_id)?.by_id.get(&user_id)
+    }
+
+    pub fn is_known_non_member(&self, clan_id: ClanId, user_id: UserId) -> bool {
+        self.cache
+            .get(&clan_id)
+            .is_some_and(|bucket| bucket.is_known_non_member(user_id))
     }
 
     pub fn find_user(&self, user_id: UserId) -> Option<&User> {
@@ -1079,6 +1089,27 @@ mod tests {
     fn roster_is_cut_only_when_the_server_returned_its_full_page() {
         assert!(!roster_cut_by_server(999));
         assert!(roster_cut_by_server(LIST_CLAN_USERS_CAP));
+    }
+
+    #[gpui::test]
+    fn only_complete_rosters_establish_non_membership(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            let api = Arc::new(AppApi::new(
+                Arc::new(mezon_client::TransportClient::new(String::new())),
+                String::new(),
+            ));
+            RealtimeDispatch::init(api.clone(), cx);
+            let store = ClanMembersStore::init(api, cx);
+            store.update(cx, |store, _| {
+                assert!(!store.is_known_non_member(ClanId(1), UserId(2)));
+                store.cache = bucket_with(vec![member(1, "a")]);
+                assert!(!store.is_known_non_member(ClanId(1), UserId(1)));
+                assert!(store.is_known_non_member(ClanId(1), UserId(2)));
+                store.cache.get_mut(&ClanId(1)).unwrap().cut_by_server = true;
+                assert!(!store.is_known_non_member(ClanId(1), UserId(1)));
+                assert!(!store.is_known_non_member(ClanId(1), UserId(2)));
+            });
+        });
     }
 
     #[test]

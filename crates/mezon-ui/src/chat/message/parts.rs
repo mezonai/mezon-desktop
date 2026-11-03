@@ -380,8 +380,7 @@ pub fn avatar_element(msg: &Message, ctx: &RowCtx, cx: &App) -> AnyElement {
         && let Some(user_id) = msg.sender_user_id.filter(|id| !id.is_zero())
         && ClanMembersStore::global(cx)
             .read(cx)
-            .member(clan_id, user_id)
-            .is_none()
+            .is_known_non_member(clan_id, user_id)
         && !msg.is_sending()
         && !mezon_store::is_anonymous_sender_id(&msg.sender_id, cx)
     {
