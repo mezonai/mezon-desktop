@@ -26,6 +26,8 @@ pub struct MessageAttachment {
     pub size: u64,
     pub size_label: SharedString,
     pub presign_pending: bool,
+    pub presign_ingest: bool,
+    pub stream_ready: bool,
     pub proxied_src: SharedString,
     pub thumbnail_proxied: SharedString,
     pub display_width: f32,

@@ -1707,6 +1707,7 @@ fn render_video_poster(
     };
     let width = att.display_width;
     let height = att.display_height;
+    let ingest = att.presign_ingest;
     let host = ctx.video_host.clone();
     let locale = SharedString::from(ctx.locale.to_string());
     let selection = ctx.selection.clone();
@@ -1739,7 +1740,7 @@ fn render_video_poster(
             ))
             .into_any_element();
     }
-    if sending || att.presign_pending {
+    if sending || (att.presign_pending && !att.stream_ready) {
         return container
             .child(attachment_sending_overlay(
                 theme,
@@ -1797,6 +1798,7 @@ fn render_video_poster(
                 fullscreen_mode: VideoFullscreenMode::default(),
                 layout: VideoLayout::default(),
                 decode_max_size: None,
+                ingest,
                 locale: locale.clone(),
             };
             let _ = host.update(cx, |host, cx| {

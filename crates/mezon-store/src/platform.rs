@@ -169,12 +169,16 @@ async fn signed_media_url(url: String) -> String {
         .map_or(url, |signed| signed.url)
 }
 
-pub async fn transcoded_hls_playlist(url: &str) -> Option<String> {
-    mezon_client::video_source::transcoded_hls_playlist(url).await
+pub async fn playable_hls_stream(url: &str, ingest: bool) -> Option<String> {
+    mezon_client::video_source::playable_hls_stream(url, ingest).await
 }
 
 pub fn may_be_transcoded(url: &str) -> bool {
     mezon_client::video_source::may_be_transcoded(url)
+}
+
+pub fn may_have_hls_stream(url: &str) -> bool {
+    mezon_client::video_source::may_have_hls_stream(url)
 }
 
 pub fn open_media_url_external(url: String, cx: &mut App) {

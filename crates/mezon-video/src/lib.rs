@@ -259,6 +259,17 @@ impl VideoPlayer {
         self.inner.duration()
     }
 
+    pub fn live_end(&self) -> Option<f64> {
+        #[cfg(target_os = "macos")]
+        {
+            self.inner.live_end()
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            None
+        }
+    }
+
     pub fn seek(&self, to_seconds: f64) {
         self.inner.seek(to_seconds);
     }

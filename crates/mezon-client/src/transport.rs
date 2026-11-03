@@ -2912,6 +2912,8 @@ pub struct ApiMessageContent {
     pub lky: Vec<ContentToken>,
     #[serde(default, skip_serializing)]
     pub presign_finish: Option<Vec<String>>,
+    #[serde(default, skip_serializing)]
+    pub presign_ingest: Option<Vec<String>>,
 }
 
 /// A reply/reference attached to a message (mezon `MessageRef`).
