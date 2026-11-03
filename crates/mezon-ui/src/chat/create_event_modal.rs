@@ -19,6 +19,8 @@ use crate::components::primitives::{
 use crate::theme::ActiveTheme;
 use crate::util::text_utils::normalize_diacritics;
 
+const EVENT_LOCATION_MAX_CHARS: usize = 100;
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Step {
     Location,
@@ -863,8 +865,8 @@ impl CreateEventModal {
         match self.location_kind {
             Some(LocationKind::Voice) => self.voice_select.read(cx).selected().is_some(),
             Some(LocationKind::Somewhere) => {
-                let len = self.address.read(cx).value().trim().chars().count();
-                len > 0 && len <= 100
+                let address = self.address.read(cx).value();
+                !address.trim().is_empty() && address.chars().count() <= EVENT_LOCATION_MAX_CHARS
             }
             Some(LocationKind::External) => true,
             None => false,
@@ -1357,11 +1359,40 @@ impl CreateEventModal {
                 d.child(div().mt_3().child(self.voice_select.clone()))
             })
             .when(self.location_kind == Some(LocationKind::Somewhere), |d| {
-                d.child(div().mt_3().child(self.input_field(
-                    "eventCreator.fields.address.title",
-                    self.address.clone(),
-                    cx,
-                )))
+                let count = self.address.read(cx).value().chars().count();
+                let over_limit = count > EVENT_LOCATION_MAX_CHARS;
+                d.child(
+                    div()
+                        .mt_3()
+                        .child(self.input_field(
+                            "eventCreator.fields.address.title",
+                            self.address.clone(),
+                            cx,
+                        ))
+                        .child(
+                            div()
+                                .mt_1()
+                                .flex()
+                                .justify_between()
+                                .gap_2()
+                                .text_size(px(12.))
+                                .text_color(if over_limit {
+                                    theme.danger_text
+                                } else {
+                                    theme.text_secondary
+                                })
+                                .child(div().flex_1().when(over_limit, |d| {
+                                    d.child(
+                                        self.tr("eventCreator.errorMessages.locationMaxLength", cx),
+                                    )
+                                }))
+                                .child(
+                                    div()
+                                        .flex_shrink_0()
+                                        .child(format!("{count} / {EVENT_LOCATION_MAX_CHARS}")),
+                                ),
+                        ),
+                )
             })
             .when(
                 self.location_kind != Some(LocationKind::External) && can_select_audience,
