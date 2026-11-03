@@ -190,8 +190,13 @@ impl NativeVideoSource {
         self.sys_handle.take_keyframe_request()
     }
 
-    pub fn set_frame_rate_constraints(&self, min_fps: f64, max_fps: f64) {
-        self.sys_handle.set_frame_rate_constraints(min_fps, max_fps);
+    pub fn set_frame_rate_constraints(&self, min_fps: Option<f64>, max_fps: Option<f64>) {
+        self.sys_handle.process_constraints(vt_sys::ffi::VideoTrackSourceConstraints {
+            has_min_fps: min_fps.is_some(),
+            min_fps: min_fps.unwrap_or_default(),
+            has_max_fps: max_fps.is_some(),
+            max_fps: max_fps.unwrap_or_default(),
+        });
     }
 
     /// Returns and clears the pending rate-control target raised by the

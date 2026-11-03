@@ -87,6 +87,7 @@ class VideoTrackSource {
     VideoResolution video_resolution() const;
     bool on_captured_frame(const webrtc::VideoFrame& frame,
                            const FrameMetadata& frame_metadata);
+    void RequestRefreshFrame() override;
 
     void set_packet_trailer_handler(
         std::shared_ptr<PacketTrailerHandler> handler);
@@ -102,8 +103,19 @@ class VideoTrackSource {
     }
 
    private:
+    bool deliver_raw_frame(
+        webrtc::scoped_refptr<webrtc::VideoFrameBuffer> buffer,
+        webrtc::VideoRotation rotation,
+        int64_t aligned_timestamp_us,
+        const FrameMetadata* frame_metadata)
+        RTC_EXCLUSIVE_LOCKS_REQUIRED(mutex_);
+
     mutable webrtc::Mutex mutex_;
     webrtc::TimestampAligner timestamp_aligner_;
+    webrtc::scoped_refptr<webrtc::VideoFrameBuffer> last_raw_buffer_;
+    webrtc::VideoRotation last_raw_rotation_ = webrtc::kVideoRotation_0;
+    int64_t last_raw_capture_us_ = 0;
+    int64_t last_raw_arrival_us_ = 0;
     VideoResolution resolution_;
     std::shared_ptr<PacketTrailerHandler> packet_trailer_handler_;
     std::shared_ptr<std::atomic<bool>> keyframe_request_flag_ =
@@ -142,7 +154,7 @@ class VideoTrackSource {
   // pass-through encoder (PLI/FIR or post-reconfigure). Poll from the
   // capture loop.
   bool take_keyframe_request() const;
-  void set_frame_rate_constraints(double min_fps, double max_fps) const;
+  void process_constraints(VideoTrackSourceConstraints constraints) const;
   EncodedRateControlRequest take_rate_control_request() const;
 
   void set_packet_trailer_handler(

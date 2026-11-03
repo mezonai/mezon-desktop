@@ -89,7 +89,7 @@ pub mod native {
             self.handle.take_keyframe_request()
         }
 
-        pub fn set_frame_rate_constraints(&self, min_fps: f64, max_fps: f64) {
+        pub fn set_frame_rate_constraints(&self, min_fps: Option<f64>, max_fps: Option<f64>) {
             self.handle.set_frame_rate_constraints(min_fps, max_fps);
         }
 

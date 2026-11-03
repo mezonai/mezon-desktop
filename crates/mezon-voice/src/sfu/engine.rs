@@ -18,6 +18,7 @@ use libwebrtc::rtp_parameters::{DegradationPreference, Priority};
 use libwebrtc::rtp_transceiver::RtpTransceiverDirection;
 use libwebrtc::session_description::{SdpType, SessionDescription};
 use libwebrtc::stats::RtcStats;
+use libwebrtc::video_source::native::NativeVideoSource;
 use libwebrtc::video_stream::native::NativeVideoStream;
 use libwebrtc::video_track::RtcVideoTrack;
 use tokio_tungstenite::connect_async;
@@ -135,6 +136,15 @@ fn screen_profile(mode: ScreenShareMode) -> &'static ScreenProfile {
     }
 }
 
+fn screen_encode_fps(mode: ScreenShareMode, tier: usize) -> f64 {
+    mode.encode_max_fps()
+        .min(screen_profile(mode)[tier].fps_cap)
+}
+
+fn screen_repeat_fps(mode: ScreenShareMode, capture_fps: u32, tier: usize) -> f64 {
+    f64::from(capture_fps).min(screen_encode_fps(mode, tier))
+}
+
 const SCREEN_CODEC: &str = "vp9";
 const SCREEN_MAX_ENCODE_WIDTH: f64 = 1920.0;
 const UPLINK_START_KBPS: u32 = 2_500;
@@ -209,6 +219,8 @@ pub struct ScreenTrack {
     pub track: RtcVideoTrack,
     pub width: u32,
     pub mode: ScreenShareMode,
+    pub repeat_source: Option<NativeVideoSource>,
+    pub fixed_capture_fps: Option<u32>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -2688,6 +2700,17 @@ fn screen_scale_down(width: u32) -> f64 {
 }
 
 fn tune_uplinks(pc: &PeerConnection, local: &LocalTracks, tiers: PublishTiers) {
+    if let Some(screen) = &local.screen
+        && let Some(source) = &screen.repeat_source
+    {
+        let capture_fps = screen
+            .fixed_capture_fps
+            .unwrap_or_else(|| screen.mode.capture_fps());
+        source.set_frame_rate_constraints(
+            Some(0.0),
+            Some(screen_repeat_fps(screen.mode, capture_fps, tiers.screen)),
+        );
+    }
     for transceiver in pc.transceivers() {
         let Some(mid) = transceiver.mid() else {
             continue;
@@ -2718,7 +2741,7 @@ fn tune_uplinks(pc: &PeerConnection, local: &LocalTracks, tiers: PublishTiers) {
                         * tier.scale_down;
                     (
                         mode.max_bitrate_bps(),
-                        mode.encode_max_fps().min(tier.fps_cap),
+                        screen_encode_fps(mode, tiers.screen),
                         Some(SCREEN_SCALABILITY_MODE.to_owned()),
                         mode.degradation(),
                         scale,
@@ -3712,5 +3735,20 @@ mod tests {
         }
         assert_eq!(refreshes, MEET_TOKEN_RETRY_LIMIT);
         assert_eq!(calls(), MEET_TOKEN_RETRY_LIMIT);
+    }
+
+    #[test]
+    fn still_screen_repeats_never_exceed_the_capture_rate_or_tier_cap() {
+        let text = ScreenShareMode::Text;
+        let repeat = |capture_fps| -> Vec<f64> {
+            (0..TEXT_TIERS.len())
+                .map(|tier| screen_repeat_fps(text, capture_fps, tier))
+                .collect()
+        };
+        assert_eq!(repeat(text.capture_fps()), [15.0, 12.0, 8.0, 5.0]);
+        assert_eq!(
+            repeat(ScreenShareMode::Video.capture_fps()),
+            [20.0, 12.0, 8.0, 5.0]
+        );
     }
 }
