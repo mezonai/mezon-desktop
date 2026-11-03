@@ -89,6 +89,7 @@ pub use mezon_client::{
     write_bytes_to_downloads,
 };
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::time::Duration;
 use tokio::fs;
@@ -553,6 +554,8 @@ pub struct Settings {
     pub grammar_correction_enabled: bool,
     #[serde(default)]
     pub stream_default_quality: StreamQuality,
+    #[serde(default)]
+    pub voice_user_volumes: HashMap<String, u16>,
 }
 
 impl Default for Settings {
@@ -590,6 +593,7 @@ impl Default for Settings {
             quick_replies_enabled: false,
             grammar_correction_enabled: false,
             stream_default_quality: StreamQuality::default(),
+            voice_user_volumes: HashMap::new(),
         }
     }
 }
