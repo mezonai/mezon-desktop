@@ -24,19 +24,58 @@ pub fn set_badge_count(count: u32) {
 
 #[cfg(not(any(target_os = "macos", target_os = "windows")))]
 fn set_badge_linux(count: u32) {
-    std::thread::spawn(move || {
-        if let Err(e) = try_set_badge_linux(count) {
-            tracing::warn!("Linux badge update failed: {e}");
-        }
-    });
+    let _ = launcher_badge_worker().send(count);
 }
 
 #[cfg(not(any(target_os = "macos", target_os = "windows")))]
-fn try_set_badge_linux(count: u32) -> Result<(), Box<dyn std::error::Error>> {
+fn launcher_badge_worker() -> &'static crossbeam_channel::Sender<u32> {
+    static WORKER: std::sync::OnceLock<crossbeam_channel::Sender<u32>> = std::sync::OnceLock::new();
+    WORKER.get_or_init(|| {
+        let (tx, rx) = crossbeam_channel::unbounded::<u32>();
+        if let Err(e) = std::thread::Builder::new()
+            .name("mezon-launcher-badge".into())
+            .spawn(move || launcher_badge_loop(&rx))
+        {
+            tracing::warn!("Failed to spawn Linux badge thread: {e}");
+        }
+        tx
+    })
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
+fn launcher_badge_loop(rx: &crossbeam_channel::Receiver<u32>) {
+    let mut connection: Option<zbus::blocking::Connection> = None;
+    while let Ok(mut count) = rx.recv() {
+        while let Ok(newer) = rx.try_recv() {
+            count = newer;
+        }
+        for _ in 0..2 {
+            let bus = match connection.take() {
+                Some(bus) => bus,
+                None => match zbus::blocking::Connection::session() {
+                    Ok(bus) => bus,
+                    Err(e) => {
+                        tracing::warn!("Linux badge: session bus unavailable: {e}");
+                        break;
+                    }
+                },
+            };
+            match emit_launcher_entry(&bus, count) {
+                Ok(()) => {
+                    connection = Some(bus);
+                    break;
+                }
+                Err(e) => tracing::warn!("Linux badge update failed: {e}"),
+            }
+        }
+    }
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
+fn emit_launcher_entry(connection: &zbus::blocking::Connection, count: u32) -> zbus::Result<()> {
     use std::collections::HashMap;
     use zbus::zvariant::Value;
 
-    let connection = zbus::blocking::Connection::session()?;
     let mut props: HashMap<&str, Value> = HashMap::new();
     props.insert("count", Value::I64(i64::from(count)));
     props.insert("count-visible", Value::Bool(count > 0));
@@ -47,8 +86,7 @@ fn try_set_badge_linux(count: u32) -> Result<(), Box<dyn std::error::Error>> {
         "com.canonical.Unity.LauncherEntry",
         "Update",
         &("application://mezon.desktop", props),
-    )?;
-    Ok(())
+    )
 }
 
 #[cfg(target_os = "windows")]
