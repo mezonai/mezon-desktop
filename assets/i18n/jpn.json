@@ -2426,6 +2426,7 @@
   "contextMenu.unmuteCategory": "カテゴリの通知をミュート解除",
   "contextMenu.unpinMessage": "メッセージのピン留めを解除",
   "contextMenu.useClanDefault": "クランデフォルトを使用",
+  "contextMenu.userVolume": "ユーザー音量",
   "contextMenu.viewMore": "もっと見る",
   "createChannel.buttons.cancel": "キャンセル",
   "createChannel.buttons.create": "チャンネルを作成",
