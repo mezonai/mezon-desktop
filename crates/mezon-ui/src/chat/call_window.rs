@@ -88,17 +88,12 @@ fn dm_message_type(channel_id: i64, cx: &App) -> String {
 
 pub struct CallOverlay {
     call: Entity<CallStore>,
-    last_phase: CallPhase,
 }
 
 impl CallOverlay {
     pub fn new(cx: &mut Context<Self>) -> Self {
         let call = CallStore::global(cx);
-        let last_phase = call.read(cx).phase();
-        cx.observe(&call, |this, call, cx| {
-            let phase = call.read(cx).phase();
-            let was = this.last_phase;
-            this.last_phase = phase;
+        cx.observe(&call, |_, call, cx| {
             if call.update(cx, |store, _| store.take_mic_unavailable()) {
                 let locale = Settings::try_global(cx)
                     .map(|s| s.read(cx).language.clone())
@@ -107,20 +102,12 @@ impl CallOverlay {
                     .to_string();
                 Shell::global(cx).update(cx, |shell, cx| shell.error(msg, cx));
             }
-            if matches!(phase, CallPhase::Connected) && !matches!(was, CallPhase::Connected) {
-                let locale = Settings::try_global(cx)
-                    .map(|s| s.read(cx).language.clone())
-                    .unwrap_or_else(|| "en".to_string());
-                let msg =
-                    mezon_i18n::t(&locale, "channelVoice.toast.connectionConnected").to_string();
-                Shell::global(cx).update(cx, |shell, cx| shell.success(msg, cx));
-            }
             cx.notify();
         })
         .detach();
         cx.observe(&Router::global(cx), |_, _, cx| cx.notify())
             .detach();
-        Self { call, last_phase }
+        Self { call }
     }
 }
 
