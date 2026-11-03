@@ -2773,6 +2773,7 @@
   "eventCreator.eventDetail.shareLink": "Поділіться цим посиланням з іншими для доступу до сервера",
   "eventCreator.eventDetail.tenMinutesLeft": "Залишилось {{minutes}} хвилин. Приєднуйтесь зараз!",
   "eventCreator.eventDetail.thread": "тред обговорення:",
+  "eventCreator.fields.VoiceChannel.privateAudienceTip": "Порада: Щоб усі учасники аудиторії могли долучитися до події, додайте їх до {{channelName}}.",
   "eventCreator.fields.VoiceChannel.title": "Виберіть голосовий канал",
   "eventCreator.fields.address.placeholder": "Додайте місце, посилання або щось інше",
   "eventCreator.fields.address.title": "Місце",

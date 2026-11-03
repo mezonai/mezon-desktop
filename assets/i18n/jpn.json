@@ -2774,6 +2774,7 @@
   "eventCreator.eventDetail.shareLink": "このリンクを他の人と共有して、このサーバーへのアクセス権を付与",
   "eventCreator.eventDetail.tenMinutesLeft": "あと{{minutes}}分。今すぐ参加してください!",
   "eventCreator.eventDetail.thread": "ディスカッションスレッド:",
+  "eventCreator.fields.VoiceChannel.privateAudienceTip": "ヒント: すべての参加者がイベントに参加できるように、{{channelName}}に追加してください。",
   "eventCreator.fields.VoiceChannel.title": "ボイスチャンネルを選択",
   "eventCreator.fields.address.placeholder": "場所、リンク、または何かを追加",
   "eventCreator.fields.address.title": "場所",

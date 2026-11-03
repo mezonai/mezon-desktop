@@ -2771,6 +2771,7 @@
   "eventCreator.eventDetail.shareLink": "Share this link with others to grant access to this clan",
   "eventCreator.eventDetail.tenMinutesLeft": "{{minutes}} minutes left. Join in!",
   "eventCreator.eventDetail.thread": "thread:",
+  "eventCreator.fields.VoiceChannel.privateAudienceTip": "Tips: To ensure all audience members can join the event, add them to {{channelName}}.",
   "eventCreator.fields.VoiceChannel.title": "Select Voice Channel",
   "eventCreator.fields.address.placeholder": "Add a location, link or something",
   "eventCreator.fields.address.title": "Locations",

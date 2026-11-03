@@ -2774,6 +2774,7 @@
   "eventCreator.eventDetail.shareLink": "Condividi questo link con altri per consentire l'accesso a questo server",
   "eventCreator.eventDetail.tenMinutesLeft": "Mancano {{minutes}} minuti. Partecipa ora!",
   "eventCreator.eventDetail.thread": "discussione:",
+  "eventCreator.fields.VoiceChannel.privateAudienceTip": "Suggerimento: Per consentire a tutti i membri del pubblico di partecipare all’evento, aggiungili a {{channelName}}.",
   "eventCreator.fields.VoiceChannel.title": "Seleziona canale vocale",
   "eventCreator.fields.address.placeholder": "Aggiungi un luogo, un link o altro",
   "eventCreator.fields.address.title": "Luogo",

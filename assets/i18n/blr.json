@@ -2773,6 +2773,7 @@
   "eventCreator.eventDetail.shareLink": "Падзяліцеся гэтай спасылкай з іншымі для доступу да сервера",
   "eventCreator.eventDetail.tenMinutesLeft": "Засталося {{minutes}} хвілін. Далучайцеся зараз!",
   "eventCreator.eventDetail.thread": "трэд абмеркавання:",
+  "eventCreator.fields.VoiceChannel.privateAudienceTip": "Парада: Каб усе ўдзельнікі аўдыторыі маглі далучыцца да падзеі, дадайце іх у {{channelName}}.",
   "eventCreator.fields.VoiceChannel.title": "Выберыце галасавы канал",
   "eventCreator.fields.address.placeholder": "Дадайце месца, спасылку або нешта іншае",
   "eventCreator.fields.address.title": "Месца",

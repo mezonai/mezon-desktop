@@ -2774,6 +2774,7 @@
   "eventCreator.eventDetail.shareLink": "Dela denna länk med andra för att ge åtkomst till denna server",
   "eventCreator.eventDetail.tenMinutesLeft": "Kvar {{minutes}} minuter. Gå med nu!",
   "eventCreator.eventDetail.thread": "diskussionstråd:",
+  "eventCreator.fields.VoiceChannel.privateAudienceTip": "Tips: Lägg till alla åhörare i {{channelName}} så att de kan delta i evenemanget.",
   "eventCreator.fields.VoiceChannel.title": "Välj röstkanal",
   "eventCreator.fields.address.placeholder": "Lägg till plats, länk eller något",
   "eventCreator.fields.address.title": "Plats",

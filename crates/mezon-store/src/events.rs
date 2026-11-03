@@ -613,9 +613,6 @@ impl EventsStore {
                 && event
                     .channel_id
                     .is_none_or(|channel_id| channels.channel_in_clan(clan_id, channel_id))
-                && event
-                    .channel_voice_id
-                    .is_none_or(|channel_id| channels.channel_in_clan(clan_id, channel_id))
         })
     }
 

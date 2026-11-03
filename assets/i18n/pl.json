@@ -2773,6 +2773,7 @@
   "eventCreator.eventDetail.shareLink": "Udostępnij ten link innym, aby udzielić im dostępu do tego serwera",
   "eventCreator.eventDetail.tenMinutesLeft": "Pozostało {{minutes}} minut. Dołącz teraz!",
   "eventCreator.eventDetail.thread": "wątku:",
+  "eventCreator.fields.VoiceChannel.privateAudienceTip": "Wskazówka: Aby wszyscy odbiorcy mogli dołączyć do wydarzenia, dodaj ich do {{channelName}}.",
   "eventCreator.fields.VoiceChannel.title": "Wybierz kanał głosowy",
   "eventCreator.fields.address.placeholder": "Dodaj lokalizację, link lub coś innego",
   "eventCreator.fields.address.title": "Lokalizacja",
