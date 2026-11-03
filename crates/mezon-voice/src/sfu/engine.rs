@@ -246,6 +246,12 @@ impl ScreenRepeat {
             self.source.set_frame_rate_constraints(Some(0.0), Some(fps));
         }
     }
+
+    fn stop(&self) {
+        if self.applied_fps.swap(0, Ordering::Relaxed) != 0 {
+            self.source.set_frame_rate_constraints(None, None);
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1843,6 +1849,11 @@ async fn session_loop(
                         }
                     }
                     EngineCommand::SetLocalScreen(track) => {
+                        if let Some(old) = &local.screen
+                            && let Some(repeat) = &old.repeat
+                        {
+                            repeat.stop();
+                        }
                         local.screen = track;
                         tiers.screen = 0;
                         screen_adaptation = ScreenAdaptation::default();

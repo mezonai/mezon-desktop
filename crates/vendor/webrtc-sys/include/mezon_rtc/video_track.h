@@ -112,10 +112,16 @@ class VideoTrackSource {
     std::shared_ptr<mezon_rtc::EncodedRateControlState> rate_control_state_ =
         std::make_shared<mezon_rtc::EncodedRateControlState>();
     bool is_screencast_;
-    webrtc::scoped_refptr<webrtc::VideoFrameBuffer> refresh_buffer_;
-    webrtc::VideoRotation refresh_rotation_ = webrtc::kVideoRotation_0;
-    int64_t refresh_capture_us_ = 0;
-    int64_t refresh_arrival_us_ = 0;
+    struct HeldFrame {
+      webrtc::scoped_refptr<webrtc::VideoFrameBuffer> buffer;
+      webrtc::VideoRotation rotation = webrtc::kVideoRotation_0;
+      int64_t capture_us = 0;
+      int64_t arrival_us = 0;
+    };
+    // Last screen frame handed to the encoder (already scaled).
+    HeldFrame refresh_;
+    // Newest screen frame the adapter dropped since then (not scaled).
+    HeldFrame discarded_;
   };
 
  public:
