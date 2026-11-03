@@ -317,6 +317,10 @@ impl ResumableUpload {
         }
     }
 
+    pub fn streams_while_uploading(&self) -> bool {
+        matches!(self.plan, UploadPlan::Ingest { .. })
+    }
+
     pub fn has_urls(&self) -> bool {
         match &self.plan {
             UploadPlan::Single { put_url, .. } | UploadPlan::Ingest { put_url, .. } => {
@@ -412,6 +416,7 @@ pub struct UrlAttachment {
 
 #[derive(Debug, Clone)]
 pub enum AttachmentUploadOutcome {
+    Storing(String),
     Uploaded(String),
     Failed(String),
 }
@@ -2419,6 +2424,14 @@ impl AppApi {
     }
 
     pub async fn execute_upload(&self, presigned: PresignedAttachment) -> Result<()> {
+        self.execute_upload_reporting(presigned, || {}).await
+    }
+
+    async fn execute_upload_reporting(
+        &self,
+        presigned: PresignedAttachment,
+        on_sent: impl Fn(),
+    ) -> Result<()> {
         match presigned.plan {
             UploadPlan::Ingest {
                 put_url,
@@ -2432,13 +2445,16 @@ impl AppApi {
                     bytes = size,
                     "attachment upload through the file ingest"
                 );
-                crate::file_ingest::upload(&crate::file_ingest::IngestUpload {
-                    ingest_url,
-                    presigned_url: put_url,
-                    path,
-                    size,
-                    content_type,
-                })
+                crate::file_ingest::upload(
+                    &crate::file_ingest::IngestUpload {
+                        ingest_url,
+                        presigned_url: put_url,
+                        path,
+                        size,
+                        content_type,
+                    },
+                    on_sent,
+                )
                 .await
             }
             UploadPlan::Single {
@@ -2686,13 +2702,31 @@ impl AppApi {
     ) -> bool {
         use futures::StreamExt as _;
         let ingest = PresignedAttachment::ingest_keys(&presigned, &keys);
-        let mut stream = futures::stream::iter(
-            presigned
-                .into_iter()
-                .zip(keys)
-                .map(|(item, key)| async move { (key, self.execute_upload(item).await) }),
-        )
-        .buffer_unordered(ATTACHMENT_UPLOAD_CONCURRENCY);
+        let slots = std::sync::Arc::new(tokio::sync::Semaphore::new(ATTACHMENT_UPLOAD_CONCURRENCY));
+        let mut stream: futures::stream::FuturesUnordered<_> = presigned
+            .into_iter()
+            .zip(keys)
+            .map(|(item, key)| {
+                let slots = slots.clone();
+                let on_complete = on_complete.clone();
+                async move {
+                    let slot = std::sync::Mutex::new(slots.acquire_owned().await.ok());
+                    let result = self
+                        .execute_upload_reporting(item, || {
+                            let released = slot
+                                .lock()
+                                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                                .take();
+                            if released.is_some() {
+                                let _ =
+                                    on_complete.send(AttachmentUploadOutcome::Storing(key.clone()));
+                            }
+                        })
+                        .await;
+                    (key, result)
+                }
+            })
+            .collect();
         let mut finished = already_finished;
         let mut synced = 0usize;
         if !finished.is_empty()

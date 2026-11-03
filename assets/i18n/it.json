@@ -3357,6 +3357,7 @@
   "message.addAMessage": "Aggiungi un messaggio (opzionale)",
   "message.attachment.fromPrivateChannel": "Contenuto multimediale da un canale privato",
   "message.attachment.uploading": "Caricamento in corso...",
+  "message.attachment.finishing": "Finalizzazione in corso...",
   "message.attachment.uploadFailed": "Caricamento non riuscito",
   "message.attachment.uploadFailedInvalidFile": "Caricamento non riuscito: impossibile caricare questo file. Controlla il nome del file e riprova.",
   "message.attachment.uploadFailedRetry": "Caricamento non riuscito. Controlla la connessione e riprova.",

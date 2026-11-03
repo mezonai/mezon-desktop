@@ -3356,6 +3356,7 @@
   "message.addAMessage": "Ajouter un message (facultatif)",
   "message.attachment.fromPrivateChannel": "Média provenant d'un canal privé",
   "message.attachment.uploading": "Téléchargement en cours...",
+  "message.attachment.finishing": "Finalisation en cours...",
   "message.attachment.uploadFailed": "Échec du téléchargement",
   "message.attachment.uploadFailedInvalidFile": "Échec de l'envoi : ce fichier ne peut pas être envoyé. Vérifiez le nom du fichier et réessayez.",
   "message.attachment.uploadFailedRetry": "Échec de l'envoi. Vérifiez votre connexion et réessayez.",

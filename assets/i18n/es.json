@@ -3390,6 +3390,7 @@
   "message.addReaction": "Añadir reacción",
   "message.attachment.fromPrivateChannel": "Contenido multimedia de un canal privado",
   "message.attachment.uploading": "Subiendo...",
+  "message.attachment.finishing": "Finalizando...",
   "message.attachment.uploadFailed": "Error al subir",
   "message.attachment.uploadFailedInvalidFile": "Error al subir: no se puede subir este archivo. Revisa el nombre del archivo e inténtalo de nuevo.",
   "message.attachment.uploadFailedRetry": "Error al subir. Revisa tu conexión e inténtalo de nuevo.",

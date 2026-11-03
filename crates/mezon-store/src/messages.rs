@@ -8591,9 +8591,11 @@ impl MessagesStore {
         outcome: &AttachmentUploadOutcome,
     ) -> bool {
         let (key, failed) = match outcome {
+            AttachmentUploadOutcome::Storing(key) => (key.as_str(), false),
             AttachmentUploadOutcome::Uploaded(key) => (key.as_str(), false),
             AttachmentUploadOutcome::Failed(key) => (key.as_str(), true),
         };
+        let storing = matches!(outcome, AttachmentUploadOutcome::Storing(_));
         let Some(channel) = self.cache.get_mut(&bucket) else {
             return false;
         };
@@ -8605,7 +8607,13 @@ impl MessagesStore {
             if (att.uploading || att.presign_pending)
                 && presign::normalize_presign_key(&att.url) == key
             {
+                if storing {
+                    changed |= !att.upload_storing;
+                    att.upload_storing = true;
+                    continue;
+                }
                 att.uploading = false;
+                att.upload_storing = false;
                 att.upload_failed = failed;
                 if !failed {
                     att.presign_pending = false;
@@ -8663,6 +8671,21 @@ impl MessagesStore {
         cx: &mut Context<Self>,
     ) {
         let (key, uploaded) = match &outcome {
+            AttachmentUploadOutcome::Storing(key) => {
+                presign::note_storing(key);
+                let (bucket, message_id) = job_id;
+                if is_topic {
+                    self.apply_topic_attachment_outcome(bucket, MessageId(message_id), outcome, cx);
+                } else {
+                    self.mark_channel_attachment_outcome(
+                        ChannelId(bucket),
+                        MessageId(message_id),
+                        outcome,
+                        cx,
+                    );
+                }
+                return;
+            }
             AttachmentUploadOutcome::Uploaded(key) => (key, true),
             AttachmentUploadOutcome::Failed(key) => (key, false),
         };
@@ -9283,6 +9306,7 @@ fn merge_message_update(existing: &mut Message, incoming: &Message) {
                     att.local_source = prior_att.local_source.clone();
                 }
                 att.uploading = prior_att.uploading;
+                att.upload_storing = prior_att.upload_storing;
                 att.upload_failed = prior_att.upload_failed;
                 if att.url == prior_att.url {
                     att.presign_ingest |= prior_att.presign_ingest;
@@ -10090,24 +10114,38 @@ fn apply_upload_registry(att: &mut MessageAttachment) -> bool {
         return false;
     }
     let key = presign::normalize_presign_key(&att.url);
-    let before = (att.presign_pending, att.uploading, att.upload_failed);
+    let before = (
+        att.presign_pending,
+        att.uploading,
+        att.upload_storing,
+        att.upload_failed,
+    );
     match presign::upload_state(&key) {
         Some(presign::UploadState::Uploaded) => {
             att.presign_pending = false;
             att.uploading = false;
+            att.upload_storing = false;
             att.upload_failed = false;
         }
-        Some(presign::UploadState::Uploading) => {
+        Some(state @ (presign::UploadState::Uploading | presign::UploadState::Storing)) => {
             att.uploading = true;
+            att.upload_storing = state == presign::UploadState::Storing;
             att.upload_failed = false;
         }
         Some(presign::UploadState::Failed) => {
             att.uploading = false;
+            att.upload_storing = false;
             att.upload_failed = true;
         }
         None => {}
     }
-    let mut changed = before != (att.presign_pending, att.uploading, att.upload_failed);
+    let mut changed = before
+        != (
+            att.presign_pending,
+            att.uploading,
+            att.upload_storing,
+            att.upload_failed,
+        );
     if att.presign_pending
         && att.local_source.is_none()
         && att.is_image()
@@ -11574,6 +11612,7 @@ impl MessageAttachment {
             tenor_mp4,
             local_source: None,
             uploading: false,
+            upload_storing: false,
             upload_failed: false,
             source_denied: false,
         }
@@ -11609,6 +11648,7 @@ impl MessageAttachment {
             tenor_mp4: None,
             local_source: is_image.then(|| att.path.clone()),
             uploading: true,
+            upload_storing: false,
             upload_failed: false,
             source_denied: false,
         }
@@ -17753,6 +17793,43 @@ mod tests {
                 assert!(!awaits_presign_expiry(&att));
                 assert_eq!(store.failed_uploads.len(), 1);
                 assert_eq!(store.failed_uploads[0].key, key);
+                presign::settle(key);
+            });
+        });
+    }
+
+    #[gpui::test]
+    fn a_clip_the_ingest_holds_shows_it_is_being_stored(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            let store = test_store(cx);
+            store.update(cx, |store, cx| {
+                let (channel, id, key) = (ChannelId(603), MessageId(64), "storing-clip");
+                channel_with_pending_clip(store, channel, id, key);
+                store.register_upload_job(resumed_job(channel, id, key), cx);
+                presign::begin_uploading(&[key.to_string()]);
+                store.apply_upload_job_outcome(
+                    (channel.0, id.0),
+                    false,
+                    AttachmentUploadOutcome::Storing(key.into()),
+                    cx,
+                );
+                let att = first_attachment(store, channel);
+                assert!(att.upload_storing);
+                assert!(!att.upload_failed);
+                assert_eq!(
+                    presign::upload_state(key),
+                    Some(presign::UploadState::Storing)
+                );
+                assert_eq!(store.upload_jobs[0].pending_keys(), vec![key.to_string()]);
+                store.apply_upload_job_outcome(
+                    (channel.0, id.0),
+                    false,
+                    AttachmentUploadOutcome::Uploaded(key.into()),
+                    cx,
+                );
+                let att = first_attachment(store, channel);
+                assert!(!att.upload_storing);
+                assert!(!att.presign_pending);
                 presign::settle(key);
             });
         });

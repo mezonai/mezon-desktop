@@ -3365,6 +3365,7 @@
   "message.addAMessage": "Хәбәр өстәү (мәҗбүри түгел)",
   "message.attachment.fromPrivateChannel": "Шәхси каналдан медиа",
   "message.attachment.uploading": "Йөкләү...",
+  "message.attachment.finishing": "Тәмамлау...",
   "message.attachment.uploadFailed": "Йөкләп булмады",
   "message.attachment.uploadFailedInvalidFile": "Йөкләп булмады: бу файлны йөкләп булмый. Файл исемен тикшерегез һәм яңадан тырышыгыз.",
   "message.attachment.uploadFailedRetry": "Йөкләп булмады. Тоташуны тикшерегез һәм яңадан тырышыгыз.",

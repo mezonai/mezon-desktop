@@ -3356,6 +3356,7 @@
   "message.addAMessage": "Dodaj wiadomość (Opcjonalne)",
   "message.attachment.fromPrivateChannel": "Multimedia z prywatnego kanału",
   "message.attachment.uploading": "Przekazywanie...",
+  "message.attachment.finishing": "Kończenie...",
   "message.attachment.uploadFailed": "Nie udało się przesłać",
   "message.attachment.uploadFailedInvalidFile": "Przesyłanie nie powiodło się: nie można przesłać tego pliku. Sprawdź nazwę pliku i spróbuj ponownie.",
   "message.attachment.uploadFailedRetry": "Przesyłanie nie powiodło się. Sprawdź połączenie i spróbuj ponownie.",

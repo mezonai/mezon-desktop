@@ -3356,6 +3356,7 @@
   "message.addAMessage": "Дадаць паведамленне (неабавязкова)",
   "message.attachment.fromPrivateChannel": "Медыя з прыватнага канала",
   "message.attachment.uploading": "Загрузка...",
+  "message.attachment.finishing": "Завяршэнне...",
   "message.attachment.uploadFailed": "Не атрымалася загрузіць",
   "message.attachment.uploadFailedInvalidFile": "Не атрымалася загрузіць: гэты файл нельга загрузіць. Праверце назву файла і паспрабуйце яшчэ раз.",
   "message.attachment.uploadFailedRetry": "Не атрымалася загрузіць. Праверце злучэнне і паспрабуйце яшчэ раз.",

@@ -143,6 +143,7 @@ fn url_host(url: &str) -> Option<String> {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum UploadState {
     Uploading,
+    Storing,
     Uploaded,
     Failed,
 }
@@ -176,6 +177,15 @@ pub fn finish_uploading(key: &str, uploaded: bool) {
         UploadState::Failed
     };
     uploads().states.insert(key.to_string(), state);
+}
+
+pub fn note_storing(key: &str) {
+    let mut registry = uploads();
+    if registry.states.get(key) == Some(&UploadState::Uploading) {
+        registry
+            .states
+            .insert(key.to_string(), UploadState::Storing);
+    }
 }
 
 pub fn mark_failed(key: &str) {
@@ -395,6 +405,19 @@ mod tests {
             1_000_000,
             false
         ));
+    }
+
+    #[test]
+    fn only_an_upload_in_flight_can_start_storing() {
+        begin_uploading(&["storing-a".to_string()]);
+        note_storing("storing-a");
+        assert_eq!(upload_state("storing-a"), Some(UploadState::Storing));
+        finish_uploading("storing-a", true);
+        note_storing("storing-a");
+        assert_eq!(upload_state("storing-a"), Some(UploadState::Uploaded));
+        note_storing("storing-unknown");
+        assert_eq!(upload_state("storing-unknown"), None);
+        settle("storing-a");
     }
 
     #[test]

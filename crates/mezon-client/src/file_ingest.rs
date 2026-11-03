@@ -290,11 +290,11 @@ impl Pacing {
     }
 }
 
-pub async fn upload(job: &IngestUpload) -> Result<()> {
-    upload_paced(job, &Pacing::contract()).await
+pub async fn upload(job: &IngestUpload, on_sent: impl Fn()) -> Result<()> {
+    upload_paced(job, &Pacing::contract(), on_sent).await
 }
 
-async fn upload_paced(job: &IngestUpload, pacing: &Pacing) -> Result<()> {
+async fn upload_paced(job: &IngestUpload, pacing: &Pacing, on_sent: impl Fn()) -> Result<()> {
     let moov = moov_offset(job.path.clone(), job.size).await;
     let mut status =
         match Answer::from_response(crate::transport_runtime::get_body(&job.ingest_url).await) {
@@ -310,7 +310,10 @@ async fn upload_paced(job: &IngestUpload, pacing: &Pacing) -> Result<()> {
             if status.as_ref().is_some_and(|s| s.stored) {
                 return Ok(());
             }
-            let sent_at = *all_sent_at.get_or_insert_with(Instant::now);
+            let sent_at = *all_sent_at.get_or_insert_with(|| {
+                on_sent();
+                Instant::now()
+            });
             if sent_at.elapsed() >= pacing.store_wait {
                 bail!("the file ingest did not store the upload in time");
             }
@@ -776,9 +779,14 @@ mod tests {
         let (path, bytes) = tail_moov_file("stores");
         let size = bytes.len() as u64;
         let (origin, state) = fake_ingest(IngestMode::Stores, size).await;
-        let result = upload_paced(&job(&origin, &origin, path.clone(), size), &quick()).await;
+        let sent = std::sync::atomic::AtomicUsize::new(0);
+        let result = upload_paced(&job(&origin, &origin, path.clone(), size), &quick(), || {
+            sent.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        })
+        .await;
         let _ = std::fs::remove_file(&path);
         assert!(result.is_ok(), "{result:?}");
+        assert_eq!(sent.load(std::sync::atomic::Ordering::SeqCst), 1);
         let ingest = state.lock().unwrap();
         let moov_at = size - 72;
         assert_eq!(ingest.chunks.first(), Some(&(moov_at, size - 1)));
@@ -797,7 +805,8 @@ mod tests {
             let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
             format!("http://127.0.0.1:{}", listener.local_addr().unwrap().port())
         };
-        let result = upload_paced(&job(&origin, &closed, path.clone(), size), &quick()).await;
+        let result =
+            upload_paced(&job(&origin, &closed, path.clone(), size), &quick(), || {}).await;
         let _ = std::fs::remove_file(&path);
         assert!(result.is_ok(), "{:#}", result.unwrap_err());
         assert_eq!(state.lock().unwrap().direct, vec![(size as usize, false)]);
@@ -808,7 +817,8 @@ mod tests {
         let (path, bytes) = tail_moov_file("full");
         let size = bytes.len() as u64;
         let (origin, state) = fake_ingest(IngestMode::FullOnFirstChunk, size).await;
-        let result = upload_paced(&job(&origin, &origin, path.clone(), size), &quick()).await;
+        let result =
+            upload_paced(&job(&origin, &origin, path.clone(), size), &quick(), || {}).await;
         let _ = std::fs::remove_file(&path);
         assert!(result.is_ok(), "{result:?}");
         let ingest = state.lock().unwrap();
@@ -821,7 +831,8 @@ mod tests {
         let (path, bytes) = tail_moov_file("never");
         let size = bytes.len() as u64;
         let (origin, _) = fake_ingest(IngestMode::NeverStores, size).await;
-        let result = upload_paced(&job(&origin, &origin, path.clone(), size), &quick()).await;
+        let result =
+            upload_paced(&job(&origin, &origin, path.clone(), size), &quick(), || {}).await;
         let _ = std::fs::remove_file(&path);
         let error = result.expect_err("must give up");
         assert!(error.to_string().contains("in time"), "{error}");

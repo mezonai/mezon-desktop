@@ -35,6 +35,7 @@ pub struct MessageAttachment {
     pub tenor_mp4: Option<SharedString>,
     pub local_source: Option<std::path::PathBuf>,
     pub uploading: bool,
+    pub upload_storing: bool,
     pub upload_failed: bool,
     pub source_denied: bool,
 }
