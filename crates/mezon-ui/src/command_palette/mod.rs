@@ -18,6 +18,7 @@ use mezon_store::{
 use ui::{ScrollAxes, Scrollbars, WithScrollbar};
 
 use crate::app::shell::Shell;
+use crate::chat::friends_page::dm_open_failure_message;
 use crate::components::primitives::{Input, InputEvent, InputState};
 use crate::image_cache::{
     AVATAR_ENTRY_MAX_BYTES, AVATAR_IMAGE_CACHE_BYTES, AVATAR_IMAGE_CACHE_CAPACITY, LruImageCache,
@@ -828,7 +829,8 @@ fn create_dm_with_user(
         Err(err) => {
             tracing::warn!("create DM failed: {err}");
             cx.update(|cx| {
-                Shell::global(cx).update(cx, |shell, cx| shell.error(error_message, cx));
+                let message = dm_open_failure_message(&err, error_message, cx);
+                Shell::global(cx).update(cx, |shell, cx| shell.error(message, cx));
             });
         }
     })

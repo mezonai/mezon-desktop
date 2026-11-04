@@ -747,7 +747,8 @@ pub(crate) fn open_dm_with_user(user: UserId, error_message: SharedString, cx: &
         Err(err) => {
             tracing::warn!("create DM from friends page failed: {err}");
             cx.update(|cx| {
-                Shell::global(cx).update(cx, move |shell, cx| shell.error(error_message, cx));
+                let message = dm_open_failure_message(&err, error_message, cx);
+                Shell::global(cx).update(cx, move |shell, cx| shell.error(message, cx));
             });
         }
     })
@@ -768,6 +769,23 @@ pub(crate) fn open_created_dm_if_route_unchanged(
                 message_type: channel_type.to_string(),
             },
         );
+    }
+}
+
+pub(crate) fn dm_open_failure_message(
+    err: &anyhow::Error,
+    fallback: impl Into<SharedString>,
+    cx: &App,
+) -> SharedString {
+    if mezon_store::is_new_dm_denied(err) {
+        let locale = Settings::try_global(cx)
+            .map(|settings| settings.read(cx).language.clone())
+            .unwrap_or_else(|| "en".to_string());
+        mezon_i18n::t(&locale, "setting.chat.onlyFriendsDm.denied")
+            .to_string()
+            .into()
+    } else {
+        fallback.into()
     }
 }
 

@@ -39,7 +39,7 @@ pub fn record_window_id(window: &Window) -> Option<u64> {
     let handle = HasWindowHandle::window_handle(window).ok()?;
     match handle.as_raw() {
         RawWindowHandle::Xcb(xcb) => Some(xcb.window.get() as u64),
-        RawWindowHandle::Xlib(xlib) => Some(xlib.window as u64),
+        RawWindowHandle::Xlib(xlib) => Some(xlib.window),
         _ => None,
     }
 }

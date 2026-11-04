@@ -132,6 +132,9 @@ impl LoginStore {
         if let Some(e) = crate::account::AccountStore::try_global(cx) {
             e.update(cx, |s, cx| s.reset(cx));
         }
+        if let Some(e) = crate::dm_setting::DmSettingStore::try_global(cx) {
+            e.update(cx, |s, cx| s.reset(cx));
+        }
         if let Some(e) = crate::presence::PresenceStore::try_global(cx) {
             e.update(cx, |s, cx| s.reset(cx));
         }

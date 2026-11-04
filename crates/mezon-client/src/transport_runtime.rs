@@ -3208,6 +3208,22 @@ impl TransportClient {
             .map_err(|e| anyhow::anyhow!("transport task failed: {e}"))?
     }
 
+    pub async fn get_dm_setting(&self) -> Result<bool> {
+        let transport = self.inner.clone();
+        runtime()
+            .spawn(async move { transport.get_dm_setting().await })
+            .await
+            .map_err(|e| anyhow::anyhow!("transport task failed: {e}"))?
+    }
+
+    pub async fn update_dm_setting(&self, only_friends_dm: bool) -> Result<bool> {
+        let transport = self.inner.clone();
+        runtime()
+            .spawn(async move { transport.update_dm_setting(only_friends_dm).await })
+            .await
+            .map_err(|e| anyhow::anyhow!("transport task failed: {e}"))?
+    }
+
     pub async fn create_link_invite_user(
         &self,
         clan_id: i64,

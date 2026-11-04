@@ -8,6 +8,7 @@ use super::content::{SelectableSectionCursor, SelectableTextContext};
 use super::context::RowCtx;
 use crate::app::shell::Shell;
 use crate::chat::call_actions::{CallTarget, call_user};
+use crate::chat::friends_page::dm_open_failure_message;
 use crate::components::primitives::{Avatar, IconName};
 use crate::router::{Route, navigate};
 
@@ -261,7 +262,8 @@ fn open_dm_with_user(user: UserId, error_message: SharedString, cx: &mut App) {
         Err(err) => {
             tracing::warn!("create DM failed: {err}");
             cx.update(|cx| {
-                Shell::global(cx).update(cx, move |shell, cx| shell.error(error_message, cx));
+                let message = dm_open_failure_message(&err, error_message, cx);
+                Shell::global(cx).update(cx, move |shell, cx| shell.error(message, cx));
             });
         }
     })
