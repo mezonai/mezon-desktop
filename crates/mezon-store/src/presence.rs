@@ -408,6 +408,13 @@ impl PresenceStore {
                 tracing::debug!(user_id = e.user_id, " custom-status text updated");
                 self.apply_seed_user_status(&[(UserId(e.user_id), e.status.clone())]);
                 Self::sync_self_account(e.user_id, None, Some(&e.status), cx);
+                if is_self(e.user_id, cx)
+                    && let Some(store) = AccountStore::try_global(cx)
+                {
+                    store.update(cx, |store, _| {
+                        store.note_custom_status_clear(&e.status, e.time_reset, e.no_clear)
+                    });
+                }
                 self.schedule_status_notify(cx);
             }
             RealtimeEvent::UserStatus(e) => {
@@ -566,10 +573,7 @@ impl PresenceStore {
         custom_status: Option<&str>,
         cx: &mut Context<Self>,
     ) {
-        let is_self = BadgeService::try_global(cx)
-            .and_then(|service| service.read(cx).current_user_id(cx))
-            .is_some_and(|current_user_id| current_user_id.0 == user_id);
-        if !is_self {
+        if !is_self(user_id, cx) {
             return;
         }
 
@@ -648,6 +652,12 @@ impl PresenceStore {
         }
         changed
     }
+}
+
+fn is_self(user_id: i64, cx: &App) -> bool {
+    BadgeService::try_global(cx)
+        .and_then(|service| service.read(cx).current_user_id(cx))
+        .is_some_and(|current_user_id| current_user_id.0 == user_id)
 }
 
 fn presence_badge(presence: UserPresence) -> DmAvatarPresence {

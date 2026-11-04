@@ -33,6 +33,13 @@ pub struct UserAccount {
     pub create_time_seconds: u32,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CustomStatusClear {
+    pub status: String,
+    pub minutes: i32,
+    pub no_clear: bool,
+}
+
 #[derive(Debug, Clone)]
 pub struct LoggedDevice {
     pub device_id: String,
@@ -120,6 +127,7 @@ pub struct AccountStore {
     profile_refresh_pending: bool,
     realtime_display_name: Option<String>,
     last_profile_update: Option<crate::users_by_user::ProfileUpdate>,
+    custom_status_clear: Option<CustomStatusClear>,
     api: Arc<AppApi>,
     _conn_watch: Task<()>,
 }
@@ -156,6 +164,7 @@ impl AccountStore {
             profile_refresh_pending: false,
             realtime_display_name: None,
             last_profile_update: None,
+            custom_status_clear: None,
             api,
             _conn_watch: conn_watch,
         }
@@ -274,6 +283,7 @@ impl AccountStore {
         self.profile_refresh_pending = false;
         self.realtime_display_name = None;
         self.last_profile_update = None;
+        self.custom_status_clear = None;
         self.account = None;
         self.account_loading = false;
         self.account_error = false;
@@ -342,20 +352,7 @@ impl AccountStore {
                     }
                     this.reconcile_realtime_display_name(&mut account);
                     this.last_profile_update = None;
-                    let profile = crate::clan_members::User {
-                        id: crate::ids::UserId(account.user_id),
-                        username: account.username.clone(),
-                        display_name: account.display_name.clone(),
-                        avatar_url: account.avatar_url.clone().unwrap_or_default(),
-                        about_me: account.about_me.clone().unwrap_or_default(),
-                        create_time_seconds: account.create_time_seconds,
-                        ..Default::default()
-                    };
-                    if let Some(store) = crate::users_by_user::UsersByUserStore::try_global(cx) {
-                        store.update(cx, |store, cx| store.apply_user_profile(profile, cx));
-                    } else {
-                        crate::user_profile::apply_user_profile(&profile, cx);
-                    }
+                    sync_account_profile(&account, cx);
                     Self::spawn_persist_cache(&account, cx);
                     this.account = Some(account);
                     this.account_freshness.mark_fetched();
@@ -468,6 +465,7 @@ impl AccountStore {
                             account.logo = logo_url.filter(|url| !url.is_empty());
                         }
                         if let Some(account) = &this.account {
+                            sync_account_profile(account, cx);
                             Self::spawn_persist_cache(account, cx);
                         }
                         cx.emit(AccountEvent::AccountSaved);
@@ -750,6 +748,25 @@ impl AccountStore {
         .detach();
     }
 
+    pub fn note_custom_status_clear(&mut self, status: &str, minutes: i32, no_clear: bool) {
+        self.custom_status_clear = if status.trim().is_empty() {
+            None
+        } else {
+            Some(CustomStatusClear {
+                status: status.to_string(),
+                minutes,
+                no_clear,
+            })
+        };
+    }
+
+    pub fn custom_status_clear(&self) -> Option<&CustomStatusClear> {
+        let account = self.account.as_ref()?;
+        self.custom_status_clear
+            .as_ref()
+            .filter(|clear| account.user_status == clear.status)
+    }
+
     pub fn set_custom_status(
         &mut self,
         text: String,
@@ -762,6 +779,7 @@ impl AccountStore {
         } else {
             return;
         }
+        self.note_custom_status_clear(&text, minutes, until_turn_on);
         if let Some(account) = &self.account {
             Self::spawn_persist_cache(account, cx);
         }
@@ -1187,6 +1205,23 @@ fn adult_date(born: NaiveDate) -> Option<NaiveDate> {
         .or_else(|| NaiveDate::from_ymd_opt(year, 3, 1))
 }
 
+fn sync_account_profile(account: &UserAccount, cx: &mut App) {
+    let profile = crate::clan_members::User {
+        id: crate::ids::UserId(account.user_id),
+        username: account.username.clone(),
+        display_name: account.display_name.clone(),
+        avatar_url: account.avatar_url.clone().unwrap_or_default(),
+        about_me: account.about_me.clone().unwrap_or_default(),
+        create_time_seconds: account.create_time_seconds,
+        ..Default::default()
+    };
+    if let Some(store) = crate::users_by_user::UsersByUserStore::try_global(cx) {
+        store.update(cx, |store, cx| store.apply_user_profile(profile, cx));
+    } else {
+        crate::user_profile::apply_user_profile(&profile, cx);
+    }
+}
+
 fn logged_device_from_proto(d: mezon_proto::api::LogedDevice) -> LoggedDevice {
     LoggedDevice {
         device_id: d.device_id,
@@ -1490,5 +1525,56 @@ mod tests {
             map_clan_profile_save_error(err, true, false),
             ClanProfileSaveError::Api(13)
         );
+    }
+
+    #[gpui::test]
+    fn custom_status_clear_tracks_matching_account_status_and_resets(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        cx.update(|cx| {
+            let api = Arc::new(AppApi::new(
+                Arc::new(mezon_client::TransportClient::new(String::new())),
+                String::new(),
+            ));
+            RealtimeDispatch::init(api.clone(), cx);
+            let store = cx.new(|cx| AccountStore::new(api, cx));
+            store.update(cx, |store, cx| {
+                let account: ApiAccount = serde_json::from_value(serde_json::json!({
+                    "user_id": 7,
+                    "username": "user",
+                    "display_name": "User",
+                    "user_status": "busy",
+                    "password_setted": false
+                }))
+                .unwrap();
+                store.account = Some(user_account_from_api(account));
+
+                store.note_custom_status_clear("busy", 0, true);
+                assert_eq!(
+                    store.custom_status_clear(),
+                    Some(&CustomStatusClear {
+                        status: "busy".to_string(),
+                        minutes: 0,
+                        no_clear: true,
+                    })
+                );
+
+                store.account.as_mut().unwrap().user_status = "away".to_string();
+                assert_eq!(store.custom_status_clear(), None);
+
+                store.account.as_mut().unwrap().user_status = "busy".to_string();
+                assert!(store.custom_status_clear().is_some());
+
+                store.note_custom_status_clear("", 0, false);
+                assert_eq!(store.custom_status_clear(), None);
+
+                store.note_custom_status_clear("busy", 240, false);
+                assert!(store.custom_status_clear().is_some());
+
+                store.reset(cx);
+                assert_eq!(store.custom_status_clear(), None);
+                assert_eq!(store.custom_status_clear, None);
+            });
+        });
     }
 }

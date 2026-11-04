@@ -19,6 +19,8 @@ use crate::components::primitives::{
 use crate::theme::ActiveTheme;
 use crate::util::text_utils::normalize_diacritics;
 
+const EVENT_LOCATION_MAX_CHARS: usize = 100;
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Step {
     Location,
@@ -402,7 +404,7 @@ pub struct CreateEventModal {
     settings: Entity<Settings>,
     step: Step,
     location_kind: Option<LocationKind>,
-    voice_channels: Vec<(ChannelId, String)>,
+    voice_channels: Vec<(ChannelId, String, bool)>,
     audience_channels: Vec<(ChannelId, String, ChannelType, bool, i32)>,
     voice_select: Entity<EventSelect>,
     audience_select: Entity<EventSelect>,
@@ -458,7 +460,7 @@ impl CreateEventModal {
                 continue;
             }
             if channel.channel_type == ChannelType::Voice {
-                voice_channels.push((channel.id, channel.name.clone()));
+                voice_channels.push((channel.id, channel.name.clone(), channel.private));
             }
             if channel.private
                 && matches!(
@@ -482,13 +484,18 @@ impl CreateEventModal {
                 "event-voice",
                 voice_channels
                     .iter()
-                    .map(|(_, name)| name.clone().into())
+                    .map(|(_, name, _)| name.clone().into())
                     .collect(),
             )
             .placeholder(t("eventCreator.fields.VoiceChannel.title"))
             .no_results(t("invitation.noResults"))
             .placement(EventSelectPlacement::Down)
-            .icons(vec![Some(IconName::Speaker); voice_channels.len()])
+            .icons(
+                voice_channels
+                    .iter()
+                    .map(|(_, _, private)| Some(channel_type_icon(ChannelType::Voice, *private, 0)))
+                    .collect(),
+            )
             .searchable(t("common.search"), window, cx)
         });
         let audience_select = cx.new(|cx| {
@@ -705,7 +712,7 @@ impl CreateEventModal {
                     modal
                         .voice_channels
                         .iter()
-                        .position(|(channel_id, _)| *channel_id == id)
+                        .position(|(channel_id, _, _)| *channel_id == id)
                 }),
                 cx,
             )
@@ -805,7 +812,7 @@ impl CreateEventModal {
                 continue;
             }
             if channel.channel_type == ChannelType::Voice {
-                voice_channels.push((channel.id, channel.name.clone()));
+                voice_channels.push((channel.id, channel.name.clone(), channel.private));
             }
             if channel.private
                 && matches!(
@@ -828,9 +835,12 @@ impl CreateEventModal {
             select.set_items(
                 self.voice_channels
                     .iter()
-                    .map(|(_, name)| name.clone().into())
+                    .map(|(_, name, _)| name.clone().into())
                     .collect(),
-                vec![Some(IconName::Speaker); self.voice_channels.len()],
+                self.voice_channels
+                    .iter()
+                    .map(|(_, _, private)| Some(channel_type_icon(ChannelType::Voice, *private, 0)))
+                    .collect(),
                 cx,
             )
         });
@@ -863,8 +873,8 @@ impl CreateEventModal {
         match self.location_kind {
             Some(LocationKind::Voice) => self.voice_select.read(cx).selected().is_some(),
             Some(LocationKind::Somewhere) => {
-                let len = self.address.read(cx).value().trim().chars().count();
-                len > 0 && len <= 100
+                let address = self.address.read(cx).value();
+                !address.trim().is_empty() && address.chars().count() <= EVENT_LOCATION_MAX_CHARS
             }
             Some(LocationKind::External) => true,
             None => false,
@@ -1300,6 +1310,15 @@ impl CreateEventModal {
             .original_event
             .as_ref()
             .is_none_or(|event| !event.is_private);
+        let private_voice_channel = (self.location_kind == Some(LocationKind::Voice))
+            .then(|| {
+                self.voice_select
+                    .read(cx)
+                    .selected()
+                    .and_then(|index| self.voice_channels.get(index))
+                    .filter(|(_, _, private)| *private)
+            })
+            .flatten();
         div()
             .child(
                 div()
@@ -1357,11 +1376,40 @@ impl CreateEventModal {
                 d.child(div().mt_3().child(self.voice_select.clone()))
             })
             .when(self.location_kind == Some(LocationKind::Somewhere), |d| {
-                d.child(div().mt_3().child(self.input_field(
-                    "eventCreator.fields.address.title",
-                    self.address.clone(),
-                    cx,
-                )))
+                let count = self.address.read(cx).value().chars().count();
+                let over_limit = count > EVENT_LOCATION_MAX_CHARS;
+                d.child(
+                    div()
+                        .mt_3()
+                        .child(self.input_field(
+                            "eventCreator.fields.address.title",
+                            self.address.clone(),
+                            cx,
+                        ))
+                        .child(
+                            div()
+                                .mt_1()
+                                .flex()
+                                .justify_between()
+                                .gap_2()
+                                .text_size(px(12.))
+                                .text_color(if over_limit {
+                                    theme.danger_text
+                                } else {
+                                    theme.text_secondary
+                                })
+                                .child(div().flex_1().when(over_limit, |d| {
+                                    d.child(
+                                        self.tr("eventCreator.errorMessages.locationMaxLength", cx),
+                                    )
+                                }))
+                                .child(
+                                    div()
+                                        .flex_shrink_0()
+                                        .child(format!("{count} / {EVENT_LOCATION_MAX_CHARS}")),
+                                ),
+                        ),
+                )
             })
             .when(
                 self.location_kind != Some(LocationKind::External) && can_select_audience,
@@ -1390,28 +1438,66 @@ impl CreateEventModal {
                             ),
                     )
                     .child(self.audience_select.clone())
-                    .when(
-                        self.audience_select.read(cx).selected().is_some(),
-                        |d| {
-                            d.child(
-                                div()
-                                    .id("clear-event-audience")
-                                    .mt_1()
-                                    .flex()
-                                    .justify_end()
-                                    .text_size(px(13.))
-                                    .text_color(theme.brand)
-                                    .cursor_pointer()
-                                    .hover(|style| style.underline())
-                                    .on_click(cx.listener(|this, _, _, cx| {
-                                        this.audience_select
-                                            .update(cx, |select, cx| select.set_selected(None, cx));
-                                        cx.notify();
-                                    }))
-                                    .child(self.tr("eventCreator.actions.clearAudiences", cx)),
-                            )
-                        },
-                    )
+                    .when(self.audience_select.read(cx).selected().is_some(), |d| {
+                        d.child(
+                            div()
+                                .id("clear-event-audience")
+                                .mt_1()
+                                .flex()
+                                .justify_end()
+                                .text_size(px(13.))
+                                .text_color(theme.brand)
+                                .cursor_pointer()
+                                .hover(|style| style.underline())
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.audience_select
+                                        .update(cx, |select, cx| select.set_selected(None, cx));
+                                    cx.notify();
+                                }))
+                                .child(self.tr("eventCreator.actions.clearAudiences", cx)),
+                        )
+                    })
+                    .when_some(private_voice_channel, |d, (_, name, _)| {
+                        let tip =
+                            self.tr("eventCreator.fields.VoiceChannel.privateAudienceTip", cx);
+                        let (before, after) =
+                            tip.split_once("{{channelName}}").unwrap_or((&tip, ""));
+                        d.child(
+                            div()
+                                .id("private-voice-audience-tip")
+                                .mt_2()
+                                .flex()
+                                .flex_wrap()
+                                .items_center()
+                                .gap_x_1()
+                                .text_size(px(12.))
+                                .text_color(theme.text_secondary)
+                                .children(
+                                    before
+                                        .split_whitespace()
+                                        .map(|word| div().max_w_full().child(word.to_string())),
+                                )
+                                .child(
+                                    div()
+                                        .flex()
+                                        .items_center()
+                                        .gap_1()
+                                        .min_w_0()
+                                        .max_w_full()
+                                        .child(
+                                            Icon::new(IconName::SpeakerLocked)
+                                                .size(px(14.))
+                                                .text_color(theme.brand),
+                                        )
+                                        .child(
+                                            div()
+                                                .min_w_0()
+                                                .text_color(theme.brand)
+                                                .child(format!("{name}{after}")),
+                                        ),
+                                ),
+                        )
+                    })
                 },
             )
             .into_any_element()

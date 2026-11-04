@@ -8,10 +8,14 @@ mod image_scale_linux;
 mod image_scale_windows;
 #[cfg(target_os = "linux")]
 mod linux;
+#[cfg(target_os = "linux")]
+mod local_copy;
 #[cfg(target_os = "macos")]
 mod macos;
 #[cfg(target_os = "macos")]
 mod matroska_remux;
+#[cfg(windows)]
+mod opus_mft_windows;
 #[cfg(not(target_os = "macos"))]
 mod poster;
 #[cfg(target_os = "linux")]
@@ -131,11 +135,20 @@ pub fn needs_prepared_open(url: &str) -> bool {
     {
         webm_player::is_webm_source(url)
     }
-    #[cfg(not(any(windows, target_os = "macos")))]
+    #[cfg(target_os = "linux")]
+    {
+        local_copy::is_remote_video(url)
+    }
+    #[cfg(not(any(windows, target_os = "macos", target_os = "linux")))]
     {
         let _ = url;
         false
     }
+}
+
+#[cfg(target_os = "linux")]
+pub fn prepare_local_copy(url: &str) -> Result<Option<String>, PlayerError> {
+    local_copy::prepare(url)
 }
 
 #[cfg(any(windows, target_os = "macos"))]
@@ -244,6 +257,28 @@ impl VideoPlayer {
 
     pub fn duration(&self) -> f64 {
         self.inner.duration()
+    }
+
+    pub fn ready_to_seek(&self) -> bool {
+        #[cfg(target_os = "linux")]
+        {
+            self.inner.ready_to_seek()
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            self.inner.duration() > 0.0
+        }
+    }
+
+    pub fn live_end(&self) -> Option<f64> {
+        #[cfg(any(target_os = "macos", windows))]
+        {
+            self.inner.live_end()
+        }
+        #[cfg(not(any(target_os = "macos", windows)))]
+        {
+            None
+        }
     }
 
     pub fn seek(&self, to_seconds: f64) {

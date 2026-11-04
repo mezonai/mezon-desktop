@@ -4000,6 +4000,48 @@ impl VoiceStore {
         }
     }
 
+    pub const USER_VOLUME_MAX: u16 = 150;
+    pub const USER_VOLUME_DEFAULT: u16 = 100;
+
+    pub fn user_volume(identity: &str, cx: &App) -> u16 {
+        Settings::try_global(cx)
+            .and_then(|settings| settings.read(cx).voice_user_volumes.get(identity).copied())
+            .unwrap_or(Self::USER_VOLUME_DEFAULT)
+    }
+
+    pub fn set_user_volume(&mut self, identity: String, percent: u16, cx: &mut Context<Self>) {
+        let percent = percent.min(Self::USER_VOLUME_MAX);
+        let Some(settings) = Settings::try_global(cx) else {
+            return;
+        };
+        let changed = settings.update(cx, |s, _| {
+            if percent == Self::USER_VOLUME_DEFAULT {
+                s.voice_user_volumes.remove(&identity).is_some()
+            } else {
+                s.voice_user_volumes.insert(identity, percent) != Some(percent)
+            }
+        });
+        if !changed {
+            return;
+        }
+        crate::schedule_settings_save(&settings, cx);
+        if let Some(session) = &self.session {
+            session.set_user_volumes(Self::user_volume_gains(cx));
+        }
+    }
+
+    fn user_volume_gains(cx: &App) -> HashMap<String, f32> {
+        let Some(settings) = Settings::try_global(cx) else {
+            return HashMap::new();
+        };
+        settings
+            .read(cx)
+            .voice_user_volumes
+            .iter()
+            .map(|(id, &percent)| (id.clone(), percent as f32 / 100.0))
+            .collect()
+    }
+
     pub fn take_moderation_error(&mut self) -> Option<VoiceModerationError> {
         self.moderation_error.take()
     }
@@ -4620,6 +4662,10 @@ impl VoiceStore {
                 }
             })),
         });
+        let stored_volumes = Self::user_volume_gains(cx);
+        if !stored_volumes.is_empty() {
+            session.set_user_volumes(stored_volumes);
+        }
         self.noise_suppression_generation = self.noise_suppression_generation.wrapping_add(1);
         self.noise_suppression_status = None;
         self.noise_suppression_started = None;

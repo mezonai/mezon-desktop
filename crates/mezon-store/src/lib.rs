@@ -89,6 +89,7 @@ pub use mezon_client::{
     write_bytes_to_downloads,
 };
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::time::Duration;
 use tokio::fs;
@@ -245,10 +246,11 @@ pub use permissions::{
 pub use pinned::{PinnedEvent, PinnedMessage, PinnedMessagesStore};
 pub use platform::{
     CliInstallHooks, CliInstallStateFn, CliInstallToggleFn, CliInstallVisibleFn,
-    DesktopNotification, DownloadEvent, McpServerHooks, McpServerStatus, McpSetPortFn, McpStartFn,
-    McpStatusFn, McpStopFn, NotificationTopicReply, NotifyFn, OpenManagedAppWindowFn, OpenUrlFn,
-    PlatformStore, copy_image_url_to_clipboard, copy_media_url_to_clipboard,
-    download_url_with_dialog, may_be_transcoded, open_media_url_external, transcoded_hls_playlist,
+    DesktopNotification, DownloadEvent, GrowingPlaylist, HlsSnapshot, McpServerHooks,
+    McpServerStatus, McpSetPortFn, McpStartFn, McpStatusFn, McpStopFn, NotificationTopicReply,
+    NotifyFn, OpenManagedAppWindowFn, OpenUrlFn, PlatformStore, copy_image_url_to_clipboard,
+    copy_media_url_to_clipboard, download_url_with_dialog, growing_playlist, may_be_transcoded,
+    may_have_hls_stream, open_media_url_external, playable_hls_stream,
 };
 pub use presence::*;
 pub use quick_menu::{
@@ -553,6 +555,8 @@ pub struct Settings {
     pub grammar_correction_enabled: bool,
     #[serde(default)]
     pub stream_default_quality: StreamQuality,
+    #[serde(default)]
+    pub voice_user_volumes: HashMap<String, u16>,
 }
 
 impl Default for Settings {
@@ -590,6 +594,7 @@ impl Default for Settings {
             quick_replies_enabled: false,
             grammar_correction_enabled: false,
             stream_default_quality: StreamQuality::default(),
+            voice_user_volumes: HashMap::new(),
         }
     }
 }

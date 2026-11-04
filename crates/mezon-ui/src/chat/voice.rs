@@ -26,7 +26,8 @@ use crate::chat::media_permission_prompt::{
 use crate::chat::screen_annotation::{desktop_annotation_supported, toggle_desktop_annotation};
 use crate::chat::screen_draw::{render_draw_toolbox, render_screen_draw_overlay};
 use crate::components::primitives::{
-    Avatar, ContextMenu, Icon, IconName, Sizable, Size, Spinner, context_menu_at,
+    Avatar, ContextMenu, Icon, IconName, Sizable, Size, Slider, SliderEvent, SliderState, Spinner,
+    context_menu_at, h_flex, v_flex,
 };
 use crate::theme::{ActiveTheme, Theme};
 use ui::{
@@ -3085,6 +3086,61 @@ fn flower_menu_disabled(cx: &App) -> bool {
     })
 }
 
+#[derive(IntoElement)]
+struct UserVolumeSlider {
+    voice: Entity<VoiceStore>,
+    identity: String,
+    label: SharedString,
+}
+
+impl RenderOnce for UserVolumeSlider {
+    fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
+        let key = SharedString::from(format!("voice-user-volume-{}", self.identity));
+        let voice = self.voice;
+        let identity = self.identity;
+        let state = window.use_keyed_state(key, cx, |_, cx| {
+            let current = VoiceStore::user_volume(&identity, cx);
+            cx.subscribe_self(move |_, event: &SliderEvent, cx| {
+                let SliderEvent::Change(value) = event;
+                let pct = value.end().round() as u16;
+                let identity = identity.clone();
+                voice.update(cx, |store, cx| {
+                    store.set_user_volume(identity, pct, cx);
+                });
+            })
+            .detach();
+            SliderState::new()
+                .min(0.)
+                .max(VoiceStore::USER_VOLUME_MAX as f32)
+                .step(1.)
+                .default_value(current as f32)
+        });
+        let pct = state.read(cx).value().end().round() as u16;
+        let theme = cx.theme();
+        let text = theme.tokens.text_theme_primary;
+        let secondary = theme.tokens.text_secondary;
+        v_flex()
+            .w_full()
+            .px(px(10.))
+            .py(px(6.))
+            .gap(px(6.))
+            .child(
+                h_flex()
+                    .w_full()
+                    .items_center()
+                    .gap(px(8.))
+                    .child(div().flex_1().text_sm().text_color(text).child(self.label))
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(secondary)
+                            .child(format!("{pct}%")),
+                    ),
+            )
+            .child(Slider::new(&state).horizontal().percentage_positioning())
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn build_participant_menu(
     voice: &Entity<VoiceStore>,
@@ -3104,6 +3160,16 @@ fn build_participant_menu(
     };
 
     let mut menu = ContextMenu::new().on_dismiss(dismiss);
+
+    if !is_local {
+        menu = menu
+            .element(UserVolumeSlider {
+                voice: voice.clone(),
+                identity: identity.clone(),
+                label: mezon_i18n::t(locale, "contextMenu.userVolume").into(),
+            })
+            .separator();
+    }
 
     if can_moderate {
         if !muted {
