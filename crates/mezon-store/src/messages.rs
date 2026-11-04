@@ -709,6 +709,7 @@ pub struct MessagesStore {
     unplayable_streams: HashSet<String>,
     stream_probe_task: Option<Task<()>>,
     stream_probe_running: bool,
+    stream_probe_wake: Option<std::time::Instant>,
     pending_send_payloads: HashMap<MessageId, PendingSendPayload>,
     pending_commands: Vec<PendingCommand>,
     commands_in_flight: HashMap<(ChannelId, i64), usize>,
@@ -1178,6 +1179,7 @@ impl MessagesStore {
         self.unplayable_streams.clear();
         self.stream_probe_task = None;
         self.stream_probe_running = false;
+        self.stream_probe_wake = None;
         self.presign_expiry_task = None;
         self.upload_jobs_restored = false;
         presign::clear_failed();
@@ -1268,6 +1270,7 @@ impl MessagesStore {
             unplayable_streams: HashSet::new(),
             stream_probe_task: None,
             stream_probe_running: false,
+            stream_probe_wake: None,
             forward_in_flight: false,
             pending_send_payloads: HashMap::new(),
             pending_commands: Vec::new(),
@@ -5066,13 +5069,22 @@ impl MessagesStore {
         }
         let Some(delay) = self.refresh_stream_probes() else {
             self.stream_probe_task = None;
+            self.stream_probe_wake = None;
             return;
         };
-        self.stream_probe_running = true;
+        let wake = std::time::Instant::now() + delay;
+        if self.stream_probe_wake.is_some_and(|at| at <= wake) {
+            return;
+        }
+        self.stream_probe_wake = Some(wake);
         self.stream_probe_task = Some(cx.spawn(async move |this, cx| {
             cx.background_executor().timer(delay).await;
             let due = this
-                .update(cx, |this, _| this.take_due_stream_probes())
+                .update(cx, |this, _| {
+                    this.stream_probe_wake = None;
+                    this.stream_probe_running = true;
+                    this.take_due_stream_probes()
+                })
                 .unwrap_or_default();
             let probes = due.into_iter().map(|url| async move {
                 let state = mezon_client::video_source::ingest_stream(&url).await;
@@ -7115,6 +7127,7 @@ impl MessagesStore {
             cx.emit(MessagesEvent::Reset { count });
             cx.notify();
             self.try_consume_pending_jump(cx);
+            self.schedule_presign_probe(cx);
             return;
         }
 
