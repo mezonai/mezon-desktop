@@ -1043,6 +1043,12 @@ impl VideoPlayerView {
             if let Some(frame) = view.shared.borrow_mut().frame.take() {
                 crate::image_cache::queue_atlas_drop(cx, frame);
             }
+            if let Some(growing) = view.growing.take() {
+                cx.background_spawn(async move {
+                    let _ = std::fs::remove_file(growing.path);
+                })
+                .detach();
+            }
         })
         .detach();
     }
