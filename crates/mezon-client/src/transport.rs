@@ -3180,6 +3180,8 @@ pub fn forward_content_json(content_raw: &str, text: &str) -> String {
     if !text.is_empty() && !obj.contains_key("t") {
         obj.insert("t".into(), text.into());
     }
+    obj.remove("presign_finish");
+    obj.remove("presign_ingest");
     obj.insert("fwd".into(), serde_json::Value::Bool(true));
     serde_json::Value::Object(obj).to_string()
 }
@@ -11687,6 +11689,18 @@ mod tests {
         assert_eq!(value["t"], "hi");
         assert_eq!(value["ej"][0]["emojiid"], "9");
         assert_eq!(value["mk"][0]["type"], "b");
+    }
+
+    #[test]
+    fn forward_content_json_drops_the_presign_markers() {
+        let raw = r#"{"t":"clip","presign_finish":["k1"],"presign_ingest":["k1"]}"#;
+
+        let json = forward_content_json(raw, "clip");
+        let value: serde_json::Value = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(value["t"], "clip");
+        assert!(value.get("presign_finish").is_none());
+        assert!(value.get("presign_ingest").is_none());
     }
 
     #[test]
