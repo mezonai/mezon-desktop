@@ -34,6 +34,7 @@ struct SoundCardData {
     creator_name: Option<SharedString>,
     creator_avatar: Option<SharedString>,
     can_manage: bool,
+    can_edit: bool,
 }
 
 fn sound_grid_columns() -> usize {
@@ -188,17 +189,18 @@ impl SoundSettingPage {
             .sticker_store
             .read(cx)
             .sounds_for_clan(&self.clan_id_str);
+        let can_edit = PermissionStore::global(cx)
+            .read(cx)
+            .clan_settings_permissions(self.clan_id, cx)
+            .has_manage_clan;
         self.grid_cells = sounds
             .iter()
-            .map(|sound| self.card_data(sound, cx))
+            .map(|sound| self.card_data(sound, can_edit, cx))
             .collect();
     }
 
-    fn can_manage_sound(&self, creator_id: &str, cx: &App) -> bool {
-        let perms = PermissionStore::global(cx)
-            .read(cx)
-            .clan_settings_permissions(self.clan_id, cx);
-        if perms.has_manage_clan {
+    fn can_manage_sound(&self, creator_id: &str, has_manage_clan: bool, cx: &App) -> bool {
+        if has_manage_clan {
             return true;
         }
         let current = BadgeService::global(cx)
@@ -237,7 +239,7 @@ impl SoundSettingPage {
         (Some(name), avatar)
     }
 
-    fn card_data(&self, sound: &ClanSound, cx: &App) -> SoundCardData {
+    fn card_data(&self, sound: &ClanSound, can_edit: bool, cx: &App) -> SoundCardData {
         let (creator_name, creator_avatar) = self.creator_display(&sound.creator_id, cx);
         SoundCardData {
             id: SharedString::from(sound.id.clone()),
@@ -246,7 +248,8 @@ impl SoundSettingPage {
             download_name: sound_download_name(&sound.shortname, &sound.src),
             creator_name,
             creator_avatar,
-            can_manage: self.can_manage_sound(&sound.creator_id, cx),
+            can_manage: self.can_manage_sound(&sound.creator_id, can_edit, cx),
+            can_edit,
         }
     }
 
@@ -256,6 +259,14 @@ impl SoundSettingPage {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if editing.is_some()
+            && !PermissionStore::global(cx)
+                .read(cx)
+                .clan_settings_permissions(self.clan_id, cx)
+                .has_manage_clan
+        {
+            return;
+        }
         let clan_id = self.clan_id;
         let settings = self.settings.clone();
         let modal = cx.new(|cx| SoundPicker::new(clan_id, editing, settings, window, cx));
@@ -558,40 +569,63 @@ fn render_sound_card(
         .border_color(theme.border)
         .bg(theme.tokens.theme_setting_nav)
         .child(
-            div()
-                .relative()
+            h_flex()
                 .w_full()
+                .gap_1()
+                .items_center()
                 .mb(px(12.0))
                 .child(
                     div()
-                        .w_full()
-                        .px(px(28.0))
+                        .flex_1()
+                        .min_w_0()
                         .text_center()
                         .text_sm()
                         .font_weight(FontWeight::SEMIBOLD)
                         .text_color(theme.text_secondary)
-                        .overflow_hidden()
-                        .text_ellipsis()
+                        .truncate()
                         .child(shortname.clone()),
                 )
+                .when(sound.can_edit, |el| {
+                    let edit_entity = entity.clone();
+                    let edit_id = sound_id.clone();
+                    el.child(
+                        Button::new(SharedString::from(format!("sound-edit-{sound_id}")))
+                            .ghost()
+                            .with_size(Size::XSmall)
+                            .icon(
+                                Icon::new(IconName::QuickActionEdit)
+                                    .size(px(12.0))
+                                    .text_color(theme.tokens.text_theme_message),
+                            )
+                            .on_click(move |_, window, cx| {
+                                edit_entity.update(cx, |this, cx| {
+                                    let target = this
+                                        .sticker_store
+                                        .read(cx)
+                                        .sounds_for_clan(&this.clan_id_str)
+                                        .into_iter()
+                                        .find(|sound| sound.id == edit_id.as_ref())
+                                        .map(|sound| SoundEditTarget {
+                                            id: sound.id.clone(),
+                                            shortname: sound.shortname.clone(),
+                                            source: sound.src.clone(),
+                                        });
+                                    if let Some(target) = target {
+                                        this.open_picker(Some(target), window, cx);
+                                    }
+                                });
+                            }),
+                    )
+                })
                 .when(sound.can_manage, |el| {
                     let delete_entity = entity.clone();
                     let delete_id = sound_id.clone();
                     let delete_name = shortname.clone();
                     el.child(
-                        div()
-                            .absolute()
-                            .top(px(-8.0))
-                            .right(px(-8.0))
-                            .id(SharedString::from(format!("sound-delete-{sound_id}")))
-                            .size(px(24.0))
-                            .rounded_full()
-                            .bg(theme.tokens.theme_setting_primary)
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .cursor_pointer()
-                            .child(
+                        Button::new(SharedString::from(format!("sound-delete-{sound_id}")))
+                            .ghost()
+                            .with_size(Size::XSmall)
+                            .icon(
                                 Icon::new(IconName::Close)
                                     .size(px(12.0))
                                     .text_color(theme.danger_text),
