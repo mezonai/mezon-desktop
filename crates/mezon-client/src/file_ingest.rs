@@ -8,9 +8,11 @@ use anyhow::{Result, anyhow, bail};
 pub const FILE_INGEST_MAX_SIZE: u64 = 1024 * 1024 * 1024;
 const CHUNK_SIZE: u64 = 8 * 1024 * 1024;
 const STATUS_POLL: Duration = Duration::from_secs(2);
+const SLOW_STATUS_POLL: Duration = Duration::from_secs(10);
+const SLOW_POLL_AFTER: Duration = Duration::from_secs(5 * 60);
 const RETRY_DELAYS_SECS: [u64; 10] = [1, 2, 4, 8, 16, 30, 30, 30, 30, 30];
 const FRESH_UPLOAD_RETRIES: usize = 3;
-const STORE_WAIT: Duration = Duration::from_secs(15 * 60);
+const STORE_WAIT: Duration = Duration::from_secs(24 * 60 * 60);
 const RETRY_STATUSES: [u16; 3] = [408, 500, 503];
 const VIDEO_EXTENSIONS: [&str; 16] = [
     "3g2", "3gp", "avi", "flv", "m2ts", "m4v", "mkv", "mov", "mp4", "mpeg", "mpg", "mts", "ogv",
@@ -271,6 +273,8 @@ impl Answer {
 
 struct Pacing {
     status_poll: Duration,
+    slow_status_poll: Duration,
+    slow_poll_after: Duration,
     retry_delays: Vec<Duration>,
     fresh_upload_retries: usize,
     store_wait: Duration,
@@ -280,6 +284,8 @@ impl Pacing {
     fn contract() -> Self {
         Self {
             status_poll: STATUS_POLL,
+            slow_status_poll: SLOW_STATUS_POLL,
+            slow_poll_after: SLOW_POLL_AFTER,
             retry_delays: RETRY_DELAYS_SECS
                 .iter()
                 .map(|secs| Duration::from_secs(*secs))
@@ -337,7 +343,11 @@ async fn upload_paced(job: &IngestUpload, pacing: &Pacing, on_sent: impl Fn()) -
                 )
             }
             None => {
-                crate::transport_runtime::sleep(pacing.status_poll).await;
+                let poll = match all_sent_at {
+                    Some(at) if at.elapsed() >= pacing.slow_poll_after => pacing.slow_status_poll,
+                    _ => pacing.status_poll,
+                };
+                crate::transport_runtime::sleep(poll).await;
                 Answer::from_response(crate::transport_runtime::get_body(&job.ingest_url).await)
             }
         };
@@ -744,6 +754,8 @@ mod tests {
     fn quick() -> Pacing {
         Pacing {
             status_poll: Duration::from_millis(5),
+            slow_status_poll: Duration::from_millis(5),
+            slow_poll_after: Duration::from_secs(60),
             retry_delays: vec![Duration::from_millis(5); 10],
             fresh_upload_retries: 3,
             store_wait: Duration::from_millis(300),
@@ -836,5 +848,23 @@ mod tests {
         let _ = std::fs::remove_file(&path);
         let error = result.expect_err("must give up");
         assert!(error.to_string().contains("in time"), "{error}");
+    }
+
+    #[tokio::test]
+    async fn a_long_store_wait_polls_less_often() {
+        let (path, bytes) = tail_moov_file("slow");
+        let size = bytes.len() as u64;
+        let (origin, state) = fake_ingest(IngestMode::NeverStores, size).await;
+        let pacing = Pacing {
+            slow_status_poll: Duration::from_millis(100),
+            slow_poll_after: Duration::from_millis(50),
+            store_wait: Duration::from_millis(600),
+            ..quick()
+        };
+        let result = upload_paced(&job(&origin, &origin, path.clone(), size), &pacing, || {}).await;
+        let _ = std::fs::remove_file(&path);
+        assert!(result.is_err());
+        let polls = state.lock().unwrap().polls_after_sent;
+        assert!((4..=20).contains(&polls), "{polls} status polls");
     }
 }
