@@ -638,8 +638,9 @@ impl VideoPlayerView {
         let mut playing = player.is_playing();
         let current_time = player.current_time();
         let (duration, live) = playback_span(&player);
+        let resuming_at = self.resume_at;
         self.follow_growing_playlist(&player, current_time, cx);
-        let current_time = self.resume_at.unwrap_or(current_time);
+        let current_time = resuming_at.or(self.resume_at).unwrap_or(current_time);
         let muted = self.resume_unmute.unwrap_or_else(|| player.is_muted());
         let failed = player.failed();
         if failed && player.missing_plugin() {
