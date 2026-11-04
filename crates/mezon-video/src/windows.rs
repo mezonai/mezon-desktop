@@ -45,6 +45,7 @@ fn ensure_media_foundation() -> windows::core::Result<()> {
     static READY: AtomicBool = AtomicBool::new(false);
     INIT.call_once(|| {
         if unsafe { MFStartup(MF_VERSION, MFSTARTUP_FULL) }.is_ok() {
+            crate::opus_mft_windows::register_opus_decoder();
             READY.store(true, Ordering::SeqCst);
         }
     });
@@ -207,6 +208,13 @@ impl PlayerImpl {
         match &self.inner {
             PlayerBackend::MediaFoundation(player) => player.duration(),
             PlayerBackend::Webm(player) => player.duration(),
+        }
+    }
+
+    pub fn live_end(&self) -> Option<f64> {
+        match &self.inner {
+            PlayerBackend::MediaFoundation(player) => player.live_end(),
+            PlayerBackend::Webm(_) => None,
         }
     }
 
@@ -575,6 +583,19 @@ impl MediaFoundationPlayer {
         } else {
             self.duration_hint.unwrap_or(0.0)
         }
+    }
+
+    fn live_end(&self) -> Option<f64> {
+        if !unsafe { self.engine.GetDuration() }.is_infinite() {
+            return None;
+        }
+        let ranges = unsafe { self.engine.GetSeekable() }.ok()?;
+        let count = unsafe { ranges.GetLength() };
+        if count == 0 {
+            return Some(0.0);
+        }
+        let end = unsafe { ranges.GetEnd(count - 1) }.ok()?;
+        Some(if end.is_finite() { end.max(0.0) } else { 0.0 })
     }
 
     fn seek(&self, to_seconds: f64) {

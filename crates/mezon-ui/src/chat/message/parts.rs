@@ -1044,6 +1044,22 @@ fn attachment_sending_overlay(
     box_width: f32,
     box_height: f32,
 ) -> impl IntoElement {
+    attachment_progress_overlay(
+        theme,
+        locale,
+        "message.attachment.uploading",
+        box_width,
+        box_height,
+    )
+}
+
+fn attachment_progress_overlay(
+    theme: &Theme,
+    locale: &str,
+    label_key: &'static str,
+    box_width: f32,
+    box_height: f32,
+) -> impl IntoElement {
     div()
         .absolute()
         .inset_0()
@@ -1065,7 +1081,7 @@ fn attachment_sending_overlay(
                     div()
                         .text_size(px(12.))
                         .text_color(theme.text_secondary)
-                        .child(mezon_i18n::t(locale, "message.attachment.uploading")),
+                        .child(mezon_i18n::t(locale, label_key)),
                 )
             },
         )
@@ -1707,6 +1723,7 @@ fn render_video_poster(
     };
     let width = att.display_width;
     let height = att.display_height;
+    let ingest = att.presign_ingest;
     let host = ctx.video_host.clone();
     let locale = SharedString::from(ctx.locale.to_string());
     let selection = ctx.selection.clone();
@@ -1739,11 +1756,17 @@ fn render_video_poster(
             ))
             .into_any_element();
     }
-    if sending || att.presign_pending {
+    if sending || (att.presign_pending && !att.stream_ready) {
+        let label_key = if att.upload_storing {
+            "message.attachment.finishing"
+        } else {
+            "message.attachment.uploading"
+        };
         return container
-            .child(attachment_sending_overlay(
+            .child(attachment_progress_overlay(
                 theme,
                 ctx.locale,
+                label_key,
                 att.display_width,
                 att.display_height,
             ))
@@ -1797,6 +1820,7 @@ fn render_video_poster(
                 fullscreen_mode: VideoFullscreenMode::default(),
                 layout: VideoLayout::default(),
                 decode_max_size: None,
+                ingest,
                 locale: locale.clone(),
             };
             let _ = host.update(cx, |host, cx| {

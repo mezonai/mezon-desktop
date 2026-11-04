@@ -2,17 +2,58 @@ use gpui::{App, ClipboardItem, SharedString, WeakEntity, Window};
 use mezon_client::transport::QUICK_MENU_TYPE_QUICK;
 use mezon_store::{
     AppConfig, ChannelId, ChannelPermissionsStore, DirectKind, DirectMessageStore, EmojiStore,
-    Message, MessageCode, MessageId, MessageRef, MessagesStore, PERMISSION_DELETE_MESSAGE,
-    PinnedMessagesStore, QuickMenuStore, ThreadsStore, TopicsStore,
+    MentionTarget, Message, MessageCode, MessageId, MessageRef, MessagesStore,
+    PERMISSION_DELETE_MESSAGE, PinnedMessagesStore, QuickMenuStore, ThreadsStore, TopicsStore,
 };
 
 use super::channel_messages::ChannelMessages;
-use super::content::{first_link, open_message_link};
+use super::content::{clicked_menu_link, first_link, open_message_link};
 use super::forward_modal::ForwardMessageModal;
 use super::pin_confirm_modals::ConfirmPinMessageModal;
 use super::report_modal::ReportMessageModal;
 use crate::app::shell::Shell;
+use crate::chat::mention_input::{CopiedMention, clipboard_item_with_mentions};
 use crate::components::primitives::{ContextMenu, IconName};
+
+fn copied_mentions_from_targets(content: &str, targets: &[MentionTarget]) -> Vec<CopiedMention> {
+    if content.is_empty() || targets.is_empty() {
+        return Vec::new();
+    }
+    let mut sorted: Vec<&MentionTarget> = targets.iter().collect();
+    sorted.sort_by_key(|target| target.s);
+    let mut out = Vec::with_capacity(sorted.len());
+    for target in sorted {
+        let Ok(s) = usize::try_from(target.s) else {
+            continue;
+        };
+        let Ok(e) = usize::try_from(target.e) else {
+            continue;
+        };
+        if s >= e {
+            continue;
+        }
+        let start = mezon_widgets::text_edit::utf16_offset_to_bytes(content, s);
+        let end = mezon_widgets::text_edit::utf16_offset_to_bytes(content, e);
+        let Some(slice) = content.get(start..end) else {
+            continue;
+        };
+        if !slice.starts_with('@') {
+            continue;
+        }
+        let user_id = target.user_id.clone().unwrap_or_default();
+        let role_id = target.role_id.clone().unwrap_or_default();
+        if user_id.is_empty() && role_id.is_empty() {
+            continue;
+        }
+        out.push(CopiedMention {
+            display: slice.to_string(),
+            user_id,
+            role_id,
+            at: start,
+        });
+    }
+    out
+}
 
 pub(crate) fn resolve_forward_group_in(
     messages: &[Message],
@@ -262,8 +303,9 @@ pub(crate) fn build(
     is_topic_box: bool,
     reaction_submenu_open: bool,
     quick_menu_submenu_open: bool,
-    selected_text: Option<String>,
+    selected_text: Option<(String, Vec<CopiedMention>)>,
     clicked_image: Option<&str>,
+    clicked_link: Option<&str>,
     host: WeakEntity<ChannelMessages>,
     cx: &App,
 ) -> ContextMenu {
@@ -293,6 +335,7 @@ pub(crate) fn build(
         quick_menu_submenu_open,
         selected_text,
         clicked_image,
+        clicked_link,
         host,
         cx,
     )
@@ -410,7 +453,7 @@ fn build_topic_menu(
     show_forward_all: bool,
     reaction_submenu_open: bool,
     quick_menu_submenu_open: bool,
-    selected_text: Option<String>,
+    selected_text: Option<(String, Vec<CopiedMention>)>,
     host: WeakEntity<ChannelMessages>,
     cx: &App,
 ) -> ContextMenu {
@@ -513,21 +556,26 @@ fn build_topic_menu(
 
     if !msg.content.is_empty() && !is_poll {
         let content = msg.content.clone();
+        let targets = msg.mention_targets.clone();
         menu = menu.separator().item_trailing_icon(
             t("contextMenu.copyText"),
             IconName::CopyTextRightClick,
             move |_, cx| {
-                cx.write_to_clipboard(ClipboardItem::new_string(content.clone()));
+                let mentions = copied_mentions_from_targets(&content, &targets);
+                cx.write_to_clipboard(clipboard_item_with_mentions(content.clone(), mentions));
             },
         );
     }
 
-    if let Some(selected) = selected_text.filter(|text| !text.is_empty()) {
+    if let Some((selected, mentions)) = selected_text.filter(|(text, _)| !text.is_empty()) {
         menu = menu.item_trailing_icon(
             t("contextMenu.copyTextSelected"),
             IconName::CopyTextRightClick,
             move |_, cx| {
-                cx.write_to_clipboard(ClipboardItem::new_string(selected.clone()));
+                cx.write_to_clipboard(clipboard_item_with_mentions(
+                    selected.clone(),
+                    mentions.clone(),
+                ));
             },
         );
     }
@@ -600,8 +648,9 @@ fn build_channel_menu(
     show_forward_all: bool,
     reaction_submenu_open: bool,
     quick_menu_submenu_open: bool,
-    selected_text: Option<String>,
+    selected_text: Option<(String, Vec<CopiedMention>)>,
     clicked_image: Option<&str>,
+    clicked_link: Option<&str>,
     host: WeakEntity<ChannelMessages>,
     cx: &App,
 ) -> ContextMenu {
@@ -740,21 +789,26 @@ fn build_channel_menu(
 
     if !msg.content.is_empty() && !is_poll {
         let content = msg.content.clone();
+        let targets = msg.mention_targets.clone();
         menu = menu.item_trailing_icon(
             t("contextMenu.copyText"),
             IconName::CopyTextRightClick,
             move |_, cx| {
-                cx.write_to_clipboard(ClipboardItem::new_string(content.clone()));
+                let mentions = copied_mentions_from_targets(&content, &targets);
+                cx.write_to_clipboard(clipboard_item_with_mentions(content.clone(), mentions));
             },
         );
     }
 
-    if let Some(selected) = selected_text.filter(|text| !text.is_empty()) {
+    if let Some((selected, mentions)) = selected_text.filter(|(text, _)| !text.is_empty()) {
         menu = menu.item_trailing_icon(
             t("contextMenu.copyTextSelected"),
             IconName::CopyTextRightClick,
             move |_, cx| {
-                cx.write_to_clipboard(ClipboardItem::new_string(selected.clone()));
+                cx.write_to_clipboard(clipboard_item_with_mentions(
+                    selected.clone(),
+                    mentions.clone(),
+                ));
             },
         );
     }
@@ -832,7 +886,7 @@ fn build_channel_menu(
     let link = if clicked.is_some() {
         None
     } else {
-        first_link(msg)
+        clicked_menu_link(msg, clicked_link).or_else(|| first_link(msg))
     };
     let image = clicked
         .or_else(|| first_menu_image(msg))
@@ -977,6 +1031,40 @@ mod menu_image_tests {
         assert_eq!(pick(Some("https://cdn/c.png")), Some("https://cdn/a.png"));
         assert_eq!(pick(Some("https://other/x.png")), Some("https://cdn/a.png"));
         assert!(clicked_menu_image(&msg, Some("https://cdn/c.png")).is_none());
+    }
+}
+
+#[cfg(test)]
+mod menu_link_tests {
+    use super::{clicked_menu_link, first_link};
+    use mezon_store::{LinkKind, Message, MessageId, MessageSpan};
+
+    fn link(url: &str) -> MessageSpan {
+        MessageSpan::Link {
+            text: url.to_string().into(),
+            url: String::new(),
+            kind: LinkKind::Plain,
+        }
+    }
+
+    #[test]
+    fn the_right_clicked_link_wins_over_the_first_one() {
+        let mut msg = Message::new(MessageId(1), "", "1", "Alice", 0);
+        msg.spans = vec![
+            link("https://a.example/one"),
+            MessageSpan::Text(" and ".into()),
+            link("https://b.example/two"),
+        ];
+        let pick = |clicked| clicked_menu_link(&msg, clicked).or_else(|| first_link(&msg));
+        assert_eq!(
+            pick(Some("https://b.example/two")).as_deref(),
+            Some("https://b.example/two")
+        );
+        assert_eq!(pick(None).as_deref(), Some("https://a.example/one"));
+        assert_eq!(
+            pick(Some("https://other.example/x")).as_deref(),
+            Some("https://a.example/one")
+        );
     }
 }
 
@@ -1126,5 +1214,29 @@ mod edit_permission_tests {
     fn edit_rejects_forwarded_and_unsent_messages() {
         assert!(!edit_message_allowed(true, MessageCode::Chat, true, false));
         assert!(!edit_message_allowed(true, MessageCode::Chat, false, true));
+    }
+}
+
+#[cfg(test)]
+mod copy_text_tests {
+    use super::copied_mentions_from_targets;
+    use mezon_store::MentionTarget;
+
+    #[test]
+    fn copy_text_records_each_mention_at_its_byte_offset() {
+        let content = "chào youtube.com/@An @An";
+        let at = content.rfind("@An").unwrap();
+        let s = content[..at].encode_utf16().count() as i32;
+        let target = MentionTarget {
+            user_id: Some("10".to_string()),
+            role_id: None,
+            username: "An".to_string(),
+            s,
+            e: s + 3,
+        };
+        let mentions = copied_mentions_from_targets(content, &[target]);
+        assert_eq!(mentions.len(), 1);
+        assert_eq!(mentions[0].display, "@An");
+        assert_eq!(mentions[0].at, at);
     }
 }

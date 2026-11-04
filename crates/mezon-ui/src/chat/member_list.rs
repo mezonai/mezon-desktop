@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::time::Duration;
 
 use gpui::{
@@ -9,12 +10,12 @@ use mezon_store::{
     AccountEvent, AccountStore, BAN_FOR_1_HOUR_SEC, BAN_FOR_3_HOURS_SEC, BAN_FOR_8_HOURS_SEC,
     BAN_FOR_15_MINUTES_SEC, BAN_FOR_24_HOURS_SEC, BAN_FOREVER, BadgeService, BannedUsersEvent,
     BannedUsersStore, ChannelEvent, ChannelId, ChannelList, ChannelMembersEvent,
-    ChannelMembersStore, ChannelType, ClanId, ClanList, ClanMember, ClanMembersStore, DirectEvent,
-    DirectKind, DirectMessageStore, DmAvatarPresence, FriendState, FriendStore, GroupMember,
-    GroupMembersEvent, GroupMembersStore, InVoiceInfo, PERMISSION_ADMINISTRATOR,
-    PERMISSION_CLAN_OWNER, PermissionStore, PresenceEvent, PresenceStore, ProfileContext,
-    RolesEvent, RolesStore, Settings, UserId, current_user_presence, current_user_status,
-    split_members_by_status,
+    ChannelMembersStore, ChannelType, ChannelUserProfile, ChannelUsersEvent, ChannelUsersStore,
+    ClanId, ClanList, ClanMember, ClanMembersStore, DirectEvent, DirectKind, DirectMessageStore,
+    DmAvatarPresence, FriendState, FriendStore, GroupMember, GroupMembersEvent, GroupMembersStore,
+    InVoiceInfo, PERMISSION_ADMINISTRATOR, PERMISSION_CLAN_OWNER, PermissionStore, PresenceEvent,
+    PresenceStore, ProfileContext, RolesEvent, RolesStore, Settings, UserId, current_user_presence,
+    current_user_status, split_members_by_status,
 };
 
 use crate::app::shell::{FriendRemovalKind, Shell};
@@ -328,6 +329,15 @@ impl MemberListPanel {
                     }),
                 );
                 subs.push(
+                    cx.subscribe(&ChannelUsersStore::global(cx), |this, _, event, cx| {
+                        let (ChannelUsersEvent::Changed { channel_id }
+                        | ChannelUsersEvent::MembershipChanged { channel_id }) = event;
+                        if shows_channel(*channel_id, cx) {
+                            this.rebuild(cx);
+                        }
+                    }),
+                );
+                subs.push(
                     cx.subscribe(&ChannelList::global(cx), |this, _, event, cx| {
                         if matches!(
                             event,
@@ -573,6 +583,19 @@ fn compute_rows(source: MemberSource, cx: &mut Context<MemberListPanel>) -> Vec<
             let Some(ctx) = active_channel_context(cx) else {
                 return Vec::new();
             };
+            if let (Some(channel_id), Some(ids)) = (ctx.channel_id, ctx.filter_ids.as_deref()) {
+                let missing_from_roster = {
+                    let store = ClanMembersStore::global(cx);
+                    let store = store.read(cx);
+                    ids.iter()
+                        .any(|id| store.member(ctx.clan_id, *id).is_none())
+                };
+                if missing_from_roster {
+                    ChannelUsersStore::global(cx).update(cx, |store, cx| {
+                        store.ensure_loaded(channel_id, cx);
+                    });
+                }
+            }
             let owner_id = ClanList::global(cx)
                 .read(cx)
                 .clan(ctx.clan_id)
@@ -616,6 +639,7 @@ fn active_group_dm(cx: &App) -> Option<ChannelId> {
 
 struct ChannelContext {
     clan_id: ClanId,
+    channel_id: Option<ChannelId>,
     filter_ids: Option<Vec<UserId>>,
 }
 
@@ -649,15 +673,50 @@ fn active_channel_context(cx: &App) -> Option<ChannelContext> {
     if clan_id.is_zero() {
         return None;
     }
-    let filter_ids = if use_filter {
-        channel_id.map(|cid| ChannelMembersStore::global(cx).read(cx).member_ids(cid))
-    } else {
-        None
-    };
+    let channel_id = channel_id.filter(|_| use_filter);
+    let filter_ids = channel_id.map(|cid| ChannelMembersStore::global(cx).read(cx).member_ids(cid));
     Some(ChannelContext {
         clan_id,
+        channel_id,
         filter_ids,
     })
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct FallbackMember {
+    user_id: UserId,
+    name: String,
+    avatar_raw: String,
+}
+
+fn fallback_channel_members<'a>(
+    filter_ids: &[UserId],
+    in_roster: impl Fn(UserId) -> bool,
+    profile_for: impl Fn(UserId) -> Option<&'a ChannelUserProfile>,
+) -> Vec<FallbackMember> {
+    let mut seen = HashSet::new();
+    let mut out = Vec::new();
+    for &user_id in filter_ids {
+        if !seen.insert(user_id) || in_roster(user_id) {
+            continue;
+        }
+        let Some(profile) = profile_for(user_id) else {
+            continue;
+        };
+        let name = if !profile.display_name.is_empty() {
+            profile.display_name.clone()
+        } else if !profile.username.is_empty() {
+            profile.username.clone()
+        } else {
+            user_id.to_string()
+        };
+        out.push(FallbackMember {
+            user_id,
+            name,
+            avatar_raw: profile.avatar.clone(),
+        });
+    }
+    out
 }
 
 fn channel_raw_members(cx: &App, ctx: ChannelContext) -> (Vec<RawMember>, Vec<RawMember>) {
@@ -684,34 +743,75 @@ fn channel_raw_members(cx: &App, ctx: ChannelContext) -> (Vec<RawMember>, Vec<Ra
         online,
         own.as_ref().map(|(id, status)| (*id, status.online)),
     );
+    let raw_for = |user_id: UserId, name: String, avatar_raw: String, is_online: bool| {
+        let own_status = own
+            .as_ref()
+            .filter(|(id, _)| *id == user_id)
+            .map(|(_, status)| status);
+        RawMember {
+            user_id,
+            name,
+            avatar_raw,
+            online: is_online,
+            presence: presence.member_presence(user_id, own_presence),
+            user_status: own_status.map_or_else(
+                || presence.user_status(user_id).unwrap_or("").to_string(),
+                |status| status.custom_status.clone(),
+            ),
+            voice_badge: member_voice_badge(is_online, channels.in_voice_status(user_id)),
+            role_color: Some(role_color_in(roles, ctx.clan_id, user_id)),
+        }
+    };
     let to_raw = |ids: &[UserId], is_online: bool| -> Vec<RawMember> {
         ids.iter()
             .filter_map(|id| store.member(ctx.clan_id, *id))
             .map(|member| {
-                let own_status = own
-                    .as_ref()
-                    .filter(|(id, _)| *id == member.id())
-                    .map(|(_, status)| status);
-                RawMember {
-                    user_id: member.id(),
-                    name: member.name().to_string(),
-                    avatar_raw: member.avatar().to_string(),
-                    online: is_online,
-                    presence: presence.member_presence(member.id(), own_presence),
-                    user_status: own_status.map_or_else(
-                        || presence.user_status(member.id()).unwrap_or("").to_string(),
-                        |status| status.custom_status.clone(),
-                    ),
-                    voice_badge: member_voice_badge(
-                        is_online,
-                        channels.in_voice_status(member.id()),
-                    ),
-                    role_color: Some(role_color_in(roles, ctx.clan_id, member.id())),
-                }
+                raw_for(
+                    member.id(),
+                    member.name().to_string(),
+                    member.avatar().to_string(),
+                    is_online,
+                )
             })
             .collect()
     };
-    (to_raw(&online_ids, true), to_raw(&offline_ids, false))
+    let mut online_raw = to_raw(&online_ids, true);
+    let mut offline_raw = to_raw(&offline_ids, false);
+    if let (Some(channel_id), Some(ids)) = (ctx.channel_id, ctx.filter_ids.as_deref())
+        && let Some(channel_users) = ChannelUsersStore::try_global(cx)
+    {
+        let channel_users = channel_users.read(cx);
+        let fallbacks = fallback_channel_members(
+            ids,
+            |id| store.member(ctx.clan_id, id).is_some(),
+            |id| channel_users.profile(channel_id, id),
+        );
+        if !fallbacks.is_empty() {
+            for fallback in fallbacks {
+                let is_online = own
+                    .as_ref()
+                    .filter(|(id, _)| *id == fallback.user_id)
+                    .map_or_else(
+                        || online.contains(&fallback.user_id),
+                        |(_, status)| status.online,
+                    );
+                let row = raw_for(
+                    fallback.user_id,
+                    fallback.name,
+                    fallback.avatar_raw,
+                    is_online,
+                );
+                if is_online {
+                    online_raw.push(row);
+                } else {
+                    offline_raw.push(row);
+                }
+            }
+            online_raw.sort_by_cached_key(|m| m.name.to_lowercase());
+            offline_raw.sort_by_cached_key(|m| m.name.to_lowercase());
+        }
+    }
+    (online_raw, offline_raw)
 }
 
 fn member_voice_badge(is_online: bool, info: Option<InVoiceInfo>) -> Option<VoiceActivityBadge> {
@@ -2175,5 +2275,109 @@ mod scroll_tests {
             ..Default::default()
         });
         assert!(!scroll.is_scroll_hover_suppressed());
+    }
+}
+
+#[cfg(test)]
+mod fallback_tests {
+    use std::collections::{HashMap, HashSet};
+
+    use mezon_store::{ChannelUserProfile, UserId};
+
+    use super::{FallbackMember, fallback_channel_members};
+
+    fn profile(username: &str, display_name: &str, avatar: &str) -> ChannelUserProfile {
+        ChannelUserProfile {
+            username: username.to_string(),
+            display_name: display_name.to_string(),
+            avatar: avatar.to_string(),
+        }
+    }
+
+    #[test]
+    fn id_in_roster_produces_no_fallback_row() {
+        let roster: HashSet<UserId> = [UserId(1)].into_iter().collect();
+        let profiles: HashMap<UserId, ChannelUserProfile> =
+            [(UserId(1), profile("u1", "User One", "a1.png"))]
+                .into_iter()
+                .collect();
+        let rows = fallback_channel_members(
+            &[UserId(1)],
+            |id| roster.contains(&id),
+            |id| profiles.get(&id),
+        );
+        assert!(rows.is_empty());
+    }
+
+    #[test]
+    fn missing_id_with_profile_uses_display_name() {
+        let profiles: HashMap<UserId, ChannelUserProfile> =
+            [(UserId(2), profile("u2", "User Two", "a2.png"))]
+                .into_iter()
+                .collect();
+        let rows = fallback_channel_members(&[UserId(2)], |_| false, |id| profiles.get(&id));
+        assert_eq!(
+            rows,
+            vec![FallbackMember {
+                user_id: UserId(2),
+                name: "User Two".to_string(),
+                avatar_raw: "a2.png".to_string(),
+            }]
+        );
+    }
+
+    #[test]
+    fn empty_display_name_falls_back_to_username() {
+        let profiles: HashMap<UserId, ChannelUserProfile> = [
+            (UserId(3), profile("u3", "", "a3.png")),
+            (UserId(4), profile("", "", "a4.png")),
+        ]
+        .into_iter()
+        .collect();
+        let rows =
+            fallback_channel_members(&[UserId(3), UserId(4)], |_| false, |id| profiles.get(&id));
+        assert_eq!(
+            rows,
+            vec![
+                FallbackMember {
+                    user_id: UserId(3),
+                    name: "u3".to_string(),
+                    avatar_raw: "a3.png".to_string(),
+                },
+                FallbackMember {
+                    user_id: UserId(4),
+                    name: "4".to_string(),
+                    avatar_raw: "a4.png".to_string(),
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn missing_id_without_profile_is_skipped() {
+        let profiles: HashMap<UserId, ChannelUserProfile> = HashMap::new();
+        let rows = fallback_channel_members(&[UserId(5)], |_| false, |id| profiles.get(&id));
+        assert!(rows.is_empty());
+    }
+
+    #[test]
+    fn duplicate_filter_ids_produce_one_row() {
+        let profiles: HashMap<UserId, ChannelUserProfile> =
+            [(UserId(6), profile("u6", "User Six", "a6.png"))]
+                .into_iter()
+                .collect();
+        let rows = fallback_channel_members(
+            &[UserId(6), UserId(6), UserId(6)],
+            |_| false,
+            |id| profiles.get(&id),
+        );
+        assert_eq!(
+            rows,
+            vec![FallbackMember {
+                user_id: UserId(6),
+                name: "User Six".to_string(),
+                avatar_raw: "a6.png".to_string(),
+            }]
+        );
     }
 }

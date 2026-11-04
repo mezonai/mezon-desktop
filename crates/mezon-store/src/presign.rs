@@ -1,4 +1,5 @@
 pub const PRESIGN_PENDING_MAX_AGE_SEC: i64 = 600;
+pub const PRESIGN_INGEST_PENDING_MAX_AGE_SEC: i64 = 24 * 60 * 60;
 
 pub fn normalize_presign_key(key: &str) -> String {
     let segment = key
@@ -24,14 +25,36 @@ pub fn presign_keys_match(a: &str, b: &str) -> bool {
 }
 
 pub fn parse_presign_finish_keys(content: &str) -> Option<Vec<String>> {
+    parse_presign_keys(content, "presign_finish")
+}
+
+pub fn parse_presign_ingest_keys(content: &str) -> Vec<String> {
+    parse_presign_keys(content, "presign_ingest").unwrap_or_default()
+}
+
+fn parse_presign_keys(content: &str, field: &str) -> Option<Vec<String>> {
     let value: serde_json::Value = serde_json::from_str(content).ok()?;
-    let keys = value.as_object()?.get("presign_finish")?.as_array()?;
+    let keys = value.as_object()?.get(field)?.as_array()?;
     Some(
         keys.iter()
             .filter_map(|v| v.as_str())
             .map(normalize_presign_key)
             .collect(),
     )
+}
+
+pub fn is_ingest_attachment(url: &str, ingest_keys: &[String]) -> bool {
+    !ingest_keys.is_empty()
+        && presign_key_from_url(url)
+            .is_some_and(|key| ingest_keys.iter().any(|k| presign_keys_match(k, &key)))
+}
+
+pub fn pending_max_age_sec(ingest: bool) -> i64 {
+    if ingest {
+        PRESIGN_INGEST_PENDING_MAX_AGE_SEC
+    } else {
+        PRESIGN_PENDING_MAX_AGE_SEC
+    }
 }
 
 /// Every CDN an attachment can be presigned onto, mirroring the web client
@@ -55,7 +78,14 @@ pub fn is_mezon_cdn(url: &str, base_img_url: &str) -> bool {
     {
         return true;
     }
-    url_host(base_img_url).is_some_and(|allowed| host_matches(&host, &allowed))
+    [
+        base_img_url,
+        mezon_client::cdn_read_base_url(1, ""),
+        mezon_client::cdn_read_base_url(2, ""),
+    ]
+    .into_iter()
+    .filter_map(url_host)
+    .any(|allowed| host_matches(&host, &allowed))
 }
 
 pub fn presign_pending(url: &str, keys: Option<&[String]>, base_img_url: &str) -> bool {
@@ -81,6 +111,7 @@ pub fn is_expired_presign_attachment(
     base_img_url: &str,
     create_time_seconds: i64,
     now_seconds: i64,
+    ingest: bool,
 ) -> bool {
     if create_time_seconds <= 0 || keys.is_none() {
         return false;
@@ -88,7 +119,7 @@ pub fn is_expired_presign_attachment(
     if !presign_pending(url, keys, base_img_url) {
         return false;
     }
-    now_seconds - create_time_seconds >= PRESIGN_PENDING_MAX_AGE_SEC
+    now_seconds - create_time_seconds >= pending_max_age_sec(ingest)
 }
 
 fn presign_key_from_url(url: &str) -> Option<String> {
@@ -112,6 +143,7 @@ fn url_host(url: &str) -> Option<String> {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum UploadState {
     Uploading,
+    Storing,
     Uploaded,
     Failed,
 }
@@ -145,6 +177,15 @@ pub fn finish_uploading(key: &str, uploaded: bool) {
         UploadState::Failed
     };
     uploads().states.insert(key.to_string(), state);
+}
+
+pub fn note_storing(key: &str) {
+    let mut registry = uploads();
+    if registry.states.get(key) == Some(&UploadState::Uploading) {
+        registry
+            .states
+            .insert(key.to_string(), UploadState::Storing);
+    }
 }
 
 pub fn mark_failed(key: &str) {
@@ -344,14 +385,16 @@ mod tests {
             Some(&keys),
             CDN,
             1000,
-            1000 + 599
+            1000 + 599,
+            false
         ));
         assert!(is_expired_presign_attachment(
             url,
             Some(&keys),
             CDN,
             1000,
-            1000 + 600
+            1000 + 600,
+            false
         ));
         let finished = vec!["photo".to_string()];
         assert!(!is_expired_presign_attachment(
@@ -359,7 +402,60 @@ mod tests {
             Some(&finished),
             CDN,
             1000,
-            1_000_000
+            1_000_000,
+            false
         ));
+    }
+
+    #[test]
+    fn only_an_upload_in_flight_can_start_storing() {
+        begin_uploading(&["storing-a".to_string()]);
+        note_storing("storing-a");
+        assert_eq!(upload_state("storing-a"), Some(UploadState::Storing));
+        finish_uploading("storing-a", true);
+        note_storing("storing-a");
+        assert_eq!(upload_state("storing-a"), Some(UploadState::Uploaded));
+        note_storing("storing-unknown");
+        assert_eq!(upload_state("storing-unknown"), None);
+        settle("storing-a");
+    }
+
+    #[test]
+    fn an_ingest_upload_stays_pending_for_a_day() {
+        let keys = vec!["other".to_string()];
+        let url = "https://cdn.example/uploads/clip.mp4";
+        assert!(!is_expired_presign_attachment(
+            url,
+            Some(&keys),
+            CDN,
+            1000,
+            1000 + 86_399,
+            true
+        ));
+        assert!(is_expired_presign_attachment(
+            url,
+            Some(&keys),
+            CDN,
+            1000,
+            1000 + 86_400,
+            true
+        ));
+    }
+
+    #[test]
+    fn ingest_keys_name_the_attachments_that_stream_while_uploading() {
+        let content = r#"{"t":"","presign_finish":[],"presign_ingest":["1cf93b197d401000/2080000000000000001_clip.mp4"]}"#;
+        let keys = parse_presign_ingest_keys(content);
+        assert_eq!(keys, vec!["2080000000000000001_clip".to_string()]);
+        assert!(is_ingest_attachment(
+            "https://cdn.mezon.ai/1cf93b197d401000/2080000000000000001_clip.mp4",
+            &keys
+        ));
+        assert!(!is_ingest_attachment(
+            "https://cdn.mezon.ai/1cf93b197d401000/2080000000000000002_other.mp4",
+            &keys
+        ));
+        assert!(parse_presign_ingest_keys(r#"{"t":"","presign_finish":[]}"#).is_empty());
+        assert!(parse_presign_ingest_keys("plain text").is_empty());
     }
 }

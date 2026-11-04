@@ -69,6 +69,8 @@ impl CustomStatusModal {
             return;
         }
         let account = AccountStore::try_global(cx).and_then(|a| a.read(cx).account.clone());
+        let clear =
+            AccountStore::try_global(cx).and_then(|a| a.read(cx).custom_status_clear().cloned());
         let display_name = account
             .as_ref()
             .map(|a| {
@@ -118,7 +120,7 @@ impl CustomStatusModal {
                 locale,
                 display_name: SharedString::from(display_name),
                 input,
-                selected: 0,
+                selected: clear_option_index(clear.as_ref()),
                 menu_open: false,
                 _input_sub: input_sub,
             }
@@ -346,6 +348,23 @@ impl Render for CustomStatusModal {
     }
 }
 
+fn clear_option_index(clear: Option<&mezon_store::CustomStatusClear>) -> usize {
+    let Some(clear) = clear else {
+        return 0;
+    };
+    if clear.no_clear {
+        CLEAR_OPTIONS
+            .iter()
+            .position(|opt| opt.no_clear)
+            .unwrap_or(0)
+    } else {
+        CLEAR_OPTIONS
+            .iter()
+            .position(|opt| !opt.no_clear && opt.minutes == clear.minutes)
+            .unwrap_or(0)
+    }
+}
+
 fn minutes_until_end_of_day() -> i32 {
     let now = chrono::Local::now();
     let end = now
@@ -355,5 +374,70 @@ fn minutes_until_end_of_day() -> i32 {
     match end {
         Some(end) => (end - now).num_minutes().max(0) as i32,
         None => 0,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use mezon_store::CustomStatusClear;
+
+    #[test]
+    fn clear_option_index_maps_saved_clear_choice_to_option_key() {
+        let key_at =
+            |clear: Option<&CustomStatusClear>| CLEAR_OPTIONS[clear_option_index(clear)].key;
+
+        assert_eq!(
+            key_at(None),
+            "userProfile.statusProfile.customStatusModal.timeOptions.today"
+        );
+        assert_eq!(
+            key_at(Some(&CustomStatusClear {
+                status: "busy".to_string(),
+                minutes: 0,
+                no_clear: true,
+            })),
+            "userProfile.statusProfile.customStatusModal.timeOptions.dontClear"
+        );
+        assert_eq!(
+            key_at(Some(&CustomStatusClear {
+                status: "busy".to_string(),
+                minutes: 517,
+                no_clear: true,
+            })),
+            "userProfile.statusProfile.customStatusModal.timeOptions.dontClear"
+        );
+        assert_eq!(
+            key_at(Some(&CustomStatusClear {
+                status: "busy".to_string(),
+                minutes: 240,
+                no_clear: false,
+            })),
+            "userProfile.statusProfile.customStatusModal.timeOptions.fourHours"
+        );
+        assert_eq!(
+            key_at(Some(&CustomStatusClear {
+                status: "busy".to_string(),
+                minutes: 60,
+                no_clear: false,
+            })),
+            "userProfile.statusProfile.customStatusModal.timeOptions.oneHour"
+        );
+        assert_eq!(
+            key_at(Some(&CustomStatusClear {
+                status: "busy".to_string(),
+                minutes: 30,
+                no_clear: false,
+            })),
+            "userProfile.statusProfile.customStatusModal.timeOptions.thirtyMinutes"
+        );
+        assert_eq!(
+            key_at(Some(&CustomStatusClear {
+                status: "busy".to_string(),
+                minutes: 517,
+                no_clear: false,
+            })),
+            "userProfile.statusProfile.customStatusModal.timeOptions.today"
+        );
     }
 }

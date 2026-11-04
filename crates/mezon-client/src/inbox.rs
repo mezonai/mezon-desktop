@@ -1025,6 +1025,10 @@ impl TopicDiscussion {
         })
     }
 
+    pub fn original_message_preview(&self) -> TopicReplyPreview {
+        topic_reply_preview(&self.content)
+    }
+
     pub fn reply_preview_text(&self) -> String {
         match self.reply_preview() {
             TopicReplyPreview::Text(text) => text,
@@ -1885,6 +1889,24 @@ mod tests {
         assert_eq!(
             latest.reply_preview(),
             TopicReplyPreview::Text("latest reply".into())
+        );
+        let both = topic_discussion_from_api(api::SdTopic {
+            content: r#"{"t":"original body"}"#.into(),
+            last_sent_message: Some(api::ChannelMessageHeader {
+                id: 30,
+                sender_id: 8,
+                content: r#"{"t":"latest reply"}"#.into(),
+                timestamp_seconds: 200,
+            }),
+            ..Default::default()
+        });
+        assert_eq!(
+            both.reply_preview(),
+            TopicReplyPreview::Text("latest reply".into())
+        );
+        assert_eq!(
+            both.original_message_preview(),
+            TopicReplyPreview::Text("original body".into())
         );
     }
 

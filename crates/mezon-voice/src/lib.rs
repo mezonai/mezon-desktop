@@ -212,6 +212,7 @@ enum Command {
     SetInputDevice(Option<String>),
     SetOutputDevice(Option<String>),
     SetCameraDevice(Option<String>),
+    SetUserVolumes(HashMap<String, f32>),
     StartScreenShare(PickedScreen, bool, ScreenShareMode),
     SetScreenShareMode(ScreenShareMode),
     StopScreenShare,
@@ -385,6 +386,10 @@ impl VoiceSession {
         let _ = self.cmd_tx.send(Command::SetCameraDevice(device_id));
     }
 
+    pub fn set_user_volumes(&self, volumes: HashMap<String, f32>) {
+        let _ = self.cmd_tx.send(Command::SetUserVolumes(volumes));
+    }
+
     pub fn start_screen_share(&self, pick: PickedScreen, share_audio: bool, mode: ScreenShareMode) {
         let _ = self
             .cmd_tx
@@ -460,6 +465,39 @@ type ScreenAudioBus = Arc<Mutex<std::collections::VecDeque<i16>>>;
 
 const LOCAL_AUDIO_KEY: u64 = 0x10_CA1A_0D10;
 const SPEAKING_POLL_INTERVAL: Duration = Duration::from_millis(150);
+
+fn apply_user_volumes(
+    mixer: Option<&Arc<audio::PlaybackMixer>>,
+    peers: &[SfuPeer],
+    volumes: &HashMap<String, f32>,
+    applied: &mut HashMap<u64, f32>,
+) -> bool {
+    let Some(mixer) = mixer else {
+        return false;
+    };
+    let gains = peer_audio_gains(peers, volumes);
+    if gains == *applied {
+        return false;
+    }
+    applied.clone_from(&gains);
+    mixer.set_gains(gains);
+    true
+}
+
+fn peer_audio_gains(peers: &[SfuPeer], volumes: &HashMap<String, f32>) -> HashMap<u64, f32> {
+    let mut gains = HashMap::new();
+    if volumes.is_empty() {
+        return gains;
+    }
+    for peer in peers {
+        if let Some(key) = peer.audio
+            && let Some(&gain) = volumes.get(&peer.user_id)
+        {
+            gains.insert(key, gain);
+        }
+    }
+    gains
+}
 
 #[allow(clippy::too_many_arguments)]
 async fn session_main(
@@ -538,6 +576,8 @@ async fn session_main(
     let mut remote_audio: HashMap<u64, RtcAudioTrack> = HashMap::new();
 
     let mut peers: Vec<SfuPeer> = Vec::new();
+    let mut user_volumes: HashMap<String, f32> = HashMap::new();
+    let mut applied_gains: HashMap<u64, f32> = HashMap::new();
     let mut last_participants: Vec<VoiceParticipant> = Vec::new();
     let mut playback_health_tick = tokio::time::interval(Duration::from_secs(5));
     playback_health_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
@@ -584,6 +624,7 @@ async fn session_main(
                     }
                     SfuEvent::Peers(next) => {
                         peers = next;
+                        apply_user_volumes(audio_mixer.as_ref(), &peers, &user_volumes, &mut applied_gains);
                         emit!();
                     }
                     SfuEvent::RoomSnapshot => {
@@ -777,6 +818,10 @@ async fn session_main(
                             }
                         }
                     }
+                    Ok(Command::SetUserVolumes(volumes)) => {
+                        user_volumes = volumes;
+                        apply_user_volumes(audio_mixer.as_ref(), &peers, &user_volumes, &mut applied_gains);
+                    }
                     Ok(Command::SetCameraEnabled(false)) => {
                         let mut changed = false;
                         camera_gen = camera_gen.wrapping_add(1);
@@ -932,6 +977,7 @@ async fn session_main(
                 match ready {
                     Some(Ok(audio)) => {
                         audio_mixer = Some(audio.mixer.clone());
+                        apply_user_volumes(audio_mixer.as_ref(), &peers, &user_volumes, &mut applied_gains);
                         out_fmt = Some(audio.output_format);
                         out_change_rx = Some(audio.output_format_rx.clone());
                         device_reset_rx = Some(audio.device_reset_rx.clone());
@@ -2035,6 +2081,106 @@ mod peer_metadata_tests {
         assert_eq!(
             peer_display_metadata(r#"{"username":"undefined","avatar":"https://cdn/a.png"}"#),
             pair("", "https://cdn/a.png")
+        );
+    }
+}
+
+#[cfg(test)]
+mod user_volume_tests {
+    use std::collections::HashMap;
+
+    use std::sync::Arc;
+
+    use super::audio::PlaybackMixer;
+    use super::{SfuPeer, apply_user_volumes, peer_audio_gains};
+
+    fn peer(peer_id: u32, user_id: &str, audio: Option<u64>) -> SfuPeer {
+        SfuPeer {
+            peer_id,
+            user_id: user_id.to_owned(),
+            metadata: String::new(),
+            muted: false,
+            is_audience: false,
+            audio,
+            camera: None,
+            screenshare: None,
+        }
+    }
+
+    #[test]
+    fn peer_with_volume_maps_its_audio_key() {
+        let peers = vec![peer(1, "u1", Some(101))];
+        let volumes = HashMap::from([("u1".to_owned(), 0.5)]);
+        assert_eq!(
+            peer_audio_gains(&peers, &volumes),
+            HashMap::from([(101, 0.5)])
+        );
+    }
+
+    #[test]
+    fn peer_without_volume_is_absent() {
+        let peers = vec![peer(1, "u1", Some(101)), peer(2, "u2", Some(102))];
+        let volumes = HashMap::from([("u1".to_owned(), 1.25)]);
+        assert_eq!(
+            peer_audio_gains(&peers, &volumes),
+            HashMap::from([(101, 1.25)])
+        );
+    }
+
+    #[test]
+    fn peer_without_audio_track_is_absent() {
+        let peers = vec![peer(1, "u1", None)];
+        let volumes = HashMap::from([("u1".to_owned(), 0.75)]);
+        assert!(peer_audio_gains(&peers, &volumes).is_empty());
+    }
+
+    #[test]
+    fn unchanged_gains_are_applied_once() {
+        let mixer = Arc::new(PlaybackMixer::default());
+        let peers = vec![peer(1, "u1", Some(101))];
+        let volumes = HashMap::from([("u1".to_owned(), 0.5)]);
+        let mut applied = HashMap::new();
+        assert!(apply_user_volumes(
+            Some(&mixer),
+            &peers,
+            &volumes,
+            &mut applied
+        ));
+        assert!(!apply_user_volumes(
+            Some(&mixer),
+            &peers,
+            &volumes,
+            &mut applied
+        ));
+        assert_eq!(applied, HashMap::from([(101, 0.5)]));
+    }
+
+    #[test]
+    fn without_volumes_the_mixer_is_never_touched() {
+        let mixer = Arc::new(PlaybackMixer::default());
+        let peers = vec![peer(1, "u1", Some(101))];
+        let mut applied = HashMap::new();
+        assert!(!apply_user_volumes(
+            Some(&mixer),
+            &peers,
+            &HashMap::new(),
+            &mut applied
+        ));
+        assert!(!apply_user_volumes(
+            None,
+            &peers,
+            &HashMap::new(),
+            &mut applied
+        ));
+    }
+
+    #[test]
+    fn two_peers_with_same_user_id_both_receive_gain() {
+        let peers = vec![peer(1, "u1", Some(101)), peer(2, "u1", Some(202))];
+        let volumes = HashMap::from([("u1".to_owned(), 1.5)]);
+        assert_eq!(
+            peer_audio_gains(&peers, &volumes),
+            HashMap::from([(101, 1.5), (202, 1.5)])
         );
     }
 }

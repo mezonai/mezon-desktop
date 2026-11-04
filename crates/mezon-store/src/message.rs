@@ -26,6 +26,8 @@ pub struct MessageAttachment {
     pub size: u64,
     pub size_label: SharedString,
     pub presign_pending: bool,
+    pub presign_ingest: bool,
+    pub stream_ready: bool,
     pub proxied_src: SharedString,
     pub thumbnail_proxied: SharedString,
     pub display_width: f32,
@@ -33,6 +35,7 @@ pub struct MessageAttachment {
     pub tenor_mp4: Option<SharedString>,
     pub local_source: Option<std::path::PathBuf>,
     pub uploading: bool,
+    pub upload_storing: bool,
     pub upload_failed: bool,
     pub source_denied: bool,
 }

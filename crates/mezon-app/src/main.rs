@@ -559,6 +559,7 @@ fn run_app(lock: SingleInstance, initial_url: Option<String>) {
         cloudflare: app_config.cloudflare_cdn_url.clone(),
         profile: app_config.profile_img_url.clone(),
     });
+    mezon_client::file_ingest::configure_file_ingest(&app_config.file_ingest);
     let transport = Arc::new(TransportClient::new(String::new()));
     let api = Arc::new(AppApi::new(
         transport.clone(),

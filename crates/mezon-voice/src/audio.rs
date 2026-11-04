@@ -348,8 +348,15 @@ pub struct AudioFormat {
 }
 
 #[derive(Default)]
+struct MixerTracks {
+    buffers: HashMap<u64, VecDeque<i16>>,
+    gains: HashMap<u64, f32>,
+}
+
+#[derive(Default)]
 pub struct PlaybackMixer {
-    tracks: Mutex<HashMap<u64, VecDeque<i16>>>,
+    tracks: Mutex<MixerTracks>,
+    unscaled: Mutex<Vec<i16>>,
     record: crate::record::RecordTaps,
     record_rate: AtomicU32,
     record_channels: AtomicU32,
@@ -386,7 +393,7 @@ impl PlaybackMixer {
 
     pub fn push(&self, key: u64, samples: &[i16]) {
         let mut tracks = self.tracks.lock();
-        let buf = tracks.entry(key).or_default();
+        let buf = tracks.buffers.entry(key).or_default();
         buf.extend(samples.iter().copied());
         while buf.len() > Self::MAX_BUFFERED {
             buf.pop_front();
@@ -394,26 +401,58 @@ impl PlaybackMixer {
     }
 
     pub fn remove(&self, key: u64) {
-        self.tracks.lock().remove(&key);
+        self.tracks.lock().buffers.remove(&key);
+    }
+
+    pub fn set_gains(&self, gains: HashMap<u64, f32>) {
+        tracing::debug!(?gains, "playback gains set");
+        let previous = std::mem::replace(&mut self.tracks.lock().gains, gains);
+        drop(previous);
     }
 
     fn mix_into(&self, out: &mut [i16]) {
+        self.mix(out, self.record.is_active());
+    }
+
+    fn mix(&self, out: &mut [i16], recording: bool) {
         for slot in out.iter_mut() {
             *slot = 0;
         }
         let mut tracks = self.tracks.lock();
-        for buf in tracks.values_mut() {
-            for slot in out.iter_mut() {
+        let MixerTracks { buffers, gains } = &mut *tracks;
+        let mut unscaled = (recording && !gains.is_empty()).then(|| {
+            let mut scratch = self.unscaled.lock();
+            scratch.clear();
+            scratch.resize(out.len(), 0);
+            scratch
+        });
+        for (key, buf) in buffers.iter_mut() {
+            let gain = gains.get(key).copied().unwrap_or(1.0);
+            for (index, slot) in out.iter_mut().enumerate() {
                 let Some(sample) = buf.pop_front() else {
                     break;
                 };
-                *slot =
-                    (*slot as i32 + sample as i32).clamp(i16::MIN as i32, i16::MAX as i32) as i16;
+                let contribution = if gain == 1.0 {
+                    sample as i32
+                } else {
+                    (sample as f32 * gain).round() as i32
+                };
+                *slot = saturating_mix(*slot, contribution);
+                if let Some(scratch) = unscaled.as_mut() {
+                    scratch[index] = saturating_mix(scratch[index], sample as i32);
+                }
             }
         }
         drop(tracks);
-        self.tee_to_recorder(out);
+        match unscaled {
+            Some(scratch) => self.tee_to_recorder(&scratch),
+            None => self.tee_to_recorder(out),
+        }
     }
+}
+
+fn saturating_mix(acc: i16, contribution: i32) -> i16 {
+    (acc as i32 + contribution).clamp(i16::MIN as i32, i16::MAX as i32) as i16
 }
 
 enum AudioCmd {
@@ -2108,5 +2147,85 @@ mod speaking_tests {
         levels.observe(7, &[9_000i16; 480]);
         levels.forget(7);
         assert!(!levels.is_speaking(7));
+    }
+}
+
+#[cfg(test)]
+mod mixer_gain_tests {
+    use std::collections::HashMap;
+
+    use super::PlaybackMixer;
+
+    #[test]
+    fn key_with_no_gain_mixes_unchanged() {
+        let mixer = PlaybackMixer::default();
+        mixer.push(1, &[1000, -2000, 321]);
+        let mut out = [0i16; 3];
+        mixer.mix_into(&mut out);
+        assert_eq!(out, [1000, -2000, 321]);
+    }
+
+    #[test]
+    fn half_gain_halves_and_zero_gain_silences_only_that_track() {
+        let mixer = PlaybackMixer::default();
+        mixer.set_gains(HashMap::from([(1, 0.5), (2, 0.0)]));
+        mixer.push(1, &[1000, -600]);
+        mixer.push(2, &[9000, -9000]);
+        let mut out = [0i16; 2];
+        mixer.mix_into(&mut out);
+        assert_eq!(out, [500, -300]);
+
+        let mixer2 = PlaybackMixer::default();
+        mixer2.set_gains(HashMap::from([(1, 0.0)]));
+        mixer2.push(1, &[12_000, -12_000]);
+        mixer2.push(2, &[700, -800]);
+        let mut out2 = [0i16; 2];
+        mixer2.mix_into(&mut out2);
+        assert_eq!(out2, [700, -800]);
+    }
+
+    #[test]
+    fn boost_gain_scales_and_saturates_at_i16_max() {
+        let mixer = PlaybackMixer::default();
+        mixer.set_gains(HashMap::from([(1, 1.5)]));
+        mixer.push(1, &[1000, 30_000, -30_000]);
+        let mut out = [0i16; 3];
+        mixer.mix_into(&mut out);
+        assert_eq!(out, [1500, i16::MAX, i16::MIN]);
+    }
+
+    #[test]
+    fn remove_then_push_preserves_gain() {
+        let mixer = PlaybackMixer::default();
+        mixer.set_gains(HashMap::from([(42, 0.5)]));
+        mixer.push(42, &[2000]);
+        mixer.remove(42);
+        mixer.push(42, &[800]);
+        let mut out = [0i16; 1];
+        mixer.mix_into(&mut out);
+        assert_eq!(out, [400]);
+    }
+
+    #[test]
+    fn recording_keeps_the_unscaled_mix_while_playback_uses_the_gain() {
+        let mixer = PlaybackMixer::default();
+        mixer.set_gains(HashMap::from([(1, 0.0)]));
+        mixer.push(1, &[1000, -1000]);
+        mixer.push(2, &[200, 300]);
+        let mut out = [0i16; 2];
+        mixer.mix(&mut out, true);
+        assert_eq!(out, [200, 300]);
+        assert_eq!(*mixer.unscaled.lock(), vec![1200, -700]);
+    }
+
+    #[test]
+    fn empty_gains_map_restores_unity_gain() {
+        let mixer = PlaybackMixer::default();
+        mixer.set_gains(HashMap::from([(1, 0.25)]));
+        mixer.set_gains(HashMap::new());
+        mixer.push(1, &[1200, -1200]);
+        let mut out = [0i16; 2];
+        mixer.mix_into(&mut out);
+        assert_eq!(out, [1200, -1200]);
     }
 }

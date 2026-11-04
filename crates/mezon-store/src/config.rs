@@ -65,6 +65,7 @@ pub struct AppConfig {
     pub imgproxy_key: String,
     pub mezon_cdn_url: String,
     pub cloudflare_cdn_url: String,
+    pub file_ingest: String,
 
     // ── Klipy (GIF search) ────────────────────────────────────────────────────
     pub klipy_key: String,
@@ -152,6 +153,7 @@ impl AppConfig {
             imgproxy_key: "_AEhOrrckkG-NjqIdVLtzc-dtLFuE4u6ClM0P46ICEY".into(),
             mezon_cdn_url: "https://cdn.mezon.ai".into(),
             cloudflare_cdn_url: "https://cdn.komu.vn".into(),
+            file_ingest: String::new(),
 
             klipy_key: String::new(),
             klipy_base_url: "https://api.klipy.com/api/v1".into(),
@@ -275,6 +277,7 @@ impl AppConfig {
                 baked_env::NX_CLOUDFLARE_CDN_URL,
                 &defaults.cloudflare_cdn_url,
             ),
+            file_ingest: opt_str(baked_env::NX_CHAT_APP_FILE_INGEST, &defaults.file_ingest),
 
             klipy_key: opt_str(baked_env::NX_CHAT_APP_API_KLIPY_KEY, &defaults.klipy_key),
             klipy_base_url: opt_str(

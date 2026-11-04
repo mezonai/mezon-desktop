@@ -7,12 +7,12 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use gpui::{
-    Anchor, Animation, AnimationExt as _, AnyElement, App, ClipboardItem, Context, DismissEvent,
-    DispatchPhase, Element, ElementId, Entity, EventEmitter, FocusHandle, Focusable,
-    GlobalElementId, Hitbox, HitboxBehavior, InspectorElementId, KeyDownEvent, LayoutId,
-    ListAlignment, ListState, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels,
-    Point, SharedString, Subscription, Task, TextLayout, WeakEntity, Window, anchored, deferred,
-    div, ease_in_out, list, prelude::*, px,
+    Anchor, Animation, AnimationExt as _, AnyElement, App, Context, DismissEvent, DispatchPhase,
+    Element, ElementId, Entity, EventEmitter, FocusHandle, Focusable, GlobalElementId, Hitbox,
+    HitboxBehavior, InspectorElementId, KeyDownEvent, LayoutId, ListAlignment, ListState,
+    MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Point, SharedString,
+    Subscription, Task, TextLayout, WeakEntity, Window, anchored, deferred, div, ease_in_out, list,
+    prelude::*, px,
 };
 use ui::{ScrollAxes, Scrollbars, WithScrollbar};
 
@@ -42,7 +42,9 @@ use super::skeleton::message_skeleton;
 use super::system_row::{build_onboarding_context, build_welcome_context};
 use super::video_player::{VideoActivation, VideoPlayerView};
 use crate::app::shell::Shell;
-use crate::chat::mention_input::{MentionInput, MentionInputEvent};
+use crate::chat::mention_input::{
+    CopiedMention, MentionInput, MentionInputEvent, clipboard_item_with_mentions,
+};
 use crate::chat::user_profile_popover::UserProfilePopover;
 use crate::components::primitives::text_actions::Copy;
 use crate::components::primitives::{
@@ -403,10 +405,12 @@ fn selected_text_for_messages(
     locale: &str,
     current_user_id: &str,
     cx: &App,
-) -> Option<String> {
+) -> Option<(String, Vec<CopiedMention>)> {
     use super::selection::floor_char_boundary;
 
     let mut parts = Vec::new();
+    let mut mentions = Vec::new();
+    let mut joined_len = 0usize;
     for message in messages {
         if !state.includes_message(message.id) {
             continue;
@@ -420,20 +424,53 @@ fn selected_text_for_messages(
         if start < end
             && let Some(cleaned) = clipboard_selection_slice(&full[start..end])
         {
+            let part_start = if parts.is_empty() { 0 } else { joined_len + 1 };
+            joined_len = part_start + cleaned.len();
             parts.push(cleaned);
+            if !message.spans.is_empty()
+                && !message.is_deleted_placeholder
+                && message.call_log.is_none()
+                && message.poll.is_none()
+                && message.token_transaction.is_none()
+                && !matches!(
+                    message.code,
+                    MessageCode::SendToken
+                        | MessageCode::CreatePin
+                        | MessageCode::CreateThread
+                        | MessageCode::DeleteThread
+                )
+            {
+                for (span_range, mut mention) in
+                    super::content::selectable_spans_mentions(&message.spans, locale, cx)
+                {
+                    if span_range.start < start || span_range.end > end {
+                        continue;
+                    }
+                    let Some(before) = full.get(start..span_range.start) else {
+                        continue;
+                    };
+                    mention.at = part_start + clipboard_selection_len(before);
+                    mentions.push(mention);
+                }
+            }
         }
     }
-    (!parts.is_empty()).then(|| parts.join("\n"))
+    (!parts.is_empty()).then(|| (parts.join("\n"), mentions))
+}
+
+fn is_clipboard_placeholder(c: char) -> bool {
+    c == super::content::INLINE_ICON_PLACEHOLDER || c == super::content::ATTACHMENT_PLACEHOLDER
+}
+
+fn clipboard_selection_len(text: &str) -> usize {
+    text.chars()
+        .filter(|&c| !is_clipboard_placeholder(c))
+        .map(char::len_utf8)
+        .sum()
 }
 
 fn clipboard_selection_slice(text: &str) -> Option<String> {
-    let cleaned = text.replace(
-        [
-            super::content::INLINE_ICON_PLACEHOLDER,
-            super::content::ATTACHMENT_PLACEHOLDER,
-        ],
-        "",
-    );
+    let cleaned = text.replace(is_clipboard_placeholder, "");
     (!cleaned.is_empty()).then_some(cleaned)
 }
 
@@ -462,6 +499,137 @@ mod selection_copy_tests {
             clipboard_selection_slice("lãi 5\u{2030} một tháng"),
             Some("lãi 5\u{2030} một tháng".to_string())
         );
+    }
+
+    #[gpui::test]
+    fn selection_only_carries_mentions_fully_inside_the_range(cx: &mut gpui::TestAppContext) {
+        use super::{SelPoint, selected_text_for_messages};
+        use crate::chat::mention_input::CopiedMention;
+        use crate::chat::message::selection::MessageSelectionState;
+        use gpui::SharedString;
+        use mezon_store::{Message, MessageId, MessageSpan};
+
+        let mut msg = Message::new(MessageId(1), "hi @Alice and @Bob", "1", "Sender", 0);
+        msg.spans = vec![
+            MessageSpan::Text(SharedString::from("hi ")),
+            MessageSpan::Mention {
+                display: SharedString::from("@Alice"),
+                user_id: Some("10".to_string()),
+                role_id: None,
+            },
+            MessageSpan::Text(SharedString::from(" and ")),
+            MessageSpan::Mention {
+                display: SharedString::from("@Bob"),
+                user_id: Some("20".to_string()),
+                role_id: None,
+            },
+        ];
+        let messages = [msg];
+
+        cx.read(|cx| {
+            let mut half = MessageSelectionState::default();
+            half.anchor = Some(SelPoint {
+                message_id: MessageId(1),
+                offset: 5,
+            });
+            half.head = Some(SelPoint {
+                message_id: MessageId(1),
+                offset: 18,
+            });
+            let (text, mentions) =
+                selected_text_for_messages(&half, &messages, "en", "1", cx).unwrap();
+            assert_eq!(text, "lice and @Bob");
+            assert_eq!(
+                mentions,
+                vec![CopiedMention {
+                    display: "@Bob".to_string(),
+                    user_id: "20".to_string(),
+                    role_id: String::new(),
+                    at: 9,
+                }]
+            );
+
+            let mut full = MessageSelectionState::default();
+            full.anchor = Some(SelPoint {
+                message_id: MessageId(1),
+                offset: 0,
+            });
+            full.head = Some(SelPoint {
+                message_id: MessageId(1),
+                offset: 18,
+            });
+            let (text, mentions) =
+                selected_text_for_messages(&full, &messages, "en", "1", cx).unwrap();
+            assert_eq!(text, "hi @Alice and @Bob");
+            assert_eq!(
+                mentions,
+                vec![
+                    CopiedMention {
+                        display: "@Alice".to_string(),
+                        user_id: "10".to_string(),
+                        role_id: String::new(),
+                        at: 3,
+                    },
+                    CopiedMention {
+                        display: "@Bob".to_string(),
+                        user_id: "20".to_string(),
+                        role_id: String::new(),
+                        at: 14,
+                    },
+                ]
+            );
+        });
+    }
+
+    #[gpui::test]
+    fn selection_mention_offsets_point_into_the_joined_clipboard_text(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        use super::{SelPoint, selected_text_for_messages};
+        use crate::chat::message::selection::MessageSelectionState;
+        use gpui::SharedString;
+        use mezon_store::{Message, MessageId, MessageSpan};
+
+        let mention = |display: &str, user_id: &str| MessageSpan::Mention {
+            display: SharedString::from(display.to_string()),
+            user_id: Some(user_id.to_string()),
+            role_id: None,
+        };
+        let mut first = Message::new(MessageId(1), "see @An", "1", "Sender", 0);
+        first.spans = vec![
+            MessageSpan::Text(SharedString::from("see ")),
+            mention("@An", "10"),
+        ];
+        let mut second = Message::new(MessageId(2), "youtube.com/@AnTV @An", "1", "Sender", 0);
+        second.spans = vec![
+            MessageSpan::Text(SharedString::from("youtube.com/@AnTV ")),
+            mention("@An", "10"),
+        ];
+        let messages = [first, second];
+
+        cx.read(|cx| {
+            let mut state = MessageSelectionState::default();
+            state.anchor = Some(SelPoint {
+                message_id: MessageId(1),
+                offset: 0,
+            });
+            state.head = Some(SelPoint {
+                message_id: MessageId(2),
+                offset: 21,
+            });
+            state.order_map =
+                std::collections::HashMap::from([(MessageId(1), 0), (MessageId(2), 1)]);
+            let (text, mentions) =
+                selected_text_for_messages(&state, &messages, "en", "1", cx).unwrap();
+            assert_eq!(text, "see @An\nyoutube.com/@AnTV @An");
+            assert_eq!(
+                mentions.iter().map(|m| m.at).collect::<Vec<_>>(),
+                vec![4, 26]
+            );
+            for m in &mentions {
+                assert_eq!(&text[m.at..m.at + m.display.len()], m.display);
+            }
+        });
     }
 }
 
@@ -753,6 +921,16 @@ fn pagination_direction(
     } else {
         None
     }
+}
+
+fn link_for_menu(
+    pending: Option<(MessageId, Point<Pixels>, String)>,
+    message_id: MessageId,
+    position: Point<Pixels>,
+) -> Option<String> {
+    pending
+        .filter(|(id, at, _)| *id == message_id && *at == position)
+        .map(|(_, _, url)| url)
 }
 
 fn hover_show_target(pointer: Option<MessageId>, shown: Option<MessageId>) -> Option<MessageId> {
@@ -1180,6 +1358,28 @@ mod pagination_tests {
 }
 
 #[cfg(test)]
+mod link_for_menu_tests {
+    use super::*;
+    use gpui::point;
+
+    #[test]
+    fn only_the_link_under_this_right_click_reaches_the_menu() {
+        let at = point(px(880.), px(604.));
+        let noted = || Some((MessageId(1), at, "https://b.example/two".to_string()));
+        assert_eq!(
+            link_for_menu(noted(), MessageId(1), at).as_deref(),
+            Some("https://b.example/two")
+        );
+        assert_eq!(
+            link_for_menu(noted(), MessageId(1), point(px(480.), px(604.))),
+            None
+        );
+        assert_eq!(link_for_menu(noted(), MessageId(2), at), None);
+        assert_eq!(link_for_menu(None, MessageId(1), at), None);
+    }
+}
+
+#[cfg(test)]
 mod hover_schedule_tests {
     use super::*;
 
@@ -1373,6 +1573,8 @@ pub struct ChannelMessages {
     context_menu_target: Option<(MessageId, Point<Pixels>)>,
     pending_context_image: Option<(MessageId, String)>,
     context_menu_image: Option<String>,
+    pending_context_link: Option<(MessageId, Point<Pixels>, String)>,
+    context_menu_link: Option<String>,
     context_menu_forward_all: bool,
     reaction_submenu_open: bool,
     quick_menu_submenu_open: bool,
@@ -2038,6 +2240,8 @@ impl ChannelMessages {
             context_menu_target: None,
             pending_context_image: None,
             context_menu_image: None,
+            pending_context_link: None,
+            context_menu_link: None,
             context_menu_forward_all: false,
             reaction_submenu_open: false,
             quick_menu_submenu_open: false,
@@ -2696,12 +2900,23 @@ impl ChannelMessages {
             .take()
             .filter(|(id, _)| *id == message_id)
             .map(|(_, url)| url);
+        self.context_menu_link =
+            link_for_menu(self.pending_context_link.take(), message_id, position);
         self.context_menu_target = Some((message_id, position));
         cx.notify();
     }
 
     pub(crate) fn note_context_image(&mut self, message_id: MessageId, url: String) {
         self.pending_context_image = Some((message_id, url));
+    }
+
+    pub(crate) fn note_context_link(
+        &mut self,
+        message_id: MessageId,
+        position: Point<Pixels>,
+        url: String,
+    ) {
+        self.pending_context_link = Some((message_id, position, url));
     }
 
     pub(crate) fn close_context_menu(&mut self, cx: &mut Context<Self>) {
@@ -4778,10 +4993,10 @@ impl ChannelMessages {
                 )
             }
         };
-        let Some(text) = text else {
+        let Some((text, mentions)) = text else {
             return false;
         };
-        cx.write_to_clipboard(ClipboardItem::new_string(text));
+        cx.write_to_clipboard(clipboard_item_with_mentions(text, mentions));
         true
     }
 
@@ -4981,19 +5196,17 @@ impl ChannelMessages {
                             .into_any_element();
                     }
                     let row_ix = ix - usize::from(header_shown);
-                    let (probe_urls, linked_channels, context_menu_enabled) = {
+                    let (probe_urls, context_menu_enabled) = {
                         let topic = entity.read(cx);
                         match topic.topic_messages.get(row_ix) {
                             Some(message) => (
                                 super::audio_meta::urls_needing_probe(&message.attachments, cx),
-                                super::content::channel_links_needing_detail(&message.spans, cx),
                                 topic_context_menu_enabled(message, active_topic_bucket(cx)),
                             ),
-                            None => (Vec::new(), Vec::new(), false),
+                            None => (Vec::new(), false),
                         }
                     };
                     super::audio_meta::defer_audio_probe(probe_urls, cx);
-                    super::content::defer_linked_channel_resolve(linked_channels, cx);
                     let ctx = RowCtx {
                         app: cx,
                         theme: cx.theme(),
@@ -5107,6 +5320,7 @@ impl ChannelMessages {
                     self.quick_menu_submenu_open,
                     selected_text,
                     self.context_menu_image.as_deref(),
+                    self.context_menu_link.as_deref(),
                     cx.entity().downgrade(),
                     cx,
                 );
@@ -5385,18 +5599,16 @@ impl Render for ChannelMessages {
                             .into_any_element();
                     }
                     let msg_ix = ix - usize::from(header_shown);
-                    let (probe_urls, linked_channels) = {
+                    let probe_urls = {
                         let messages = store.read(cx);
                         match messages.viewport_messages().get(msg_ix) {
-                            Some(message) => (
-                                super::audio_meta::urls_needing_probe(&message.attachments, cx),
-                                super::content::channel_links_needing_detail(&message.spans, cx),
-                            ),
-                            None => (Vec::new(), Vec::new()),
+                            Some(message) => {
+                                super::audio_meta::urls_needing_probe(&message.attachments, cx)
+                            }
+                            None => Vec::new(),
                         }
                     };
                     super::audio_meta::defer_audio_probe(probe_urls, cx);
-                    super::content::defer_linked_channel_resolve(linked_channels, cx);
                     let ctx = RowCtx {
                         app: cx,
                         theme: cx.theme(),
@@ -5514,6 +5726,7 @@ impl Render for ChannelMessages {
                     self.quick_menu_submenu_open,
                     selected_text,
                     self.context_menu_image.as_deref(),
+                    self.context_menu_link.as_deref(),
                     cx.entity().downgrade(),
                     cx,
                 );

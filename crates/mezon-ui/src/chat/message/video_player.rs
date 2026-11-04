@@ -7,9 +7,14 @@ use gpui::{
     EntityId, FocusHandle, KeyDownEvent, MouseButton, MouseDownEvent, ObjectFit, Pixels, Rgba,
     SharedString, Task, Window, canvas, div, img, prelude::*, px, relative,
 };
-use mezon_store::{may_be_transcoded, open_media_url_external, transcoded_hls_playlist};
+use mezon_store::{
+    GrowingPlaylist, growing_playlist, may_have_hls_stream, open_media_url_external,
+    playable_hls_stream,
+};
 #[cfg(any(windows, target_os = "macos"))]
-use mezon_video::{PreparedVideo, needs_prepared_open};
+use mezon_video::PreparedVideo;
+#[cfg(any(windows, target_os = "macos", target_os = "linux"))]
+use mezon_video::needs_prepared_open;
 use mezon_video::{VideoFrame, VideoPlayer};
 
 use crate::app::shell::Shell;
@@ -19,8 +24,11 @@ use crate::theme::ActiveTheme;
 
 const SEEK_STEP_SECONDS: f64 = 5.0;
 const SEEK_MIN_INTERVAL: Duration = Duration::from_millis(80);
+const FRAME_REFRESH_AFTER_SEEK: Duration = Duration::from_secs(2);
 const REPLAY_THRESHOLD_SECONDS: f64 = 0.05;
 const STUCK_PLAYING_END_SECONDS: f64 = 0.02;
+const GROWING_REFRESH_LEAD_SECONDS: f64 = 3.0;
+const GROWING_RETRY_DELAY: Duration = Duration::from_secs(3);
 const THEATER_FILL: f32 = 0.92;
 const COMPACT_CARD_MAX_HEIGHT: f32 = 260.;
 const CONTROL_TINT: Rgba = Rgba {
@@ -65,6 +73,7 @@ pub struct VideoActivation {
     pub fullscreen_mode: VideoFullscreenMode,
     pub layout: VideoLayout,
     pub decode_max_size: Option<(u32, u32)>,
+    pub ingest: bool,
     /// Locale for the "cannot play" card — the view has no settings entity of
     /// its own, so the caller hands its own locale down.
     pub locale: SharedString,
@@ -77,6 +86,7 @@ struct SharedPlayback {
     stream_image_id: Option<gpui::ImageId>,
     current_time: f64,
     duration: f64,
+    live: bool,
     playing: bool,
     muted: bool,
     failed: bool,
@@ -89,6 +99,12 @@ enum VideoSource {
     Detect,
     Playlist,
     Original,
+}
+
+struct GrowingSnapshot {
+    playlist: SharedString,
+    path: std::path::PathBuf,
+    duration: f64,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -113,6 +129,7 @@ pub struct VideoPlayerView {
     layout: VideoLayout,
     focus_handle: FocusHandle,
     url: SharedString,
+    ingest: bool,
     filename: SharedString,
     poster: SharedString,
     locale: SharedString,
@@ -130,6 +147,7 @@ pub struct VideoPlayerView {
     _open_task: Option<Task<()>>,
     last_seek_at: Option<Instant>,
     pending_seek: Option<f64>,
+    frame_refresh_until: Option<Instant>,
     signed: Option<mezon_client::cdn_signature::SignedUrl>,
     resigned: bool,
     source: VideoSource,
@@ -139,6 +157,11 @@ pub struct VideoPlayerView {
     plugin_command: Option<&'static str>,
     command_copied: bool,
     _plugin_task: Option<Task<()>>,
+    growing: Option<GrowingSnapshot>,
+    resume_at: Option<f64>,
+    resume_unmute: Option<bool>,
+    resume_play: bool,
+    _growing_task: Option<Task<()>>,
 }
 
 impl VideoPlayerView {
@@ -152,6 +175,7 @@ impl VideoPlayerView {
             fullscreen_mode,
             layout,
             decode_max_size,
+            ingest,
             locale,
         } = activation;
         let shared = Rc::new(RefCell::new(SharedPlayback::default()));
@@ -162,6 +186,7 @@ impl VideoPlayerView {
             layout,
             focus_handle: cx.focus_handle(),
             url,
+            ingest,
             filename,
             poster,
             locale,
@@ -181,6 +206,7 @@ impl VideoPlayerView {
             _open_task: None,
             last_seek_at: None,
             pending_seek: None,
+            frame_refresh_until: None,
             signed: None,
             resigned: false,
             source: VideoSource::Detect,
@@ -190,6 +216,11 @@ impl VideoPlayerView {
             plugin_command: None,
             command_copied: false,
             _plugin_task: None,
+            growing: None,
+            resume_at: None,
+            resume_unmute: None,
+            resume_play: false,
+            _growing_task: None,
         };
         view.start_open(cx);
         view
@@ -241,13 +272,14 @@ impl VideoPlayerView {
         self.load_state = VideoLoadState::Loading;
         self._open_task = None;
         let url = self.url.clone();
+        let ingest = self.ingest;
         let source = self.source;
         let decode_max_size = self.decode_max_size;
         self._open_task = Some(cx.spawn(async move |this, cx| {
             let playlist = match source {
                 VideoSource::Original => None,
                 VideoSource::Detect | VideoSource::Playlist => {
-                    transcoded_hls_playlist(url.as_ref()).await
+                    playable_hls_stream(url.as_ref(), ingest).await
                 }
             };
             if source == VideoSource::Playlist && playlist.is_none() {
@@ -258,14 +290,30 @@ impl VideoPlayerView {
                 return;
             }
             let playing_playlist = playlist.is_some();
-            let url = playlist.map_or(url, SharedString::from);
+            let snapshot = match &playlist {
+                Some(playlist) if ingest => growing_playlist(playlist).await,
+                _ => GrowingPlaylist::Unknown,
+            };
+            let (url, growing) = match (playlist, snapshot) {
+                (Some(playlist), GrowingPlaylist::Snapshot(snapshot)) => (
+                    SharedString::from(snapshot.url),
+                    Some(GrowingSnapshot {
+                        playlist: playlist.into(),
+                        path: snapshot.path,
+                        duration: snapshot.duration,
+                    }),
+                ),
+                (Some(playlist), _) => (SharedString::from(playlist), None),
+                (None, _) => (url, None),
+            };
             let signed = mezon_client::cdn_signature::sign(url.as_ref()).await;
             let url = signed
                 .as_ref()
                 .map_or(url, |signed| SharedString::from(signed.url.clone()));
-            let _ = this.update(cx, |this, _| {
+            let _ = this.update(cx, |this, cx| {
                 this.signed = signed;
                 this.playing_playlist = playing_playlist;
+                this.replace_growing(growing, cx);
             });
             #[cfg(any(windows, target_os = "macos"))]
             if needs_prepared_open(url.as_ref()) {
@@ -280,6 +328,137 @@ impl VideoPlayerView {
                 return;
             }
 
+            #[cfg(target_os = "linux")]
+            let url = if needs_prepared_open(url.as_ref()) {
+                let copy_url = url.clone();
+                let local = cx
+                    .background_executor()
+                    .spawn(async move { mezon_video::prepare_local_copy(copy_url.as_ref()) })
+                    .await;
+                match local {
+                    Ok(Some(local)) => SharedString::from(local),
+                    Ok(None) | Err(_) => url,
+                }
+            } else {
+                url
+            };
+
+            let _ = this.update(cx, |this, cx| {
+                this.finish_open(VideoPlayer::open(url.as_ref(), decode_max_size), cx);
+            });
+        }));
+    }
+
+    fn replace_growing(&mut self, growing: Option<GrowingSnapshot>, cx: &mut Context<Self>) {
+        let previous = std::mem::replace(&mut self.growing, growing);
+        if let Some(previous) = previous
+            && self
+                .growing
+                .as_ref()
+                .is_none_or(|next| next.path != previous.path)
+        {
+            cx.background_spawn(async move {
+                let _ = std::fs::remove_file(previous.path);
+            })
+            .detach();
+        }
+    }
+
+    fn follow_growing_playlist(
+        &mut self,
+        player: &VideoPlayer,
+        current_time: f64,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(at) = self.resume_at {
+            if !player.ready_to_seek() {
+                if self.resume_unmute.is_none() {
+                    self.resume_unmute = Some(player.is_muted());
+                    player.set_muted(true);
+                }
+                return;
+            }
+            self.resume_at = None;
+            player.seek(at);
+            if self.resume_play {
+                player.play();
+            } else {
+                player.pause();
+            }
+            self.shared.borrow_mut().playing = self.resume_play;
+            if let Some(muted) = self.resume_unmute.take() {
+                player.set_muted(muted);
+            }
+        }
+        let Some(growing) = &self.growing else {
+            return;
+        };
+        if self._growing_task.is_some()
+            || self.resume_at.is_some()
+            || current_time < growing.duration - GROWING_REFRESH_LEAD_SECONDS
+        {
+            return;
+        }
+        let playlist = growing.playlist.clone();
+        let known = growing.duration;
+        self._growing_task = Some(cx.spawn(async move |this, cx| {
+            let next = loop {
+                let next = growing_playlist(playlist.as_ref()).await;
+                let grown = match &next {
+                    GrowingPlaylist::Snapshot(snapshot) => snapshot.duration > known + 0.5,
+                    GrowingPlaylist::Finished(_) => true,
+                    GrowingPlaylist::Unknown => false,
+                };
+                if grown {
+                    break next;
+                }
+                cx.background_executor().timer(GROWING_RETRY_DELAY).await;
+            };
+            let _ = this.update(cx, |this, cx| {
+                this._growing_task = None;
+                this.continue_growing(next, playlist, cx);
+            });
+        }));
+    }
+
+    fn continue_growing(
+        &mut self,
+        next: GrowingPlaylist,
+        playlist: SharedString,
+        cx: &mut Context<Self>,
+    ) {
+        let (url, growing, segment_starts) = match next {
+            GrowingPlaylist::Snapshot(snapshot) => (
+                SharedString::from(snapshot.url),
+                Some(GrowingSnapshot {
+                    playlist,
+                    path: snapshot.path,
+                    duration: snapshot.duration,
+                }),
+                snapshot.segment_starts,
+            ),
+            GrowingPlaylist::Finished(segment_starts) => (playlist, None, segment_starts),
+            GrowingPlaylist::Unknown => (playlist, None, Vec::new()),
+        };
+        let (current_time, was_playing) = {
+            let shared = self.shared.borrow();
+            (shared.current_time, shared.playing)
+        };
+        let at_end = self
+            .growing
+            .as_ref()
+            .is_some_and(|growing| current_time >= growing.duration - 0.5);
+        self.replace_growing(growing, cx);
+        self.resume_at = Some(mezon_client::video_source::safe_resume_point(
+            current_time,
+            &segment_starts,
+        ));
+        self.resume_play = was_playing || at_end;
+        self.autoplay_when_ready = true;
+        self.player = None;
+        self.load_state = VideoLoadState::Loading;
+        let decode_max_size = self.decode_max_size;
+        self._open_task = Some(cx.spawn(async move |this, cx| {
             let _ = this.update(cx, |this, cx| {
                 this.finish_open(VideoPlayer::open(url.as_ref(), decode_max_size), cx);
             });
@@ -305,7 +484,7 @@ impl VideoPlayerView {
     }
 
     fn open_other_source(&mut self, cx: &mut Context<Self>) -> bool {
-        if self.source_switched || !self.owns_player() || !may_be_transcoded(self.url.as_ref()) {
+        if self.source_switched || !self.owns_player() || !may_have_hls_stream(self.url.as_ref()) {
             return false;
         }
         self.source_switched = true;
@@ -387,6 +566,7 @@ impl VideoPlayerView {
         player: Rc<VideoPlayer>,
         shared: Shared,
         url: SharedString,
+        ingest: bool,
         filename: SharedString,
         poster: SharedString,
         locale: SharedString,
@@ -401,6 +581,7 @@ impl VideoPlayerView {
             layout: VideoLayout::Fixed,
             focus_handle: cx.focus_handle(),
             url,
+            ingest,
             filename,
             poster,
             locale,
@@ -420,6 +601,7 @@ impl VideoPlayerView {
             _open_task: None,
             last_seek_at: None,
             pending_seek: None,
+            frame_refresh_until: None,
             signed: None,
             resigned: false,
             source: VideoSource::Detect,
@@ -429,10 +611,20 @@ impl VideoPlayerView {
             plugin_command: None,
             command_copied: false,
             _plugin_task: None,
+            growing: None,
+            resume_at: None,
+            resume_unmute: None,
+            resume_play: false,
+            _growing_task: None,
         });
         let focus_handle = view.read(cx).focus_handle.clone();
         window.focus(&focus_handle, cx);
         Shell::global(cx).update(cx, |shell, cx| shell.show_modal(view.into(), cx));
+    }
+
+    fn is_refreshing_frame(&self) -> bool {
+        self.frame_refresh_until
+            .is_some_and(|until| Instant::now() < until)
     }
 
     fn poll_frame(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -445,8 +637,11 @@ impl VideoPlayerView {
         let was_playing = self.shared.borrow().playing;
         let mut playing = player.is_playing();
         let current_time = player.current_time();
-        let duration = player.duration();
-        let muted = player.is_muted();
+        let (duration, live) = playback_span(&player);
+        let resuming_at = self.resume_at;
+        self.follow_growing_playlist(&player, current_time, cx);
+        let current_time = resuming_at.or(self.resume_at).unwrap_or(current_time);
+        let muted = self.resume_unmute.unwrap_or_else(|| player.is_muted());
         let failed = player.failed();
         if failed && player.missing_plugin() {
             self.note_missing_plugin(cx);
@@ -454,11 +649,23 @@ impl VideoPlayerView {
         if failed && self.retry_open(cx) {
             return;
         }
-        if playing && duration > 0.0 && current_time >= duration - STUCK_PLAYING_END_SECONDS {
+        if playing
+            && !live
+            && duration > 0.0
+            && current_time >= duration - STUCK_PLAYING_END_SECONDS
+        {
             player.pause();
             playing = false;
         }
-        let new_frame = if playing { player.copy_frame() } else { None };
+        let refreshing = self.is_refreshing_frame();
+        let new_frame = if (playing || refreshing) && self.resume_at.is_none() {
+            player.copy_frame()
+        } else {
+            None
+        };
+        if new_frame.is_some() || !refreshing {
+            self.frame_refresh_until = None;
+        }
         let new_frame = new_frame.map(|frame| Self::adopt_frame(&self.shared, frame, window, cx));
         let previous = {
             let mut shared = self.shared.borrow_mut();
@@ -466,6 +673,7 @@ impl VideoPlayerView {
             shared.playing = playing;
             shared.current_time = current_time;
             shared.duration = duration;
+            shared.live = live;
             shared.muted = muted;
             new_frame.and_then(|frame| shared.frame.replace(frame))
         };
@@ -477,7 +685,8 @@ impl VideoPlayerView {
     }
 
     fn refresh_time_label(&mut self, playing: bool, current_time: f64, duration: f64) {
-        let display_time = display_playhead(playing, current_time, duration);
+        let live = self.shared.borrow().live;
+        let display_time = display_playhead(playing, current_time, duration, live);
         let seconds = (whole_seconds(display_time), whole_seconds(duration));
         if seconds != self.last_label_seconds {
             self.last_label_seconds = seconds;
@@ -508,9 +717,11 @@ impl VideoPlayerView {
             fullscreen_mode,
             layout,
             decode_max_size,
+            ingest,
             locale,
         } = activation;
         self.url = url;
+        self.ingest = ingest;
         self.filename = filename;
         self.poster = poster;
         self.locale = locale;
@@ -524,11 +735,13 @@ impl VideoPlayerView {
         self.last_label_seconds = (0, 0);
         self.last_seek_at = None;
         self.pending_seek = None;
+        self.frame_refresh_until = None;
         self.reset_source_plan();
         {
             let mut shared = self.shared.borrow_mut();
             shared.current_time = 0.0;
             shared.duration = 0.0;
+            shared.live = false;
         }
         self.decode_max_size = decode_max_size;
         self.autoplay_when_ready = true;
@@ -539,7 +752,13 @@ impl VideoPlayerView {
     pub fn shutdown(&mut self, window: Option<&mut Window>, cx: &mut Context<Self>) {
         self._open_task = None;
         self._plugin_task = None;
+        self._growing_task = None;
+        self.resume_at = None;
+        self.resume_unmute = None;
+        self.resume_play = false;
+        self.replace_growing(None, cx);
         self.pending_seek = None;
+        self.frame_refresh_until = None;
         self.load_state = VideoLoadState::Loading;
         self.autoplay_when_ready = false;
         if let Some(player) = self.player.take() {
@@ -554,6 +773,7 @@ impl VideoPlayerView {
             shared.failed = false;
             shared.current_time = 0.0;
             shared.duration = 0.0;
+            shared.live = false;
         }
     }
 
@@ -579,7 +799,12 @@ impl VideoPlayerView {
                 player.pause();
                 shared.playing = false;
             } else {
-                if should_replay_from_start(shared.playing, shared.current_time, shared.duration) {
+                if should_replay_from_start(
+                    shared.playing,
+                    shared.current_time,
+                    shared.duration,
+                    shared.live,
+                ) {
                     player.seek(0.0);
                     shared.current_time = 0.0;
                 }
@@ -659,6 +884,7 @@ impl VideoPlayerView {
         self.pending_seek = None;
         let was_playing = player.is_playing();
         player.seek(target);
+        self.frame_refresh_until = Some(now + FRAME_REFRESH_AFTER_SEEK);
         if was_playing {
             player.play();
             self.shared.borrow_mut().playing = true;
@@ -669,7 +895,7 @@ impl VideoPlayerView {
             Self::release_stale_frame(previous, &self.shared, window, cx);
         }
         let current_time = player.current_time();
-        let duration = player.duration();
+        let (duration, _) = playback_span(&player);
         self.shared.borrow_mut().current_time = current_time;
         self.refresh_time_label(player.is_playing(), current_time, duration);
         cx.notify();
@@ -683,6 +909,7 @@ impl VideoPlayerView {
                         player,
                         self.shared.clone(),
                         self.url.clone(),
+                        self.ingest,
                         self.filename.clone(),
                         self.poster.clone(),
                         self.locale.clone(),
@@ -816,6 +1043,12 @@ impl VideoPlayerView {
             if let Some(frame) = view.shared.borrow_mut().frame.take() {
                 crate::image_cache::queue_atlas_drop(cx, frame);
             }
+            if let Some(growing) = view.growing.take() {
+                cx.background_spawn(async move {
+                    let _ = std::fs::remove_file(growing.path);
+                })
+                .detach();
+            }
         })
         .detach();
     }
@@ -859,8 +1092,12 @@ impl VideoPlayerView {
         let fraction = {
             let shared = self.shared.borrow();
             if shared.duration > 0.0 {
-                let display_time =
-                    display_playhead(shared.playing, shared.current_time, shared.duration);
+                let display_time = display_playhead(
+                    shared.playing,
+                    shared.current_time,
+                    shared.duration,
+                    shared.live,
+                );
                 (display_time / shared.duration).clamp(0.0, 1.0) as f32
             } else {
                 0.0
@@ -1223,7 +1460,7 @@ impl Render for VideoPlayerView {
                 .into_any_element();
         }
 
-        if playing && window.is_window_active() {
+        if (playing || self.is_refreshing_frame()) && window.is_window_active() {
             window.request_animation_frame();
         }
 
@@ -1297,14 +1534,22 @@ fn control_button(
         .child(Icon::new(icon).size(px(16.)).text_color(gpui::white()))
 }
 
-fn should_replay_from_start(playing: bool, current_time: f64, duration: f64) -> bool {
+fn playback_span(player: &VideoPlayer) -> (f64, bool) {
+    match player.live_end() {
+        Some(end) => (end, true),
+        None => (player.duration(), false),
+    }
+}
+
+fn should_replay_from_start(playing: bool, current_time: f64, duration: f64, live: bool) -> bool {
     !playing
+        && !live
         && duration > 0.0
         && (current_time >= duration - REPLAY_THRESHOLD_SECONDS || current_time / duration >= 0.98)
 }
 
-fn display_playhead(playing: bool, current_time: f64, duration: f64) -> f64 {
-    if should_replay_from_start(playing, current_time, duration) {
+fn display_playhead(playing: bool, current_time: f64, duration: f64, live: bool) -> f64 {
+    if should_replay_from_start(playing, current_time, duration, live) {
         duration
     } else {
         current_time
@@ -1334,8 +1579,16 @@ fn format_seconds(total: f64) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{THEATER_FILL, theater_box};
+    use super::{THEATER_FILL, display_playhead, should_replay_from_start, theater_box};
     use gpui::px;
+
+    #[test]
+    fn a_growing_stream_never_counts_as_ended() {
+        assert!(should_replay_from_start(false, 60.0, 60.0, false));
+        assert!(!should_replay_from_start(false, 60.0, 60.0, true));
+        assert_eq!(display_playhead(false, 59.99, 60.0, false), 60.0);
+        assert_eq!(display_playhead(false, 59.99, 60.0, true), 59.99);
+    }
 
     #[test]
     fn a_portrait_video_gets_a_portrait_theater_box() {
