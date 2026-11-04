@@ -8771,8 +8771,7 @@ impl MezonTransport {
         height: i32,
         channel_id: i64,
     ) -> Result<api::UploadAttachment> {
-        let cid = self.generate_cid();
-        let body = api::UploadAttachmentRequest {
+        self.upload_attachment(api::UploadAttachmentRequest {
             filename: filename.to_string(),
             filetype: filetype.to_string(),
             size,
@@ -8781,8 +8780,16 @@ impl MezonTransport {
             part_count: 0,
             channel_id,
             transcode_hls: crate::video_source::wants_hls_transcode(filename, size),
-        }
-        .encode_to_vec();
+        })
+        .await
+    }
+
+    pub async fn upload_attachment(
+        &self,
+        request: api::UploadAttachmentRequest,
+    ) -> Result<api::UploadAttachment> {
+        let cid = self.generate_cid();
+        let body = request.encode_to_vec();
         let (code, response) = self
             .send_api_request(cid, "UploadAttachmentFile", body)
             .await?;

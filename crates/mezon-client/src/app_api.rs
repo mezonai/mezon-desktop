@@ -2288,7 +2288,17 @@ impl AppApi {
         } else {
             let upload = self
                 .transport
-                .upload_attachment_file(&upload_name, upload_type, size, width, height, channel_id)
+                .upload_attachment(mezon_proto::api::UploadAttachmentRequest {
+                    filename: upload_name.clone(),
+                    filetype: upload_type.to_string(),
+                    size,
+                    width,
+                    height,
+                    part_count: 0,
+                    channel_id,
+                    transcode_hls: !ingest
+                        && crate::video_source::wants_hls_transcode(&upload_name, size),
+                })
                 .await?;
             tracing::debug!(
                 type_cdn = upload.type_cdn,
