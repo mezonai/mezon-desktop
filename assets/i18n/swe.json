@@ -3359,6 +3359,7 @@
   "message.addAMessage": "Lägg till ett meddelande (Valfritt)",
   "message.attachment.fromPrivateChannel": "Media från en privat kanal",
   "message.attachment.uploading": "Laddar upp...",
+  "message.attachment.finishing": "Slutför...",
   "message.attachment.uploadFailed": "Uppladdningen misslyckades",
   "message.attachment.uploadFailedInvalidFile": "Uppladdningen misslyckades: den här filen kan inte laddas upp. Kontrollera filnamnet och försök igen.",
   "message.attachment.uploadFailedRetry": "Uppladdningen misslyckades. Kontrollera din anslutning och försök igen.",

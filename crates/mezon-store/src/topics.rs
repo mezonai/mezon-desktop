@@ -1298,7 +1298,7 @@ impl TopicsStore {
             let ack = if has_attachments {
                 let files: Vec<UploadFile> = attachments
                     .into_iter()
-                    .map(|attachment| attachment.into_upload(parent_channel_id))
+                    .map(|attachment| attachment.into_upload(parent_channel_id, false))
                     .collect();
                 let presigned = match api.presign_files(files).await {
                     Ok(presigned) => presigned,
@@ -1357,7 +1357,9 @@ impl TopicsStore {
                         transport_mentions,
                         transport_hashtags,
                         transport_emojis,
-                        deferred_presigned.is_some().then(Vec::new),
+                        deferred_presigned
+                            .is_some()
+                            .then(mezon_client::transport::PresignMarkers::default),
                         reply_ref.clone(),
                         send_flags,
                     )

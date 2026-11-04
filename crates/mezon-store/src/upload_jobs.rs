@@ -8,7 +8,7 @@ use mezon_client::{AttachmentUploadOutcome, ResumableUpload};
 use serde::{Deserialize, Serialize};
 
 use crate::ids::UserId;
-use crate::presign::PRESIGN_PENDING_MAX_AGE_SEC;
+use crate::presign::{PRESIGN_INGEST_PENDING_MAX_AGE_SEC, PRESIGN_PENDING_MAX_AGE_SEC};
 
 const PRESIGNED_URL_LIFETIME_SEC: i64 = 15 * 60;
 const RETENTION_SEC: i64 = 7 * 24 * 60 * 60;
@@ -90,11 +90,29 @@ impl UploadJob {
     }
 
     pub fn resumable_at(&self, now: i64) -> bool {
-        now - self.started_at < PRESIGN_PENDING_MAX_AGE_SEC
+        let window = if self.streams_while_uploading() {
+            PRESIGN_INGEST_PENDING_MAX_AGE_SEC
+        } else {
+            PRESIGN_PENDING_MAX_AGE_SEC
+        };
+        now - self.started_at < window
+    }
+
+    fn streams_while_uploading(&self) -> bool {
+        !self.pending.is_empty()
+            && self
+                .pending
+                .iter()
+                .all(|p| p.upload.streams_while_uploading())
     }
 
     pub fn urls_valid_at(&self, now: i64) -> bool {
-        now - self.started_at < PRESIGNED_URL_LIFETIME_SEC
+        let lifetime = if self.streams_while_uploading() {
+            PRESIGN_INGEST_PENDING_MAX_AGE_SEC
+        } else {
+            PRESIGNED_URL_LIFETIME_SEC
+        };
+        now - self.started_at < lifetime
     }
 
     pub fn worth_keeping_at(&self, now: i64) -> bool {
@@ -130,6 +148,7 @@ impl UploadJob {
 
     pub fn record(&mut self, outcome: &AttachmentUploadOutcome) {
         let (key, uploaded) = match outcome {
+            AttachmentUploadOutcome::Storing(_) => return,
             AttachmentUploadOutcome::Uploaded(key) => (key, true),
             AttachmentUploadOutcome::Failed(key) => (key, false),
         };
@@ -455,6 +474,36 @@ mod tests {
         assert!(!job.note_sync_failure());
     }
 
+    fn ingest_upload(path: &str) -> ResumableUpload {
+        serde_json::from_value(serde_json::json!({
+            "plan": {"Ingest": {
+                "put_url": "https://s3.example/put",
+                "ingest_url": "https://ingest.example/put",
+                "path": path,
+                "content_type": "video/mp4",
+                "size": 10
+            }}
+        }))
+        .expect("plan")
+    }
+
+    #[test]
+    fn an_ingest_job_resumes_for_as_long_as_the_ingest_keeps_it() {
+        let mut job = job(1_000);
+        job.pending.push(PendingUpload {
+            key: "clip".into(),
+            upload: ingest_upload("/tmp/clip.mp4"),
+        });
+        assert!(job.resumable_at(1_000 + PRESIGN_PENDING_MAX_AGE_SEC));
+        assert!(job.urls_valid_at(1_000 + PRESIGNED_URL_LIFETIME_SEC));
+        assert!(!job.resumable_at(1_000 + PRESIGN_INGEST_PENDING_MAX_AGE_SEC));
+        job.pending.push(PendingUpload {
+            key: "photo".into(),
+            upload: single_upload("/tmp/photo.png"),
+        });
+        assert!(!job.resumable_at(1_000 + PRESIGN_PENDING_MAX_AGE_SEC));
+    }
+
     #[test]
     fn a_job_resumes_only_inside_the_presign_window() {
         let job = job(1_000);
@@ -469,6 +518,8 @@ mod tests {
             key: "b".into(),
             upload: single_upload("/tmp/b.png"),
         });
+        job.record(&AttachmentUploadOutcome::Storing("b".into()));
+        assert_eq!(job.pending_keys(), vec!["b".to_string()]);
         job.record(&AttachmentUploadOutcome::Uploaded("b".into()));
         job.record(&AttachmentUploadOutcome::Uploaded("b".into()));
         assert!(job.pending.is_empty());

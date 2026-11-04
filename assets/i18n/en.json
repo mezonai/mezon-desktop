@@ -3356,6 +3356,7 @@
   "message.addAMessage": "Add a message (Optional)",
   "message.attachment.fromPrivateChannel": "Media from private channel",
   "message.attachment.uploading": "Uploading...",
+  "message.attachment.finishing": "Finishing...",
   "message.attachment.uploadFailed": "Upload failed",
   "message.attachment.uploadFailedInvalidFile": "Upload failed: this file can't be uploaded. Please check the file name and try again.",
   "message.attachment.uploadFailedRetry": "Upload failed. Please check your connection and try again.",

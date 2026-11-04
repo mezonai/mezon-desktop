@@ -3359,6 +3359,7 @@
   "message.addAMessage": "メッセージを追加（オプション）",
   "message.attachment.fromPrivateChannel": "プライベートチャンネルのメディア",
   "message.attachment.uploading": "アップロード中...",
+  "message.attachment.finishing": "完了処理中...",
   "message.attachment.uploadFailed": "アップロードに失敗しました",
   "message.attachment.uploadFailedInvalidFile": "アップロードに失敗しました：このファイルはアップロードできません。ファイル名を確認してもう一度お試しください。",
   "message.attachment.uploadFailedRetry": "アップロードに失敗しました。接続を確認してもう一度お試しください。",

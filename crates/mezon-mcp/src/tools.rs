@@ -1992,7 +1992,7 @@ impl McpBackend {
                 Vec::new(),
                 Default::default(),
                 Vec::new(),
-                Some(Vec::new()),
+                Some(Default::default()),
                 Default::default(),
             )
             .await?;
@@ -2006,7 +2006,7 @@ impl McpBackend {
                 Vec::new(),
                 Default::default(),
                 Vec::new(),
-                vec![key],
+                mezon_client::transport::PresignMarkers::finished(vec![key]),
                 sent.create_time.max(0) as u32,
                 mode,
                 is_public,
@@ -2567,6 +2567,7 @@ async fn build_upload_file(path: &Path, channel_id: i64) -> anyhow::Result<Uploa
         duration: 0,
         thumbnail: None,
         channel_id,
+        stream_while_uploading: false,
     })
 }
 

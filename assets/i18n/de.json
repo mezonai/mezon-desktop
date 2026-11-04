@@ -3359,6 +3359,7 @@
   "message.addAMessage": "Eine Nachricht hinzufügen (optional)",
   "message.attachment.fromPrivateChannel": "Medien aus einem privaten Kanal",
   "message.attachment.uploading": "Wird hochgeladen...",
+  "message.attachment.finishing": "Wird abgeschlossen...",
   "message.attachment.uploadFailed": "Hochladen fehlgeschlagen",
   "message.attachment.uploadFailedInvalidFile": "Upload fehlgeschlagen: Diese Datei kann nicht hochgeladen werden. Bitte überprüfe den Dateinamen und versuche es erneut.",
   "message.attachment.uploadFailedRetry": "Upload fehlgeschlagen. Bitte überprüfe deine Verbindung und versuche es erneut.",

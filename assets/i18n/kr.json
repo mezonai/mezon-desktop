@@ -3359,6 +3359,7 @@
   "message.addAMessage": "메시지 추가 (선택 사항)",
   "message.attachment.fromPrivateChannel": "비공개 채널의 미디어",
   "message.attachment.uploading": "업로드 중...",
+  "message.attachment.finishing": "마무리 중...",
   "message.attachment.uploadFailed": "업로드 실패",
   "message.attachment.uploadFailedInvalidFile": "업로드 실패: 이 파일은 업로드할 수 없습니다. 파일 이름을 확인한 후 다시 시도하세요.",
   "message.attachment.uploadFailedRetry": "업로드 실패. 연결 상태를 확인한 후 다시 시도하세요.",

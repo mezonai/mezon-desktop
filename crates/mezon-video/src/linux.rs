@@ -236,6 +236,10 @@ impl PlayerImpl {
             .unwrap_or(0.0)
     }
 
+    pub fn ready_to_seek(&self) -> bool {
+        self.playbin.current_state() == gst::State::Playing && self.current_time() > 0.1
+    }
+
     pub fn seek(&self, to_seconds: f64) {
         let target = if to_seconds.is_finite() && to_seconds >= 0.0 {
             to_seconds

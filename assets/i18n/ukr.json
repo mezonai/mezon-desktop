@@ -3358,6 +3358,7 @@
   "message.addAMessage": "Додати повідомлення (необов'язково)",
   "message.attachment.fromPrivateChannel": "Медіа з приватного каналу",
   "message.attachment.uploading": "Завантаження...",
+  "message.attachment.finishing": "Завершення...",
   "message.attachment.uploadFailed": "Не вдалося завантажити",
   "message.attachment.uploadFailedInvalidFile": "Не вдалося завантажити: цей файл неможливо завантажити. Перевірте назву файлу та спробуйте ще раз.",
   "message.attachment.uploadFailedRetry": "Не вдалося завантажити. Перевірте з'єднання та спробуйте ще раз.",
