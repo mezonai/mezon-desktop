@@ -19,6 +19,7 @@ const INGEST_PROBE_WINDOW_MS: u128 = 3000;
 const INIT_SEGMENT_MAX_BYTES: usize = 64 * 1024;
 const TRACK_MATRIX_ONE: i32 = 0x10000;
 const HLS_END_TAG: &str = "#EXT-X-ENDLIST";
+const HLS_VARIANT_TAG: &str = "#EXT-X-STREAM-INF";
 const PLAYLIST_MAX_BYTES: usize = 2 * 1024 * 1024;
 const GROWING_PLAYLIST_NEEDS_SNAPSHOT: bool = cfg!(target_os = "linux");
 
@@ -112,7 +113,7 @@ pub async fn growing_playlist(playlist: &str) -> GrowingPlaylist {
     else {
         return GrowingPlaylist::Unknown;
     };
-    if text.contains(HLS_END_TAG) {
+    if text.contains(HLS_END_TAG) || text.contains(HLS_VARIANT_TAG) {
         return GrowingPlaylist::Finished(segment_starts(&text));
     }
     snapshot_file(playlist, &text)
