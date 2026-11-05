@@ -806,14 +806,8 @@ impl RenderOnce for ContextMenu {
                     };
                     let mut label_col = v_flex().flex_1().child(div().child(label));
                     if let Some(sub_text) = sub_text {
-                        label_col = label_col.child(
-                            div()
-                                .ml(px(8.))
-                                .mb(px(4.))
-                                .text_xs()
-                                .text_color(text)
-                                .child(sub_text),
-                        );
+                        label_col = label_col
+                            .child(div().mb(px(4.)).text_xs().text_color(text).child(sub_text));
                     }
                     let parent_dismiss = dismiss.clone();
                     panel = panel.child(
@@ -885,8 +879,10 @@ impl RenderOnce for ContextMenu {
                                     }
                                 })
                             })
+                            .child(div().flex_1().child(label))
                             .child(
                                 div()
+                                    .flex_shrink_0()
                                     .w(px(16.))
                                     .h(px(16.))
                                     .rounded(px(4.))
@@ -904,7 +900,6 @@ impl RenderOnce for ContextMenu {
                                         )
                                     }),
                             )
-                            .child(div().flex_1().child(label))
                             .on_click(move |_: &ClickEvent, window, cx| {
                                 on_click(window, cx);
                                 if let Some(dismiss) = &dismiss {
