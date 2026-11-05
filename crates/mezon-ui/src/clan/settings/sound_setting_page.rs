@@ -4,11 +4,13 @@ use gpui::{
     relative, size, uniform_list,
 };
 use mezon_store::{
-    BadgeService, ClanId, ClanMembersStore, ClanSound, PermissionStore, Settings, StickerEvent,
-    StickerStore, UserId, VoiceStore,
+    ClanId, ClanMembersStore, ClanSound, PermissionStore, Settings, StickerEvent, StickerStore,
+    UserId, VoiceStore,
 };
 
-use super::sound_picker::{SoundEditTarget, SoundPicker, SoundPickerEvent};
+use super::sound_picker::{
+    SoundEditTarget, SoundManagementPermissions, SoundPicker, SoundPickerEvent,
+};
 use crate::app::shell::Shell;
 use crate::components::primitives::{
     Avatar, Button, ButtonVariants, Icon, IconName, Sizable, Size, h_flex, v_flex,
@@ -34,7 +36,6 @@ struct SoundCardData {
     creator_name: Option<SharedString>,
     creator_avatar: Option<SharedString>,
     can_manage: bool,
-    can_edit: bool,
 }
 
 fn sound_grid_columns() -> usize {
@@ -189,25 +190,11 @@ impl SoundSettingPage {
             .sticker_store
             .read(cx)
             .sounds_for_clan(&self.clan_id_str);
-        let can_edit = PermissionStore::global(cx)
-            .read(cx)
-            .clan_settings_permissions(self.clan_id, cx)
-            .has_manage_clan;
+        let permissions = SoundManagementPermissions::for_clan(self.clan_id, cx);
         self.grid_cells = sounds
             .iter()
-            .map(|sound| self.card_data(sound, can_edit, cx))
+            .map(|sound| self.card_data(sound, permissions.can_manage(&sound.creator_id), cx))
             .collect();
-    }
-
-    fn can_manage_sound(&self, creator_id: &str, has_manage_clan: bool, cx: &App) -> bool {
-        if has_manage_clan {
-            return true;
-        }
-        let current = BadgeService::global(cx)
-            .read(cx)
-            .current_user_id(cx)
-            .map(|id| id.get().to_string());
-        current.is_some_and(|uid| uid == creator_id)
     }
 
     fn creator_display(
@@ -239,7 +226,7 @@ impl SoundSettingPage {
         (Some(name), avatar)
     }
 
-    fn card_data(&self, sound: &ClanSound, can_edit: bool, cx: &App) -> SoundCardData {
+    fn card_data(&self, sound: &ClanSound, can_manage: bool, cx: &App) -> SoundCardData {
         let (creator_name, creator_avatar) = self.creator_display(&sound.creator_id, cx);
         SoundCardData {
             id: SharedString::from(sound.id.clone()),
@@ -248,8 +235,7 @@ impl SoundSettingPage {
             download_name: sound_download_name(&sound.shortname, &sound.src),
             creator_name,
             creator_avatar,
-            can_manage: self.can_manage_sound(&sound.creator_id, can_edit, cx),
-            can_edit,
+            can_manage,
         }
     }
 
@@ -259,11 +245,9 @@ impl SoundSettingPage {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if editing.is_some()
-            && !PermissionStore::global(cx)
-                .read(cx)
-                .clan_settings_permissions(self.clan_id, cx)
-                .has_manage_clan
+        if editing
+            .as_ref()
+            .is_some_and(|target| !target.can_manage(self.clan_id, cx))
         {
             return;
         }
@@ -585,7 +569,7 @@ fn render_sound_card(
                         .truncate()
                         .child(shortname.clone()),
                 )
-                .when(sound.can_edit, |el| {
+                .when(sound.can_manage, |el| {
                     let edit_entity = entity.clone();
                     let edit_id = sound_id.clone();
                     el.child(

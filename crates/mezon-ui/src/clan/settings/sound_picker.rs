@@ -11,8 +11,8 @@ use mezon_audio::{
     AudioPlayer, DecodedPcm, estimated_mono_wav_bytes, process_pcm, process_pcm_to_wav,
 };
 use mezon_store::{
-    ClanId, EMOTICON_SHORTNAME_MAX, MAX_SOUND_BYTES, PermissionStore, Settings, StickerStore,
-    VoiceStore, is_valid_emoticon_shortname, validate_sound_file,
+    BadgeService, ClanId, EMOTICON_SHORTNAME_MAX, MAX_SOUND_BYTES, PermissionStore, Settings,
+    StickerStore, UserId, VoiceStore, is_valid_emoticon_shortname, validate_sound_file,
 };
 
 use crate::app::shell::Shell;
@@ -241,9 +241,44 @@ pub struct SoundEditTarget {
     pub source: String,
 }
 
+pub(super) struct SoundManagementPermissions {
+    current_user_id: Option<UserId>,
+    has_manage_clan: bool,
+}
+
+impl SoundManagementPermissions {
+    pub(super) fn for_clan(clan_id: ClanId, cx: &App) -> Self {
+        Self {
+            current_user_id: BadgeService::global(cx).read(cx).current_user_id(cx),
+            has_manage_clan: PermissionStore::global(cx)
+                .read(cx)
+                .clan_settings_permissions(clan_id, cx)
+                .has_manage_clan,
+        }
+    }
+
+    pub(super) fn can_manage(&self, creator_id: &str) -> bool {
+        self.has_manage_clan
+            || self.current_user_id.is_some_and(|user_id| {
+                user_id.get() > 0 && creator_id.parse::<UserId>().ok() == Some(user_id)
+            })
+    }
+}
+
 impl SoundEditTarget {
-    fn can_rename(&self, name: &str, has_manage_clan: bool) -> bool {
-        has_manage_clan && is_valid_emoticon_shortname(name) && self.shortname != name
+    pub(super) fn can_manage(&self, clan_id: ClanId, cx: &App) -> bool {
+        let permissions = SoundManagementPermissions::for_clan(clan_id, cx);
+        StickerStore::global(cx)
+            .read(cx)
+            .get_sound(&self.id)
+            .is_some_and(|sound| {
+                sound.clan_id.parse::<ClanId>().ok() == Some(clan_id)
+                    && permissions.can_manage(&sound.creator_id)
+            })
+    }
+
+    fn can_rename(&self, name: &str, can_manage: bool) -> bool {
+        can_manage && is_valid_emoticon_shortname(name) && self.shortname != name
     }
 }
 
@@ -388,7 +423,6 @@ impl SoundPicker {
             return;
         };
         let client = cx.http_client();
-        let locale = self.settings.read(cx).language.clone();
         self.decode_pending = true;
         self._decode_task = Some(cx.spawn(async move |this, cx| {
             let result = async {
@@ -416,9 +450,9 @@ impl SoundPicker {
                     }
                     Err(_) => {
                         this.decode_failed = true;
-                        Shell::global(cx).update(cx, |shell, cx| {
-                            shell.error(sound_error_message(&locale, "decode_failed"), cx);
-                        });
+                        tracing::warn!(
+                            "sound edit preview unavailable; renaming remains available"
+                        );
                     }
                 }
                 cx.notify();
@@ -705,10 +739,7 @@ impl SoundPicker {
         }
         let name = self.name_input.read(cx).value().trim().to_string();
         if let Some(editing) = &self.editing {
-            let permissions = PermissionStore::global(cx)
-                .read(cx)
-                .clan_settings_permissions(self.clan_id, cx);
-            return editing.can_rename(&name, permissions.has_manage_clan);
+            return editing.can_rename(&name, editing.can_manage(self.clan_id, cx));
         }
         if !is_valid_emoticon_shortname(&name) {
             return false;
@@ -1376,7 +1407,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn rename_requires_current_manage_clan_permission_and_a_changed_valid_name() {
+    fn rename_requires_management_access_and_a_changed_valid_name() {
         let target = SoundEditTarget {
             id: "sound-id".into(),
             shortname: "original".into(),
@@ -1391,6 +1422,75 @@ mod tests {
         }
         assert!(!target.can_rename(&"a".repeat(EMOTICON_SHORTNAME_MAX + 1), true));
         assert!(target.can_rename(&"a".repeat(EMOTICON_SHORTNAME_MAX), true));
+    }
+
+    #[test]
+    fn sound_creator_and_clan_manager_can_manage_sounds() {
+        let mut permissions = SoundManagementPermissions {
+            current_user_id: Some(UserId::new(42)),
+            has_manage_clan: false,
+        };
+        assert!(permissions.can_manage("42"));
+        assert!(!permissions.can_manage("43"));
+        for invalid in ["", "0", "invalid"] {
+            assert!(!permissions.can_manage(invalid));
+        }
+
+        permissions.has_manage_clan = true;
+        assert!(permissions.can_manage("43"));
+        permissions.has_manage_clan = false;
+        assert!(!permissions.can_manage("43"));
+        assert!(permissions.can_manage("42"));
+
+        permissions.current_user_id = Some(UserId::new(43));
+        assert!(!permissions.can_manage("42"));
+        permissions.current_user_id = None;
+        assert!(!permissions.can_manage("43"));
+        permissions.current_user_id = Some(UserId::new(0));
+        assert!(!permissions.can_manage("0"));
+    }
+
+    #[gpui::test]
+    fn forbidden_edit_preview_does_not_require_an_error_modal(cx: &mut gpui::TestAppContext) {
+        let settings = cx.update(|cx| {
+            mezon_theme::set_theme(mezon_theme::resolve_theme("dark"), cx);
+            cx.set_http_client(gpui::http_client::FakeHttpClient::create(|_| async {
+                Ok(gpui::http_client::Response::builder()
+                    .status(403)
+                    .body(gpui::http_client::AsyncBody::empty())
+                    .unwrap())
+            }));
+            let api = Arc::new(mezon_client::AppApi::new(
+                Arc::new(mezon_client::TransportClient::new(String::new())),
+                String::new(),
+            ));
+            mezon_store::RealtimeDispatch::init(api.clone(), cx);
+            mezon_store::ClanList::init(api.clone(), cx);
+            mezon_store::ChannelPermissionsStore::init(api.clone(), cx);
+            let auth = cx.new(|_| mezon_store::AuthState::NotAuthenticated);
+            BadgeService::init(auth.clone(), cx);
+            PermissionStore::init(api.clone(), auth, cx);
+            StickerStore::init(api.clone(), cx);
+            VoiceStore::init(api, cx);
+            cx.new(|_| Settings::default())
+        });
+        let target = SoundEditTarget {
+            id: "1".into(),
+            shortname: "original".into(),
+            source: "https://test.example/sound.mp3".into(),
+        };
+        let (picker, cx) = cx.add_window_view(|window, cx| {
+            SoundPicker::new(ClanId::new(1), Some(target), settings, window, cx)
+        });
+        cx.run_until_parked();
+        picker.read_with(cx, |picker, _| {
+            assert!(!picker.decode_pending);
+            assert!(picker.decode_failed);
+            assert!(!picker.can_preview());
+            let target = picker.editing.as_ref().unwrap();
+            assert!(target.can_rename("renamed", true));
+            assert_eq!(target.source, "https://test.example/sound.mp3");
+        });
     }
 
     #[test]
