@@ -1501,6 +1501,7 @@ fn render_photo(
             .relative()
             .w(px(att.display_width))
             .h(px(att.display_height))
+            .max_w_full()
             .rounded_md()
             .overflow_hidden();
         el = el.when(
@@ -1565,6 +1566,7 @@ fn render_photo(
             .relative()
             .w(px(att.display_width))
             .h(px(att.display_height))
+            .max_w_full()
             .rounded_md()
             .overflow_hidden()
             .flex()
