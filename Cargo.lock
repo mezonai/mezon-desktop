@@ -5552,6 +5552,7 @@ dependencies = [
  "tracing-subscriber",
  "tracing-tracy",
  "tracy-client",
+ "windows 0.61.3",
  "woff2-patched",
 ]
 

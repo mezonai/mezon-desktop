@@ -1,4 +1,6 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+#[cfg(any(windows, test))]
+mod hang_dump;
 #[cfg(any(target_os = "linux", test))]
 mod hang_probe;
 mod mcp;
@@ -399,6 +401,8 @@ fn install_foreground_watchdog(cx: &mut gpui::App) {
     static START: OnceLock<Instant> = OnceLock::new();
     static HEARTBEAT_MS: AtomicU64 = AtomicU64::new(0);
     let start = *START.get_or_init(Instant::now);
+    #[cfg(windows)]
+    hang_dump::remember_main_thread();
 
     const WATCHDOG_HEARTBEAT_SECS: u64 = 5;
 
@@ -502,7 +506,15 @@ fn capture_hang_sample(stalled_secs: u64) {
     }
 }
 
-#[cfg(not(any(target_os = "macos", target_os = "linux")))]
+#[cfg(windows)]
+fn capture_hang_sample(stalled_secs: u64) {
+    hang_dump::capture(stalled_secs, &log_dir(), |line| {
+        eprintln!("{line}");
+        tracing::error!("{line}");
+    });
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "linux", windows)))]
 fn capture_hang_sample(_stalled_secs: u64) {}
 
 fn install_panic_hook() {
