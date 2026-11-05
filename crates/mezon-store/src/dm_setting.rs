@@ -109,8 +109,22 @@ impl DmSettingStore {
     }
 }
 
+#[derive(Debug)]
+struct DmSendStep;
+
+impl std::fmt::Display for DmSendStep {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("direct message send step")
+    }
+}
+
+pub(crate) fn mark_dm_send_step(err: anyhow::Error) -> anyhow::Error {
+    err.context(DmSendStep)
+}
+
 pub fn is_new_dm_denied(err: &anyhow::Error) -> bool {
-    api_status_from_error(err).is_some_and(ApiStatusError::is_permission_denied)
+    err.downcast_ref::<DmSendStep>().is_none()
+        && api_status_from_error(err).is_some_and(ApiStatusError::is_permission_denied)
 }
 
 #[cfg(test)]
@@ -130,5 +144,19 @@ mod tests {
         assert!(is_new_dm_denied(&denied));
         assert!(!is_new_dm_denied(&other));
         assert!(!is_new_dm_denied(&anyhow::anyhow!("offline")));
+    }
+
+    #[test]
+    fn permission_denied_from_the_send_step_is_not_a_new_dm_denial() {
+        let denied: anyhow::Error = ApiStatusError {
+            code: ApiStatusError::PERMISSION_DENIED,
+        }
+        .into();
+        let marked = mark_dm_send_step(denied);
+        assert!(!is_new_dm_denied(&marked));
+        assert_eq!(
+            api_status_from_error(&marked).map(|status| status.code),
+            Some(ApiStatusError::PERMISSION_DENIED)
+        );
     }
 }

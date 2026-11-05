@@ -4168,7 +4168,12 @@ impl VoiceStore {
                             cx,
                         )
                     });
-                    card.detach();
+                    cx.spawn(async move |_, _| {
+                        if let Err(err) = card.await {
+                            tracing::warn!("send flower token card dm failed: {err}");
+                        }
+                    })
+                    .detach();
                     let still_in_room = this
                         .connection
                         .connected_channel()
