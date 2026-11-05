@@ -5191,6 +5191,8 @@ impl MezonTransport {
             "SfuBreakoutMerge" => 216,
             "SetOverrideEveryoneChannel" => 217,
             "GetOverrideEveryoneChannel" => 218,
+            "GetDMSetting" => 219,
+            "UpdateDMSetting" => 220,
             _ => {
                 tracing::warn!("unknown API name: {api_name}");
                 return None;
@@ -7867,11 +7869,33 @@ impl MezonTransport {
             .await?;
 
         if code != 0 {
-            return Err(anyhow::anyhow!("API error: code={}", code));
+            return Err(api_status_error(code));
         }
 
         let channel = api::ChannelDescription::decode(response.as_slice())?;
         Ok(Self::channel_desc_from_proto(channel))
+    }
+
+    pub async fn get_dm_setting(&self) -> Result<bool> {
+        let cid = self.generate_cid();
+        let body = api::NoParams::default().encode_to_vec();
+        let (code, response) = self.send_api_request(cid, "GetDMSetting", body).await?;
+        if code != 0 {
+            return Err(api_status_error(code));
+        }
+        let setting = api::DmSetting::decode(response.as_slice())?;
+        Ok(setting.only_friends_dm)
+    }
+
+    pub async fn update_dm_setting(&self, only_friends_dm: bool) -> Result<bool> {
+        let cid = self.generate_cid();
+        let body = api::UpdateDmSettingRequest { only_friends_dm }.encode_to_vec();
+        let (code, response) = self.send_api_request(cid, "UpdateDMSetting", body).await?;
+        if code != 0 {
+            return Err(api_status_error(code));
+        }
+        let setting = api::DmSetting::decode(response.as_slice())?;
+        Ok(setting.only_friends_dm)
     }
 
     /// Delete a channel or thread.
@@ -13257,6 +13281,8 @@ mod tests {
         assert_eq!(t.get_api_index("SfuBreakoutMerge"), Some(216));
         assert_eq!(t.get_api_index("SetOverrideEveryoneChannel"), Some(217));
         assert_eq!(t.get_api_index("GetOverrideEveryoneChannel"), Some(218));
+        assert_eq!(t.get_api_index("GetDMSetting"), Some(219));
+        assert_eq!(t.get_api_index("UpdateDMSetting"), Some(220));
         assert_eq!(t.get_api_index("DefinitelyNotAnApi"), None);
     }
 

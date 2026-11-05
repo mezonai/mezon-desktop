@@ -3484,7 +3484,12 @@ impl MessagesStore {
                                 cx,
                             )
                         });
-                        card.detach();
+                        cx.spawn(async move |_, _| {
+                            if let Err(err) = card.await {
+                                tracing::warn!("send coffee token card dm failed: {err}");
+                            }
+                        })
+                        .detach();
                     }
                 })
                 .ok();

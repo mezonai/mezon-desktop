@@ -1,7 +1,7 @@
 use crate::components::primitives::{Label, Switch, h_flex, v_flex};
 use crate::theme::ActiveTheme;
 use gpui::{Context, Entity, FontWeight, Window, prelude::*};
-use mezon_store::Settings;
+use mezon_store::{DmSettingStore, Settings};
 
 pub struct ChatPage {
     settings: Entity<Settings>,
@@ -10,6 +10,9 @@ pub struct ChatPage {
 impl ChatPage {
     pub fn new(settings: Entity<Settings>, cx: &mut Context<Self>) -> Self {
         cx.observe(&settings, |_, _, cx| cx.notify()).detach();
+        if let Some(dm_setting) = DmSettingStore::try_global(cx) {
+            cx.observe(&dm_setting, |_, _, cx| cx.notify()).detach();
+        }
         Self { settings }
     }
 
@@ -64,6 +67,53 @@ impl ChatPage {
                     })),
             )
     }
+
+    fn only_friends_row(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let checked =
+            DmSettingStore::try_global(cx).is_some_and(|store| store.read(cx).only_friends_dm());
+        let theme = cx.theme().clone();
+        let locale = self.settings.read(cx).language.clone();
+        h_flex()
+            .w_full()
+            .items_center()
+            .justify_between()
+            .gap_4()
+            .rounded_lg()
+            .bg(theme.tokens.theme_setting_nav)
+            .border_1()
+            .border_color(theme.border)
+            .p_4()
+            .child(
+                v_flex()
+                    .min_w_0()
+                    .gap_1()
+                    .child(
+                        Label::new(mezon_i18n::t(&locale, "setting.chat.onlyFriendsDm.title"))
+                            .text_base()
+                            .font_weight(FontWeight::MEDIUM)
+                            .text_color(theme.text_primary),
+                    )
+                    .child(
+                        Label::new(mezon_i18n::t(
+                            &locale,
+                            "setting.chat.onlyFriendsDm.description",
+                        ))
+                        .text_sm()
+                        .text_color(theme.tokens.text_theme_primary),
+                    ),
+            )
+            .child(
+                Switch::new("only-friends-dm")
+                    .checked(checked)
+                    .on_click(cx.listener(move |_, _, _, cx| {
+                        let Some(store) = DmSettingStore::try_global(cx) else {
+                            return;
+                        };
+                        let enabled = !store.read(cx).only_friends_dm();
+                        store.update(cx, |store, cx| store.set_only_friends(enabled, cx));
+                    })),
+            )
+    }
 }
 
 impl Render for ChatPage {
@@ -89,5 +139,6 @@ impl Render for ChatPage {
                 |s| s.grammar_correction_enabled = !s.grammar_correction_enabled,
                 cx,
             ))
+            .child(self.only_friends_row(cx))
     }
 }

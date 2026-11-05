@@ -994,6 +994,7 @@ fn open_main_window(
     mezon_store::RealtimeDispatch::init(api.clone(), cx);
     mezon_store::ConnectionStore::init(transport, api.clone(), auth_state.clone(), cx);
     mezon_store::AccountStore::init(api.clone(), cx);
+    mezon_store::DmSettingStore::init(api.clone(), cx);
     mezon_store::ClanList::init(api.clone(), cx);
     mezon_store::ChannelList::init(api.clone(), cx);
     mezon_store::ChannelSettingsStore::init(api.clone(), cx);

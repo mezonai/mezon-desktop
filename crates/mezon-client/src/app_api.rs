@@ -2128,6 +2128,14 @@ impl AppApi {
         self.transport.create_direct_channel(user_ids).await
     }
 
+    pub async fn get_dm_setting(&self) -> Result<bool> {
+        self.transport.get_dm_setting().await
+    }
+
+    pub async fn update_dm_setting(&self, only_friends_dm: bool) -> Result<bool> {
+        self.transport.update_dm_setting(only_friends_dm).await
+    }
+
     /// List the current user's friends, with relationship state preserved.
     pub async fn list_friends(&self) -> Result<Vec<ApiFriend>> {
         self.transport.list_friends().await

@@ -575,7 +575,8 @@ impl DirectMessageStore {
             let content_json = body.into_content_json();
             let sent = api
                 .send_channel_message_structured(channel_id.get(), &content_json, mode)
-                .await?;
+                .await
+                .map_err(crate::dm_setting::mark_dm_send_step)?;
             this.update(cx, |this, cx| {
                 this.note_message(channel_id, sent.create_time, true, false, cx);
             })?;
@@ -692,7 +693,8 @@ impl DirectMessageStore {
                     send_mode,
                     message_code,
                 )
-                .await?;
+                .await
+                .map_err(crate::dm_setting::mark_dm_send_step)?;
             this.update(cx, |this, cx| {
                 this.note_message(channel_id, sent.create_time, true, false, cx);
             })?;
