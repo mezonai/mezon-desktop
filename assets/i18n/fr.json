@@ -4914,5 +4914,6 @@
   "setting.profile.changeCover": "Modifier la bannière",
   "setting.profile.uploadingCover": "Envoi de la bannière…",
   "setting.profile.chooseCover": "Choisir une bannière",
-  "setting.profile.coverUploadFailed": "Impossible d’envoyer la bannière. Utilisez JPEG, PNG, GIF ou WebP, jusqu’à 10 Mo."
+  "setting.profile.coverUploadFailed": "Impossible d’envoyer la bannière. Utilisez JPEG, PNG, GIF ou WebP, jusqu’à 10 Mo.",
+  "setting.profile.removeCover": "Supprimer la bannière"
 }

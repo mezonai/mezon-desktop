@@ -4914,5 +4914,6 @@
   "setting.profile.changeCover": "Change Cover",
   "setting.profile.uploadingCover": "Uploading cover…",
   "setting.profile.chooseCover": "Choose cover image",
-  "setting.profile.coverUploadFailed": "Unable to upload cover. Use JPEG, PNG, GIF or WebP up to 10 MB."
+  "setting.profile.coverUploadFailed": "Unable to upload cover. Use JPEG, PNG, GIF or WebP up to 10 MB.",
+  "setting.profile.removeCover": "Remove Cover"
 }

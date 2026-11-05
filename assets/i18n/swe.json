@@ -4915,5 +4915,6 @@
   "setting.profile.changeCover": "Ändra omslag",
   "setting.profile.uploadingCover": "Laddar upp omslag…",
   "setting.profile.chooseCover": "Välj omslagsbild",
-  "setting.profile.coverUploadFailed": "Det gick inte att ladda upp omslaget. Använd JPEG, PNG, GIF eller WebP upp till 10 MB."
+  "setting.profile.coverUploadFailed": "Det gick inte att ladda upp omslaget. Använd JPEG, PNG, GIF eller WebP upp till 10 MB.",
+  "setting.profile.removeCover": "Ta bort omslag"
 }

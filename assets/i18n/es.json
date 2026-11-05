@@ -4953,5 +4953,6 @@
   "setting.profile.changeCover": "Cambiar portada",
   "setting.profile.uploadingCover": "Subiendo portada…",
   "setting.profile.chooseCover": "Elegir portada",
-  "setting.profile.coverUploadFailed": "No se pudo subir la portada. Usa JPEG, PNG, GIF o WebP de hasta 10 MB."
+  "setting.profile.coverUploadFailed": "No se pudo subir la portada. Usa JPEG, PNG, GIF o WebP de hasta 10 MB.",
+  "setting.profile.removeCover": "Eliminar portada"
 }

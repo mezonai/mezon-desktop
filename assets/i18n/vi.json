@@ -4915,5 +4915,6 @@
   "setting.profile.changeCover": "Đổi ảnh bìa",
   "setting.profile.uploadingCover": "Đang tải ảnh bìa…",
   "setting.profile.chooseCover": "Chọn ảnh bìa",
-  "setting.profile.coverUploadFailed": "Không thể tải ảnh bìa. Hãy dùng JPEG, PNG, GIF hoặc WebP tối đa 10 MB."
+  "setting.profile.coverUploadFailed": "Không thể tải ảnh bìa. Hãy dùng JPEG, PNG, GIF hoặc WebP tối đa 10 MB.",
+  "setting.profile.removeCover": "Xóa ảnh bìa"
 }

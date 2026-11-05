@@ -4914,5 +4914,6 @@
   "setting.profile.changeCover": "Змінити обкладинку",
   "setting.profile.uploadingCover": "Завантаження обкладинки…",
   "setting.profile.chooseCover": "Вибрати обкладинку",
-  "setting.profile.coverUploadFailed": "Не вдалося завантажити обкладинку. Використовуйте JPEG, PNG, GIF або WebP розміром до 10 МБ."
+  "setting.profile.coverUploadFailed": "Не вдалося завантажити обкладинку. Використовуйте JPEG, PNG, GIF або WebP розміром до 10 МБ.",
+  "setting.profile.removeCover": "Видалити обкладинку"
 }

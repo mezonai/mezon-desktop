@@ -4914,5 +4914,6 @@
   "setting.profile.changeCover": "Змяніць вокладку",
   "setting.profile.uploadingCover": "Загрузка вокладкі…",
   "setting.profile.chooseCover": "Выбраць вокладку",
-  "setting.profile.coverUploadFailed": "Не ўдалося загрузіць вокладку. Выкарыстоўвайце JPEG, PNG, GIF або WebP памерам да 10 МБ."
+  "setting.profile.coverUploadFailed": "Не ўдалося загрузіць вокладку. Выкарыстоўвайце JPEG, PNG, GIF або WebP памерам да 10 МБ.",
+  "setting.profile.removeCover": "Выдаліць вокладку"
 }

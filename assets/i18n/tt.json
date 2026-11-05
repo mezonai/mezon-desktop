@@ -4927,5 +4927,6 @@
   "setting.profile.changeCover": "Тышлыкны үзгәртү",
   "setting.profile.uploadingCover": "Тышлык йөкләнә…",
   "setting.profile.chooseCover": "Тышлык рәсемен сайлау",
-  "setting.profile.coverUploadFailed": "Тышлыкны йөкләп булмады. 10 МБ кадәр JPEG, PNG, GIF яки WebP кулланыгыз."
+  "setting.profile.coverUploadFailed": "Тышлыкны йөкләп булмады. 10 МБ кадәр JPEG, PNG, GIF яки WebP кулланыгыз.",
+  "setting.profile.removeCover": "Тышлыкны бетерү"
 }

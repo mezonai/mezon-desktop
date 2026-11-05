@@ -4915,5 +4915,6 @@
   "setting.profile.changeCover": "Alterar capa",
   "setting.profile.uploadingCover": "Enviando capa…",
   "setting.profile.chooseCover": "Escolher capa",
-  "setting.profile.coverUploadFailed": "Não foi possível enviar a capa. Use JPEG, PNG, GIF ou WebP de até 10 MB."
+  "setting.profile.coverUploadFailed": "Não foi possível enviar a capa. Use JPEG, PNG, GIF ou WebP de até 10 MB.",
+  "setting.profile.removeCover": "Remover capa"
 }

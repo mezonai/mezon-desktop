@@ -4914,5 +4914,6 @@
   "setting.profile.changeCover": "Zmień okładkę",
   "setting.profile.uploadingCover": "Przesyłanie okładki…",
   "setting.profile.chooseCover": "Wybierz okładkę",
-  "setting.profile.coverUploadFailed": "Nie można przesłać okładki. Użyj JPEG, PNG, GIF lub WebP do 10 MB."
+  "setting.profile.coverUploadFailed": "Nie można przesłać okładki. Użyj JPEG, PNG, GIF lub WebP do 10 MB.",
+  "setting.profile.removeCover": "Usuń okładkę"
 }

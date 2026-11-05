@@ -48,6 +48,23 @@ struct ProfileState {
 }
 
 impl ProfileState {
+    fn can_remove_cover(&self, upload_in_progress: bool) -> bool {
+        !upload_in_progress
+            && !self.saving
+            && self
+                .banner
+                .as_ref()
+                .is_some_and(|banner| !banner.is_empty())
+    }
+
+    fn remove_cover(&mut self, upload_in_progress: bool) -> bool {
+        if !self.can_remove_cover(upload_in_progress) {
+            return false;
+        }
+        self.banner = None;
+        true
+    }
+
     fn from_account(account: &UserAccount) -> Self {
         let display_name: SharedString = account.display_name.clone().into();
         let about_me: SharedString = account.about_me.clone().unwrap_or_default().into();
@@ -1098,23 +1115,47 @@ impl ProfilePage {
                             .child(mezon_i18n::t(&locale, "setting.profile.cover")),
                     )
                     .child(
-                        h_flex().gap_3().child(
-                            GpuiButton::new("change-cover")
-                                .label(mezon_i18n::t(
-                                    &locale,
-                                    if self.cover_task.is_some() {
-                                        "setting.profile.uploadingCover"
-                                    } else {
-                                        "setting.profile.changeCover"
-                                    },
-                                ))
-                                .disabled(
-                                    self.cover_task.is_some()
-                                        || self.profile.as_ref().is_some_and(|p| p.saving),
-                                )
-                                .primary()
-                                .on_click(cx.listener(|this, _, _, cx| this.choose_cover(cx))),
-                        ),
+                        div()
+                            .grid()
+                            .grid_cols(2)
+                            .gap_5()
+                            .child(
+                                GpuiButton::new("change-cover")
+                                    .w_full()
+                                    .label(mezon_i18n::t(
+                                        &locale,
+                                        if self.cover_task.is_some() {
+                                            "setting.profile.uploadingCover"
+                                        } else {
+                                            "setting.profile.changeCover"
+                                        },
+                                    ))
+                                    .disabled(
+                                        self.cover_task.is_some()
+                                            || self.profile.as_ref().is_some_and(|p| p.saving),
+                                    )
+                                    .primary()
+                                    .on_click(cx.listener(|this, _, _, cx| this.choose_cover(cx))),
+                            )
+                            .child(
+                                GpuiButton::new("remove-cover")
+                                    .w_full()
+                                    .label(mezon_i18n::t(&locale, "setting.profile.removeCover"))
+                                    .text_color(theme.text_muted)
+                                    .border_1()
+                                    .border_color(theme.border)
+                                    .disabled(self.profile.as_ref().is_none_or(|profile| {
+                                        !profile.can_remove_cover(self.cover_task.is_some())
+                                    }))
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        let uploading = this.cover_task.is_some();
+                                        if let Some(profile) = &mut this.profile
+                                            && profile.remove_cover(uploading)
+                                        {
+                                            cx.notify();
+                                        }
+                                    })),
+                            ),
                     ),
             )
             .child(
@@ -1147,11 +1188,13 @@ impl ProfilePage {
                             .child(mezon_i18n::t(&locale, "profileSetting.avatar")),
                     )
                     .child(
-                        h_flex()
+                        div()
+                            .grid()
+                            .grid_cols(2)
                             .gap_5()
-                            .items_center()
                             .child(
                                 GpuiButton::new("change-avatar-btn")
+                                    .w_full()
                                     .label(mezon_i18n::t(&locale, "common.changeAvatar"))
                                     .text_color(theme.text_primary)
                                     .primary()
@@ -1227,6 +1270,7 @@ impl ProfilePage {
                             )
                             .child(
                                 GpuiButton::new("remove-avatar-btn")
+                                    .w_full()
                                     .label(mezon_i18n::t(&locale, "common.removeAvatar"))
                                     .text_color(theme.text_muted)
                                     .border_1()
@@ -1610,5 +1654,58 @@ impl ProfilePage {
                         .child(self.custom_status_bubble.clone()),
                 )
             })
+    }
+}
+
+#[cfg(test)]
+mod cover_tests {
+    use super::ProfileState;
+
+    fn profile(banner: Option<&str>) -> ProfileState {
+        ProfileState {
+            user_id: 7,
+            username: "user".into(),
+            display_name: "Name".into(),
+            about_me: "About".into(),
+            avatar_url: Some("avatar.png".into()),
+            banner: banner.map(Into::into),
+            original_banner: banner.map(Into::into),
+            logo_url: None,
+            status: "online".into(),
+            custom_status: "".into(),
+            original_display_name: "Name".into(),
+            original_about_me: "About".into(),
+            original_avatar_url: Some("avatar.png".into()),
+            original_logo_url: None,
+            loading: false,
+            saving: false,
+        }
+    }
+
+    #[test]
+    fn remove_cover_only_changes_draft_and_preserves_reset_value() {
+        let mut profile = profile(Some("cover.png"));
+        assert!(profile.remove_cover(false));
+        assert_eq!(profile.banner, None);
+        assert_eq!(profile.original_banner.as_deref(), Some("cover.png"));
+        assert_eq!(profile.avatar_url.as_deref(), Some("avatar.png"));
+        assert_eq!(profile.display_name.as_ref(), "Name");
+        assert!(!profile.remove_cover(false));
+    }
+
+    #[test]
+    fn remove_cover_is_unavailable_when_busy_or_empty() {
+        let mut profile = profile(Some("cover.png"));
+        assert!(!profile.remove_cover(true));
+        assert_eq!(profile.banner.as_deref(), Some("cover.png"));
+        profile.saving = true;
+        assert!(!profile.remove_cover(false));
+        assert_eq!(profile.banner.as_deref(), Some("cover.png"));
+        profile.saving = false;
+        for banner in [None, Some("")] {
+            profile.banner = banner.map(Into::into);
+            assert!(!profile.can_remove_cover(false));
+            assert!(!profile.remove_cover(false));
+        }
     }
 }

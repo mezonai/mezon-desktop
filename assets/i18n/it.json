@@ -4915,5 +4915,6 @@
   "setting.profile.changeCover": "Cambia copertina",
   "setting.profile.uploadingCover": "Caricamento copertina…",
   "setting.profile.chooseCover": "Scegli copertina",
-  "setting.profile.coverUploadFailed": "Impossibile caricare la copertina. Usa JPEG, PNG, GIF o WebP fino a 10 MB."
+  "setting.profile.coverUploadFailed": "Impossibile caricare la copertina. Usa JPEG, PNG, GIF o WebP fino a 10 MB.",
+  "setting.profile.removeCover": "Rimuovi copertina"
 }

@@ -5157,5 +5157,6 @@
   "setting.profile.changeCover": "Изменить обложку",
   "setting.profile.uploadingCover": "Загрузка обложки…",
   "setting.profile.chooseCover": "Выбрать обложку",
-  "setting.profile.coverUploadFailed": "Не удалось загрузить обложку. Используйте JPEG, PNG, GIF или WebP размером до 10 МБ."
+  "setting.profile.coverUploadFailed": "Не удалось загрузить обложку. Используйте JPEG, PNG, GIF или WebP размером до 10 МБ.",
+  "setting.profile.removeCover": "Удалить обложку"
 }

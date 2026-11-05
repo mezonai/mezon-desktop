@@ -4915,5 +4915,6 @@
   "setting.profile.changeCover": "커버 변경",
   "setting.profile.uploadingCover": "커버 업로드 중…",
   "setting.profile.chooseCover": "커버 이미지 선택",
-  "setting.profile.coverUploadFailed": "커버를 업로드할 수 없습니다. 10 MB 이하의 JPEG, PNG, GIF 또는 WebP를 사용하세요."
+  "setting.profile.coverUploadFailed": "커버를 업로드할 수 없습니다. 10 MB 이하의 JPEG, PNG, GIF 또는 WebP를 사용하세요.",
+  "setting.profile.removeCover": "커버 삭제"
 }
