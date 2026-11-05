@@ -4948,5 +4948,10 @@
   "chat.activityStrip.messageFrom": "Mensaje de {{name}}: {{message}}",
   "chat.activityStrip.hideAction": "Ocultar barra de fijados y temas",
   "chat.activityStrip.hideConfirm.title": "Ocultar barra de fijados y temas",
-  "chat.activityStrip.hideConfirm.description": "¿Ocultar la barra de fijados y temas de este canal? Volverá a aparecer automáticamente cuando haya un nuevo fijado o tema."
+  "chat.activityStrip.hideConfirm.description": "¿Ocultar la barra de fijados y temas de este canal? Volverá a aparecer automáticamente cuando haya un nuevo fijado o tema.",
+  "setting.profile.cover": "PORTADA DEL PERFIL",
+  "setting.profile.changeCover": "Cambiar portada",
+  "setting.profile.uploadingCover": "Subiendo portada…",
+  "setting.profile.chooseCover": "Elegir portada",
+  "setting.profile.coverUploadFailed": "No se pudo subir la portada. Usa JPEG, PNG, GIF o WebP de hasta 10 MB."
 }

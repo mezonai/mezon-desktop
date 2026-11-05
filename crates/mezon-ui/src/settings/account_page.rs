@@ -389,6 +389,10 @@ impl Render for AccountPage {
                             .h(px(BANNER_HEIGHT))
                             .w_full()
                             .bg(banner_color)
+                            .overflow_hidden()
+                            .children(account.banner.clone().filter(|url| !url.is_empty()).map(|url| {
+                                gpui::img(url).rounded_t_lg().w_full().h_full().object_fit(gpui::ObjectFit::Cover)
+                            }))
                             .rounded_t_lg(),
                     )
                     .child(

@@ -4909,5 +4909,10 @@
   "chat.activityStrip.messageFrom": "Bericht van {{name}}: {{message}}",
   "chat.activityStrip.hideAction": "Balk met vastgezette berichten en onderwerpen verbergen",
   "chat.activityStrip.hideConfirm.title": "Balk met vastgezette berichten en onderwerpen verbergen",
-  "chat.activityStrip.hideConfirm.description": "De balk met vastgezette berichten en onderwerpen voor dit kanaal verbergen? Deze verschijnt automatisch opnieuw bij een nieuwe pin of een nieuw onderwerp."
+  "chat.activityStrip.hideConfirm.description": "De balk met vastgezette berichten en onderwerpen voor dit kanaal verbergen? Deze verschijnt automatisch opnieuw bij een nieuwe pin of een nieuw onderwerp.",
+  "setting.profile.cover": "PROFIELOMSLAG",
+  "setting.profile.changeCover": "Omslag wijzigen",
+  "setting.profile.uploadingCover": "Omslag uploaden…",
+  "setting.profile.chooseCover": "Omslag kiezen",
+  "setting.profile.coverUploadFailed": "De omslag kon niet worden geüpload. Gebruik JPEG, PNG, GIF of WebP tot 10 MB."
 }

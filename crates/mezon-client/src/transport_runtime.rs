@@ -3649,6 +3649,7 @@ impl TransportClient {
         about_me: Option<&str>,
         logo: Option<&str>,
         dob_seconds: Option<u32>,
+        banner: Option<&str>,
     ) -> Result<()> {
         tracing::debug!("TransportClient::update_account() called");
 
@@ -3657,6 +3658,7 @@ impl TransportClient {
         let avatar_url = avatar_url.map(str::to_string);
         let about_me = about_me.map(str::to_string);
         let logo = logo.map(str::to_string);
+        let banner = banner.map(str::to_string);
 
         runtime()
             .spawn(async move {
@@ -3667,6 +3669,7 @@ impl TransportClient {
                         about_me.as_deref(),
                         logo.as_deref(),
                         dob_seconds,
+                        banner.as_deref(),
                     )
                     .await
             })

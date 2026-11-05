@@ -4910,5 +4910,10 @@
   "chat.activityStrip.messageFrom": "Nachricht von {{name}}: {{message}}",
   "chat.activityStrip.hideAction": "Anheftungs- und Themenleiste ausblenden",
   "chat.activityStrip.hideConfirm.title": "Anheftungs- und Themenleiste ausblenden",
-  "chat.activityStrip.hideConfirm.description": "Die Leiste mit Anheftungen und Themen für diesen Kanal ausblenden? Sie wird bei einer neuen Anheftung oder einem neuen Thema automatisch wieder angezeigt."
+  "chat.activityStrip.hideConfirm.description": "Die Leiste mit Anheftungen und Themen für diesen Kanal ausblenden? Sie wird bei einer neuen Anheftung oder einem neuen Thema automatisch wieder angezeigt.",
+  "setting.profile.cover": "PROFILBANNER",
+  "setting.profile.changeCover": "Banner ändern",
+  "setting.profile.uploadingCover": "Banner wird hochgeladen…",
+  "setting.profile.chooseCover": "Banner auswählen",
+  "setting.profile.coverUploadFailed": "Banner konnte nicht hochgeladen werden. Verwende JPEG, PNG, GIF oder WebP bis 10 MB."
 }

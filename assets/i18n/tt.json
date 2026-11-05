@@ -4922,5 +4922,10 @@
   "chat.activityStrip.messageFrom": "{{name}} кулланучысыннан хәбәр: {{message}}",
   "chat.activityStrip.hideAction": "Беркетмәләр һәм темалар панелен яшерү",
   "chat.activityStrip.hideConfirm.title": "Беркетмәләр һәм темалар панелен яшерү",
-  "chat.activityStrip.hideConfirm.description": "Бу канал өчен беркетмәләр һәм темалар панелен яшерергәме? Яңа беркетмә яки тема булганда ул автоматик рәвештә яңадан күренәчәк."
+  "chat.activityStrip.hideConfirm.description": "Бу канал өчен беркетмәләр һәм темалар панелен яшерергәме? Яңа беркетмә яки тема булганда ул автоматик рәвештә яңадан күренәчәк.",
+  "setting.profile.cover": "ПРОФИЛЬ ТЫШЛЫГЫ",
+  "setting.profile.changeCover": "Тышлыкны үзгәртү",
+  "setting.profile.uploadingCover": "Тышлык йөкләнә…",
+  "setting.profile.chooseCover": "Тышлык рәсемен сайлау",
+  "setting.profile.coverUploadFailed": "Тышлыкны йөкләп булмады. 10 МБ кадәр JPEG, PNG, GIF яки WebP кулланыгыз."
 }

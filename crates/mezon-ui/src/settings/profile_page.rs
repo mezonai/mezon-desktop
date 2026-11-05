@@ -29,10 +29,13 @@ enum ProfileTab {
 }
 
 struct ProfileState {
+    user_id: i64,
     username: SharedString,
     display_name: SharedString,
     about_me: SharedString,
     avatar_url: Option<SharedString>,
+    banner: Option<SharedString>,
+    original_banner: Option<SharedString>,
     logo_url: Option<SharedString>,
     status: SharedString,
     custom_status: SharedString,
@@ -50,6 +53,9 @@ impl ProfileState {
         let about_me: SharedString = account.about_me.clone().unwrap_or_default().into();
         let avatar_url: Option<SharedString> = account.avatar_url.clone().map(Into::into);
         Self {
+            user_id: account.user_id,
+            banner: account.banner.clone().map(Into::into),
+            original_banner: account.banner.clone().map(Into::into),
             username: account.username.clone().into(),
             display_name: display_name.clone(),
             about_me: about_me.clone(),
@@ -76,6 +82,7 @@ pub struct ProfilePage {
     about_me_input: Option<Entity<TextArea>>,
     _subscriptions: Vec<Subscription>,
     fetch_error: bool,
+    cover_task: Option<Task<()>>,
     account_loaded: bool,
     clan_section: Option<Entity<ClanProfileSection>>,
     clan_tab_id: Option<mezon_store::ClanId>,
@@ -112,6 +119,19 @@ impl ProfilePage {
         cx.observe(&clan_list, |_, _, cx| cx.notify()).detach();
         cx.observe(&AccountStore::global(cx), |this, store, cx| {
             if let Some(account) = store.read(cx).account.as_ref() {
+                if this
+                    .profile
+                    .as_ref()
+                    .is_some_and(|profile| profile.user_id != account.user_id)
+                {
+                    this.cover_task = None;
+                    this.display_name_input = None;
+                    this.about_me_input = None;
+                    this._subscriptions.clear();
+                    this.avatar_local_preview = None;
+                    this.account_loaded = false;
+                }
+
                 if !this.account_loaded {
                     this.account_loaded = true;
                     this.profile = Some(ProfileState::from_account(account));
@@ -123,7 +143,8 @@ impl ProfilePage {
                         prev.display_name != next.display_name || prev.about_me != next.about_me
                     });
                     let changed = this.profile.as_ref().is_none_or(|prev| {
-                        prev.avatar_url != next.avatar_url
+                        prev.banner != next.banner
+                            || prev.avatar_url != next.avatar_url
                             || prev.display_name != next.display_name
                             || prev.about_me != next.about_me
                             || prev.logo_url != next.logo_url
@@ -149,6 +170,15 @@ impl ProfilePage {
                     profile.custom_status = account.user_status.clone().into();
                     cx.notify();
                 }
+            }
+            if store.read(cx).account.is_none() {
+                this.cover_task = None;
+                this.profile = None;
+                this.account_loaded = false;
+                this.display_name_input = None;
+                this.about_me_input = None;
+                this._subscriptions.clear();
+                cx.notify();
             }
             this.refresh_banner_color(cx);
         })
@@ -177,6 +207,7 @@ impl ProfilePage {
                     if let Some(state) = &mut this.profile {
                         state.original_display_name = state.display_name.clone();
                         state.original_about_me = state.about_me.clone();
+                        state.original_banner = state.banner.clone();
                         state.original_avatar_url = state.avatar_url.clone();
                         state.original_logo_url = state.logo_url.clone();
                         state.saving = false;
@@ -257,6 +288,7 @@ impl ProfilePage {
             about_me_input: None,
             _subscriptions: Vec::new(),
             fetch_error: false,
+            cover_task: None,
             account_loaded,
             clan_section: None,
             avatar_local_preview: None,
@@ -274,6 +306,7 @@ impl ProfilePage {
     }
 
     pub fn discard_drafts_on_next_render(&mut self, cx: &mut Context<Self>) {
+        self.cover_task = None;
         self.discard_on_next_render = true;
         cx.notify();
     }
@@ -285,6 +318,10 @@ impl ProfilePage {
     }
 
     pub fn show_clan_profile(&mut self, clan_id: mezon_store::ClanId, cx: &mut Context<Self>) {
+        self.cover_task = None;
+        if let Some(profile) = &mut self.profile {
+            profile.banner = profile.original_banner.clone();
+        }
         self.active_tab = ProfileTab::Clan;
         self.clan_tab_id = Some(clan_id);
         let display_name = self
@@ -414,7 +451,8 @@ impl ProfilePage {
 
     fn is_dirty(&self) -> bool {
         if let Some(state) = &self.profile {
-            state.display_name != state.original_display_name
+            state.banner != state.original_banner
+                || state.display_name != state.original_display_name
                 || state.about_me != state.original_about_me
                 || state.avatar_url != state.original_avatar_url
                 || state.logo_url != state.original_logo_url
@@ -424,6 +462,7 @@ impl ProfilePage {
     }
 
     fn discard_changes(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.cover_task = None;
         let original = self.profile.as_ref().map(|s| {
             (
                 s.original_display_name.clone(),
@@ -440,6 +479,9 @@ impl ProfilePage {
             state.about_me = about_me;
             state.avatar_url = avatar_url;
             state.logo_url = logo_url;
+        }
+        if let Some(state) = &mut self.profile {
+            state.banner = state.original_banner.clone();
         }
         self.avatar_local_preview = None;
         self.refresh_banner_color(cx);
@@ -509,6 +551,10 @@ impl ProfilePage {
         } else {
             None
         };
+        if self.cover_task.is_some() {
+            return;
+        }
+        let banner = state.banner.as_ref().map(ToString::to_string);
         state.saving = true;
         cx.notify();
 
@@ -523,8 +569,75 @@ impl ProfilePage {
         );
 
         AccountStore::global(cx).update(cx, |store, cx| {
-            store.save_account(display_name_for_store, avatar_url, about_me, logo_url, cx);
+            store.save_account_with_banner(
+                display_name_for_store,
+                avatar_url,
+                about_me,
+                logo_url,
+                banner,
+                cx,
+            );
         });
+    }
+
+    fn choose_cover(&mut self, cx: &mut Context<Self>) {
+        if self.cover_task.is_some() || self.profile.as_ref().is_some_and(|p| p.saving) {
+            return;
+        }
+        let rx = cx.prompt_for_paths(PathPromptOptions {
+            files: true,
+            directories: false,
+            multiple: false,
+            prompt: Some(
+                mezon_i18n::t(
+                    &self.settings.read(cx).language,
+                    "setting.profile.chooseCover",
+                )
+                .into(),
+            ),
+        });
+        let user_id = self.profile.as_ref().map(|profile| profile.user_id);
+        self.cover_task = Some(cx.spawn(async move |this, cx| {
+            let paths = crate::util::file_dialog::resolve(rx, cx).await;
+            let Some(path) = paths.and_then(|paths| paths.into_iter().next()) else {
+                let _ = this.update(cx, |this, cx| {
+                    this.cover_task = None;
+                    cx.notify();
+                });
+                return;
+            };
+            let Ok(upload) = this.update(cx, |_, cx| {
+                AccountStore::global(cx).read(cx).upload_user_cover(path)
+            }) else {
+                return;
+            };
+            let result = cx.background_executor().spawn(upload).await;
+            let _ = this.update(cx, |this, cx| {
+                this.cover_task = None;
+                if this.profile.as_ref().map(|profile| profile.user_id) != user_id {
+                    return;
+                }
+                match result {
+                    Ok(url) => {
+                        if let Some(profile) = &mut this.profile {
+                            profile.banner = Some(url.into());
+                        }
+                    }
+                    Err(_) => {
+                        tracing::warn!(target: "profile_cover", "Cover upload failed");
+                        let locale = this.settings.read(cx).language.clone();
+                        Shell::global(cx).update(cx, |shell, cx| {
+                            shell.error(
+                                mezon_i18n::t(&locale, "setting.profile.coverUploadFailed"),
+                                cx,
+                            )
+                        });
+                    }
+                }
+                cx.notify();
+            });
+        }));
+        cx.notify();
     }
 
     fn render_user_section(&mut self, theme: &Theme, cx: &mut Context<Self>) -> impl IntoElement {
@@ -768,6 +881,7 @@ impl Render for ProfilePage {
                 self.profile.as_ref().is_some_and(|profile| profile.saving),
             )
         };
+        let cover_busy = !is_clan && self.cover_task.is_some();
         let profile_entity = cx.entity().clone();
 
         v_flex()
@@ -831,7 +945,11 @@ impl Render for ProfilePage {
                         .child(
                             GpuiButton::new("active-profile-reset-btn")
                                 .label(mezon_i18n::t(&locale, "profileSetting.reset"))
-                                .disabled(is_saving)
+                                .disabled(if is_clan {
+                                    is_saving
+                                } else {
+                                    self.profile.as_ref().is_some_and(|profile| profile.saving)
+                                })
                                 .text_color(theme.text_muted)
                                 .ghost()
                                 .on_click({
@@ -860,7 +978,7 @@ impl Render for ProfilePage {
                                 } else {
                                     mezon_i18n::t(&locale, "setting.profile.saveChanges")
                                 })
-                                .disabled(is_saving)
+                                .disabled(is_saving || cover_busy)
                                 .primary()
                                 .on_click({
                                     let profile_entity = profile_entity.clone();
@@ -967,6 +1085,36 @@ impl ProfilePage {
                         self.about_me_input
                             .iter()
                             .map(|input| input.focus_handle(cx)),
+                    ),
+            )
+            .child(
+                v_flex()
+                    .gap_2()
+                    .child(
+                        div()
+                            .text_sm()
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .text_color(theme.text_muted)
+                            .child(mezon_i18n::t(&locale, "setting.profile.cover")),
+                    )
+                    .child(
+                        h_flex().gap_3().child(
+                            GpuiButton::new("change-cover")
+                                .label(mezon_i18n::t(
+                                    &locale,
+                                    if self.cover_task.is_some() {
+                                        "setting.profile.uploadingCover"
+                                    } else {
+                                        "setting.profile.changeCover"
+                                    },
+                                ))
+                                .disabled(
+                                    self.cover_task.is_some()
+                                        || self.profile.as_ref().is_some_and(|p| p.saving),
+                                )
+                                .primary()
+                                .on_click(cx.listener(|this, _, _, cx| this.choose_cover(cx))),
+                        ),
                     ),
             )
             .child(
@@ -1327,7 +1475,21 @@ impl ProfilePage {
                             .w_full()
                             .rounded_tl_lg()
                             .rounded_tr_lg()
-                            .bg(banner_color),
+                            .bg(banner_color)
+                            .overflow_hidden()
+                            .children(
+                                self.profile
+                                    .as_ref()
+                                    .and_then(|p| p.banner.as_ref())
+                                    .filter(|s| !s.is_empty())
+                                    .map(|url| {
+                                        gpui::img(url.clone())
+                                            .rounded_t_lg()
+                                            .w_full()
+                                            .h_full()
+                                            .object_fit(gpui::ObjectFit::Cover)
+                                    }),
+                            ),
                     )
                     .child(
                         v_flex()

@@ -4910,5 +4910,10 @@
   "screenShare.modeText": "Văn bản",
   "screenShare.modeTextDescription": "Văn bản và slide rõ nét, ít tốn tài nguyên hơn.",
   "screenShare.modeVideo": "Video",
-  "screenShare.modeVideoDescription": "Video mượt hơn; có thể giảm độ nét khi mạng chậm."
+  "screenShare.modeVideoDescription": "Video mượt hơn; có thể giảm độ nét khi mạng chậm.",
+  "setting.profile.cover": "ẢNH BÌA",
+  "setting.profile.changeCover": "Đổi ảnh bìa",
+  "setting.profile.uploadingCover": "Đang tải ảnh bìa…",
+  "setting.profile.chooseCover": "Chọn ảnh bìa",
+  "setting.profile.coverUploadFailed": "Không thể tải ảnh bìa. Hãy dùng JPEG, PNG, GIF hoặc WebP tối đa 10 MB."
 }
