@@ -26,6 +26,7 @@ use tokio_tungstenite::tungstenite::protocol::frame::coding::CloseCode;
 
 use crate::playback_health::{AudioRecoveryProgress, PlaybackRecovery};
 use crate::reconnect::MuteSync;
+use crate::screen::ScreenSendPace;
 use crate::screen_recovery::{FrameReceipt, ScreenRecovery, ScreenSource, ScreenViews};
 use crate::video::track_frame_key;
 use crate::{IceServerConfig, MEET_TOKEN_RETRY_LIMIT, ScreenShareMode, TokenRefresher};
@@ -209,6 +210,7 @@ pub struct ScreenTrack {
     pub track: RtcVideoTrack,
     pub width: u32,
     pub mode: ScreenShareMode,
+    pub(crate) send_pace: ScreenSendPace,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -2748,15 +2750,18 @@ fn tune_uplinks(pc: &PeerConnection, local: &LocalTracks, tiers: PublishTiers) {
         }
         parameters.set_degradation_preference(degradation);
 
-        match sender.set_parameters(parameters) {
-            Ok(()) => tracing::info!(
-                mid = %mid,
-                bitrate = max_bitrate,
-                fps = max_framerate,
-                scale = scale_down,
-                scalability = scalability.as_deref().unwrap_or("-"),
-                "publish limits applied"
-            ),
+        let applied = match sender.set_parameters(parameters) {
+            Ok(()) => {
+                tracing::info!(
+                    mid = %mid,
+                    bitrate = max_bitrate,
+                    fps = max_framerate,
+                    scale = scale_down,
+                    scalability = scalability.as_deref().unwrap_or("-"),
+                    "publish limits applied"
+                );
+                true
+            }
             Err(e) => {
                 tracing::warn!(
                     "publish limits rejected on mid {mid}: {e}; retrying without scalability"
@@ -2770,10 +2775,22 @@ fn tune_uplinks(pc: &PeerConnection, local: &LocalTracks, tiers: PublishTiers) {
                     encoding.priority = priority;
                 }
                 retry.set_degradation_preference(degradation);
-                if let Err(e) = sender.set_parameters(retry) {
-                    tracing::error!("publish limits could not be applied on mid {mid}: {e}");
+                match sender.set_parameters(retry) {
+                    Ok(()) => true,
+                    Err(e) => {
+                        tracing::error!("publish limits could not be applied on mid {mid}: {e}");
+                        false
+                    }
                 }
             }
+        };
+        if applied
+            && mid == MID_SCREEN
+            && let Some(screen) = local.screen.as_ref()
+        {
+            screen
+                .send_pace
+                .set_fps(screen.mode.paced_send_fps(max_framerate));
         }
     }
 }

@@ -1539,6 +1539,7 @@ async fn start_screen_track(
         full_res,
         pick,
         mode.capture_fps(),
+        mode.paced_send_fps(mode.encode_max_fps()),
     );
     let (source, width, _height) = source_rx
         .recv_async()
@@ -1551,6 +1552,7 @@ async fn start_screen_track(
         track: screen_track,
         width,
         mode,
+        send_pace: stopper.send_pace(),
     };
 
     let audio = if share_audio {
@@ -1590,6 +1592,10 @@ fn apply_screen_share_mode(session: &mut ScreenSession, mode: ScreenShareMode, e
     }
     session.track.mode = mode;
     session.stopper.set_capture_fps(mode.capture_fps());
+    session
+        .track
+        .send_pace
+        .set_fps(mode.paced_send_fps(mode.encode_max_fps()));
     apply_screen_content_hint(&session.track.track, mode);
     engine.set_screen_share_mode(mode);
     tracing::info!(?mode, "screen share mode changed");
