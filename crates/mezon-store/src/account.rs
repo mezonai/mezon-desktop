@@ -1287,6 +1287,7 @@ fn sync_account_profile(account: &UserAccount, cx: &mut App) {
         id: crate::ids::UserId(account.user_id),
         username: account.username.clone(),
         display_name: account.display_name.clone(),
+        banner: Some(account.banner.clone().unwrap_or_default()),
         avatar_url: account.avatar_url.clone().unwrap_or_default(),
         about_me: account.about_me.clone().unwrap_or_default(),
         create_time_seconds: account.create_time_seconds,

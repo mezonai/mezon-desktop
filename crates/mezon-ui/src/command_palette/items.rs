@@ -590,6 +590,7 @@ fn self_chat_member_item(cx: &App) -> Option<PaletteItem> {
         id: UserId(account.user_id),
         username: account.username.clone(),
         display_name: account.display_name.clone(),
+        banner: account.banner.clone(),
         avatar_url: account.avatar_url.clone().unwrap_or_default(),
         about_me: String::new(),
         create_time_seconds: 0,
@@ -774,6 +775,7 @@ fn ctrlk_user_as_member(
     cx: &App,
 ) -> Option<PaletteItem> {
     let domain_user = User {
+        banner: None,
         id: user.id,
         username: user.username.clone(),
         display_name: user.display_name.clone(),

@@ -267,6 +267,33 @@ pub fn resolve_user_profile(
     }
 }
 
+pub fn resolve_profile_banner(user_id: UserId, cx: &App) -> Option<String> {
+    if user_id.is_zero() {
+        return None;
+    }
+    if let Some(store) = AccountStore::try_global(cx)
+        && let Some(account) = store.read(cx).account.as_ref()
+        && account.user_id == user_id.get()
+    {
+        return Some(account.banner.clone().unwrap_or_default());
+    }
+    UsersByUserStore::try_global(cx)
+        .and_then(|store| {
+            store
+                .read(cx)
+                .user(user_id)
+                .and_then(|user| user.banner.clone())
+        })
+        .or_else(|| {
+            ClanMembersStore::try_global(cx).and_then(|store| {
+                store
+                    .read(cx)
+                    .find_user(user_id)
+                    .and_then(|user| user.banner.clone())
+            })
+        })
+}
+
 pub fn resolve_avatar_url(user_id: UserId, context: ProfileContext, cx: &App) -> Option<String> {
     match context {
         ProfileContext::Clan(clan_id) => ClanMembersStore::global(cx)
@@ -417,6 +444,7 @@ mod tests {
             id: UserId(id),
             username: username.into(),
             display_name: display.into(),
+            banner: None,
             avatar_url: "avatar.png".into(),
             about_me: "hi there".into(),
             create_time_seconds: 1_700_000_000,
