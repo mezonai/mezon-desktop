@@ -13,6 +13,7 @@ use mezon_store::{
 use ui::{Clickable, PopoverMenu, Toggleable};
 
 use crate::app::shell::{FriendRemovalKind, Shell};
+use crate::chat::call_actions::{CallTarget, call_user};
 use crate::chat::friends_page::{
     dm_open_failure_message, open_created_dm_if_route_unchanged, toast_send_failed,
 };
@@ -1089,6 +1090,33 @@ fn render_banner_actions(
             .size(px(16.))
             .text_color(gpui::white())
             .into_any_element(),
+    ));
+
+    buttons.push(banner_icon_button(
+        "profile-call",
+        IconName::IconPhoneDM,
+        false,
+        true,
+        cx.listener(|this, _: &ClickEvent, _window, cx| {
+            let profile = resolve_user_profile(this.user_id, this.context, cx).unwrap_or_default();
+            let label = if !profile.display_name.is_empty() {
+                profile.display_name
+            } else {
+                profile.username.clone()
+            };
+            let target = CallTarget {
+                user: this.user_id,
+                label: label.into(),
+                avatar: profile.avatar_url.into(),
+                username: profile.username.into(),
+            };
+            let error = SharedString::from(mezon_i18n::t(
+                &this.settings.read(cx).language,
+                "shareContact.card.callError",
+            ));
+            call_user(target, false, error, cx);
+            cx.emit(DismissEvent);
+        }),
     ));
 
     if show_share_contact {
