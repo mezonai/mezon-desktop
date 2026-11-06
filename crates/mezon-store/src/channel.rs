@@ -4132,6 +4132,7 @@ impl ChannelList {
             });
         if let Some((clan_id, parent_id)) = target
             && !self.parent_toast_still_needed(clan_id, parent_id)
+            && !other_topic_unread_under(clan_id, parent_id, topic_id, cx)
         {
             self.dismiss_channel(clan_id, parent_id, cx);
         }
@@ -7306,6 +7307,21 @@ fn restore_topic_badges(
         }
     }
     changed
+}
+
+fn other_topic_unread_under(
+    clan_id: ClanId,
+    parent_id: ChannelId,
+    topic_id: ChannelId,
+    cx: &App,
+) -> bool {
+    TopicBadgeStore::try_global(cx).is_some_and(|store| {
+        store.read(cx).channel_has_other_unread_topic(
+            clan_id,
+            parent_id,
+            &topic_id.get().to_string(),
+        )
+    })
 }
 
 fn topic_parent_from_stores(topic_id: ChannelId, cx: &App) -> Option<ChannelId> {
@@ -13241,6 +13257,60 @@ mod tests {
                 .unread_parent_ids(clan_id)
                 .contains(&parent_id)
         })
+    }
+
+    #[gpui::test]
+    fn reading_one_topic_keeps_the_parent_toast_while_another_topic_is_unread(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let clan_id = ClanId(921);
+        let parent_id = ChannelId(9211);
+        let stores = cx.update(|cx| {
+            let stores = init_topic_unread_stores(cx);
+            crate::clan::ClanList::global(cx).update(cx, |clans, cx| {
+                clans.update_clans(vec![make_clan(clan_id.get())], cx);
+            });
+            stores.channels.update(cx, |channels, cx| {
+                channels.apply_clan_structure(
+                    clan_id,
+                    one_channel_structure(parent_id.get(), 1),
+                    None,
+                    cx,
+                );
+                set_channel_activity(channels, clan_id, parent_id, 0, 50, 50);
+            });
+            stores
+        });
+        cx.run_until_parked();
+
+        for (topic_id, message_id) in [(9221, 60u64 << 22), (9222, 61u64 << 22)] {
+            stores.api.publish_event(RealtimeEvent::ChannelMessage(
+                mezon_proto::api::ChannelMessage {
+                    clan_id: clan_id.get(),
+                    channel_id: parent_id.get(),
+                    topic_id,
+                    sender_id: REMOVED_SELF + 1,
+                    message_id: message_id as i64,
+                    create_time_seconds: 60,
+                    mode: 2,
+                    ..Default::default()
+                },
+            ));
+        }
+        cx.run_until_parked();
+
+        cx.update(|cx| {
+            stores.channels.update(cx, |channels, cx| {
+                let parent = arm(parent_id.get());
+                channels.apply_topic_read_in(clan_id, ChannelId(9221), Some(parent_id), cx);
+                assert!(!closed(parent_id.get(), parent));
+                stores
+                    .topic_badges
+                    .update(cx, |badges, cx| badges.clear_topic("9221", cx));
+                channels.apply_topic_read_in(clan_id, ChannelId(9222), Some(parent_id), cx);
+                assert!(closed(parent_id.get(), parent));
+            });
+        });
     }
 
     #[gpui::test]
