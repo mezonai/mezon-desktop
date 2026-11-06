@@ -5,8 +5,8 @@ use chrono::{Local, TimeZone as _};
 use gpui::{
     Animation, AnimationExt as _, AnyElement, App, ClickEvent, ClipboardItem, Context, FocusHandle,
     Focusable, FontWeight, ListAlignment, ListState, SharedString, Subscription, Transformation,
-    WeakEntity, Window, div, ease_in_out, img, linear_color_stop, linear_gradient, list,
-    percentage, prelude::*, px, relative, rgb, rgba,
+    WeakEntity, Window, div, ease_in_out, linear_color_stop, linear_gradient, list, percentage,
+    prelude::*, px, relative, rgb, rgba,
 };
 use mezon_store::{
     AccountEvent, AccountStore, BadgeService, ClanMembersEvent, ClanMembersStore, DirectEvent,
@@ -895,16 +895,10 @@ fn render_detail(
 }
 
 fn field_icon(theme: &Theme, icon: IconName) -> AnyElement {
-    match icon {
-        IconName::DollarIcon | IconName::UserIcon => img(icon.path())
-            .size(px(12.))
-            .flex_none()
-            .into_any_element(),
-        _ => Icon::new(icon)
-            .size(px(12.))
-            .text_color(theme.tokens.text_theme_primary)
-            .into_any_element(),
-    }
+    Icon::new(icon)
+        .size(px(12.))
+        .text_color(theme.tokens.text_theme_primary)
+        .into_any_element()
 }
 
 fn detail_field(
@@ -1066,7 +1060,8 @@ fn render_placeholder(
                 .items_center()
                 .justify_center()
                 .child(
-                    img(IconName::FileThumbEmpty.path())
+                    Icon::new(IconName::FileThumbEmpty)
+                        .text_color(theme.tokens.text_secondary)
                         .w(px(30.))
                         .h(px(40.))
                         .flex_none(),

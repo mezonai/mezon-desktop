@@ -5,7 +5,7 @@ use std::time::Duration;
 use gpui::{
     App, ClickEvent, Context, DismissEvent, Entity, EventEmitter, FocusHandle, Focusable,
     FontWeight, ListAlignment, ListState, MouseDownEvent, SharedString, Task, WeakEntity, Window,
-    div, img, list, prelude::*, px, rgb, svg,
+    div, list, prelude::*, px, rgb, svg,
 };
 use mezon_store::{
     ChannelDocument, ChannelId, ClanId, ClanMembersStore, DirectKind, DirectMessageStore,
@@ -841,7 +841,8 @@ fn file_row(
                     .items_center()
                     .justify_center()
                     .child(
-                        img(IconName::FileThumbEmpty.path())
+                        Icon::new(IconName::FileThumbEmpty)
+                            .text_color(tokens.text_secondary)
                             .w(px(32.))
                             .h(px(40.))
                             .flex_none(),
@@ -864,7 +865,13 @@ fn file_row(
     let download_url = url.clone();
     let download_name = filename.clone();
     let thumb = if vm.is_audio {
-        file_audio_thumb(index, vm.url.clone(), panel, audio_playing)
+        file_audio_thumb(
+            index,
+            vm.url.clone(),
+            panel,
+            audio_playing,
+            tokens.text_secondary.into(),
+        )
     } else {
         div()
             .flex_shrink_0()
@@ -873,7 +880,13 @@ fn file_row(
             .flex()
             .items_center()
             .justify_center()
-            .child(img(vm.icon.path()).w(px(32.)).h(px(40.)).flex_none())
+            .child(
+                Icon::new(vm.icon)
+                    .text_color(tokens.text_secondary)
+                    .w(px(32.))
+                    .h(px(40.))
+                    .flex_none(),
+            )
             .into_any_element()
     };
 
@@ -978,6 +991,7 @@ fn file_row(
                         ),
                 ),
         )
+        .map(|element| Icon::motion_scope(element, true))
         .into_any_element()
 }
 
@@ -986,6 +1000,7 @@ fn file_audio_thumb(
     url: SharedString,
     panel: WeakEntity<FilesPopoverPanel>,
     playing: bool,
+    icon_color: gpui::Hsla,
 ) -> gpui::AnyElement {
     let play_icon = if playing {
         IconName::PauseButton
@@ -1001,7 +1016,8 @@ fn file_audio_thumb(
         .items_center()
         .justify_center()
         .child(
-            img(IconName::FileThumbEmpty.path())
+            Icon::new(IconName::FileThumbEmpty)
+                .text_color(icon_color)
                 .w(px(32.))
                 .h(px(40.))
                 .flex_none(),

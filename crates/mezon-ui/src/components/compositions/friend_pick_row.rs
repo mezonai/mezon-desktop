@@ -1,6 +1,7 @@
-use gpui::{AnyElement, App, ClickEvent, FontWeight, SharedString, div, prelude::*, px, svg};
+use gpui::{AnyElement, App, ClickEvent, FontWeight, SharedString, div, prelude::*, px};
 use mezon_store::{Friend, UserId};
 
+use crate::components::primitives::{Icon, IconName};
 use crate::theme::Theme;
 use crate::util::imgproxy;
 
@@ -122,8 +123,7 @@ pub fn render_friend_pick_row(
                         .justify_center()
                         .when(selected, |el| {
                             el.child(
-                                svg()
-                                    .path("icons/check.svg")
+                                Icon::new(IconName::Check)
                                     .size(px(12.))
                                     .flex_none()
                                     .text_color(theme.brand),

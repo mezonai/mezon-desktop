@@ -426,13 +426,14 @@ impl ClanEventsModal {
                                     .min_w_0()
                                     .text_color(theme.text_secondary)
                                     .child(if is_location && !event.is_private {
-                                        img(IconName::Location.path())
+                                        Icon::new(IconName::Location)
+                                            .text_color(theme.tokens.text_secondary)
                                             .size(px(20.))
                                             .into_any_element()
                                     } else {
                                         Icon::new(IconName::Speaker)
                                             .size(px(20.))
-                                            .text_color(theme.text_secondary)
+                                            .text_color(theme.tokens.text_secondary)
                                             .into_any_element()
                                     })
                                     .child(
@@ -967,13 +968,14 @@ impl ClanEventsModal {
                         .items_center()
                         .gap_3()
                         .child(if !event.address.is_empty() {
-                            img(IconName::Location.path())
+                            Icon::new(IconName::Location)
+                                .text_color(theme.tokens.text_secondary)
                                 .size(px(20.))
                                 .into_any_element()
                         } else {
                             Icon::new(IconName::Speaker)
                                 .size(px(20.))
-                                .text_color(theme.text_secondary)
+                                .text_color(theme.tokens.text_secondary)
                                 .into_any_element()
                         })
                         .child(location),
@@ -1562,7 +1564,7 @@ impl Render for ShareEventModal {
                     .child(
                         Icon::new(IconName::Speaker)
                             .size(px(20.))
-                            .text_color(theme.text_secondary),
+                            .text_color(theme.tokens.text_secondary),
                     )
                     .child(self.channel_name.clone()),
             )

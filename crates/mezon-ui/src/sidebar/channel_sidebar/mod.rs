@@ -2332,12 +2332,12 @@ fn render_banner_and_events(
         .when(guide_active, |element| element.bg(theme.bg_hover))
         .hover(|style| style.bg(theme.bg_hover))
         .text_color(if guide_active {
-            theme.text_primary
+            theme.tokens.text_theme_primary
         } else {
-            theme.text_secondary
+            theme.tokens.text_secondary
         })
         .child(
-            gpui::img(IconName::GuideIcon.path())
+            Icon::new(IconName::GuideIcon)
                 .size(px(20.))
                 .flex_none()
                 .when(!guide_active, |icon| {
@@ -2441,10 +2441,14 @@ fn render_banner_and_events(
         .p_2()
         .gap_1()
         .children(onboarding_card)
-        .when(clan_has_onboarding, |element| element.child(guide_row))
-        .child(events_row)
-        .child(members_row)
-        .when(can_view_channels, |element| element.child(channels_row));
+        .when(clan_has_onboarding, |element| {
+            element.child(Icon::motion_scope(guide_row, true))
+        })
+        .child(Icon::motion_scope(events_row, true))
+        .child(Icon::motion_scope(members_row, true))
+        .when(can_view_channels, |element| {
+            element.child(Icon::motion_scope(channels_row, true))
+        });
 
     col = col.child(nav_col);
 
@@ -2488,8 +2492,7 @@ fn render_banner_and_events(
                     )
                     .into_any_element()
             } else {
-                gpui::svg()
-                    .path("icons/channel-app-fallback.svg")
+                Icon::new(IconName::ChannelAppFallback)
                     .w(px(24.))
                     .h(px(24.))
                     .text_color(theme.text_primary)

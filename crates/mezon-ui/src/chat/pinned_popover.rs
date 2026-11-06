@@ -2224,7 +2224,13 @@ fn render_pin_file_attachment(
                 .justify_center()
                 .w(px(32.))
                 .h(px(40.))
-                .child(img(icon.path()).w(px(32.)).h(px(40.)).flex_none()),
+                .child(
+                    Icon::new(icon)
+                        .text_color(theme.tokens.text_secondary)
+                        .w(px(32.))
+                        .h(px(40.))
+                        .flex_none(),
+                ),
         )
         .child(
             div()

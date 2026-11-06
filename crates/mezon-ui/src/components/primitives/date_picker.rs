@@ -1,7 +1,7 @@
 use chrono::{Datelike, Local, NaiveDate, Weekday};
 use gpui::{
     App, Context, Entity, EventEmitter, FontWeight, Hsla, MouseButton, MouseDownEvent, Render,
-    SharedString, Window, anchored, deferred, div, point, prelude::*, px, svg,
+    SharedString, Window, anchored, deferred, div, point, prelude::*, px,
 };
 
 use super::icon::{Icon, IconName};
@@ -314,8 +314,7 @@ impl Render for DatePicker {
                             .child(display),
                     )
                     .child(
-                        svg()
-                            .path("icons/date-picker-indicator.svg")
+                        Icon::new(IconName::DatePickerIndicator)
                             .size(px(16.))
                             .flex_none()
                             .text_color(theme.text_secondary),

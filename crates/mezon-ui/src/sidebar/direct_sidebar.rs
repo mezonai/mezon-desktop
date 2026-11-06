@@ -3,7 +3,7 @@ use std::rc::Rc;
 
 use gpui::{
     App, Context, Entity, FontWeight, MouseButton, MouseDownEvent, Pixels, Point, SharedString,
-    UniformListScrollHandle, WeakEntity, Window, div, img, prelude::*, px, size, uniform_list,
+    UniformListScrollHandle, WeakEntity, Window, div, prelude::*, px, size, uniform_list,
 };
 use mezon_store::{
     AccountEvent, AccountStore, BuzzStore, ChannelEvent, ChannelId, ChannelList, ClanId,
@@ -800,7 +800,12 @@ impl DirectSidebar {
             .when(active, |this| this.bg(bg_hover))
             .hover(move |this| this.bg(bg_hover))
             .on_click(|_, _window, cx| navigate(cx, Route::Friends))
-            .child(img("icons/icon-friends.svg").size(px(20.)).flex_none())
+            .child(
+                Icon::new(IconName::IconFriends)
+                    .text_color(theme.tokens.text_theme_primary)
+                    .size(px(20.))
+                    .flex_none(),
+            )
             .child(
                 div()
                     .text_base()
@@ -826,6 +831,7 @@ impl DirectSidebar {
                         .child(SharedString::from(pending.to_string())),
                 )
             })
+            .map(|element| Icon::motion_scope(element, true))
     }
 
     fn render_section_header(&self, theme: &Theme, locale: &str) -> impl IntoElement {

@@ -1644,7 +1644,8 @@ impl MentionInput {
                     )
                     .child(div().text_sm().font_weight(FontWeight::MEDIUM).child(
                         mezon_i18n::t(&locale, "message.fileSelection.uploadFile").to_string(),
-                    )),
+                    ))
+                    .map(|element| Icon::motion_scope(element, true)),
             );
         if show_location {
             menu =
@@ -1674,7 +1675,8 @@ impl MentionInput {
                         )
                         .child(div().text_sm().font_weight(FontWeight::MEDIUM).child(
                             mezon_i18n::t(&locale, "message.attachments.location").to_string(),
-                        )),
+                        ))
+                        .map(|element| Icon::motion_scope(element, true)),
                 );
         }
         if show_poll {
@@ -1695,10 +1697,11 @@ impl MentionInput {
                         MouseButton::Left,
                         cx.listener(|this, _, window, cx| this.open_create_poll(window, cx)),
                     )
-                    .child(img("icons/check-list-icon.svg").size(px(20.)).flex_none())
+                    .child(Icon::new(IconName::CheckListIcon).size(px(20.)).flex_none())
                     .child(div().text_sm().font_weight(FontWeight::MEDIUM).child(
                         mezon_i18n::t(&locale, "message.fileSelection.createPoll").to_string(),
-                    )),
+                    ))
+                    .map(|element| Icon::motion_scope(element, true)),
             );
         }
         menu.into_any_element()

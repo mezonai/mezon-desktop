@@ -1,8 +1,8 @@
 use std::collections::HashSet;
 
 use gpui::{
-    App, Context, Entity, FontWeight, Hsla, ListSizingBehavior, Render, SharedString, Svg, Window,
-    div, img, prelude::*, px, rgb, size, uniform_list,
+    App, Context, Entity, FontWeight, Hsla, ListSizingBehavior, Render, SharedString, Window, div,
+    img, prelude::*, px, rgb, size, uniform_list,
 };
 
 use mezon_store::{ClanRoleDetail, DEFAULT_ROLE_COLOR, RoleId, RolesStore};
@@ -416,7 +416,7 @@ pub(super) fn role_glyph(
     }
 }
 
-pub(super) fn role_lock_icon() -> Svg {
+pub(super) fn role_lock_icon() -> Icon {
     Icon::new(IconName::IconLock)
         .size(px(12.0))
         .flex_shrink_0()

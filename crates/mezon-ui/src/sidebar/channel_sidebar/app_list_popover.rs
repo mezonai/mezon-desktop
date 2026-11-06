@@ -52,8 +52,7 @@ pub fn app_list_popover_overlay(
                 .aspect_square()
                 .into_any_element()
         } else {
-            gpui::svg()
-                .path("icons/channel-app-fallback.svg")
+            Icon::new(IconName::ChannelAppFallback)
                 .w(px(28.))
                 .h(px(28.))
                 .text_color(theme.text_primary)

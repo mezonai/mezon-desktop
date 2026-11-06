@@ -552,7 +552,12 @@ fn render_empty_body(
                 .p(px(22.))
                 .rounded_full()
                 .bg(tokens.bg_active_member_channel)
-                .child(img("icons/thread-empty.svg").size(px(36.)).flex_none())
+                .child(
+                    Icon::new(IconName::ThreadEmpty)
+                        .text_color(tokens.text_secondary)
+                        .size(px(36.))
+                        .flex_none(),
+                )
                 .child(
                     div().absolute().top_0().left(px(-10.)).child(
                         img("icons/empty-unread-style.svg")

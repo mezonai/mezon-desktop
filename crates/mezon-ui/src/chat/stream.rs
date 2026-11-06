@@ -447,7 +447,8 @@ fn stream_header(
                 ))
                 .on_click(move |_, _, cx| {
                     stream_toggle.update(cx, |store, cx| store.toggle_chat(cx));
-                }),
+                })
+                .map(|element| Icon::motion_scope(element, true)),
         )
         .into_any_element()
 }

@@ -74,7 +74,8 @@ pub fn render_channel_app_bar(
                         .text_sm()
                         .font_weight(FontWeight::MEDIUM)
                         .child(launch_label),
-                ),
+                )
+                .map(|element| Icon::motion_scope(element, true)),
         )
         .child(
             div()
@@ -107,6 +108,7 @@ pub fn render_channel_app_bar(
                         .text_sm()
                         .font_weight(FontWeight::MEDIUM)
                         .child(help_label),
-                ),
+                )
+                .map(|element| Icon::motion_scope(element, true)),
         )
 }

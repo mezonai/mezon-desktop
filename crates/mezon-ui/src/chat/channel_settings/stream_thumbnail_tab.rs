@@ -480,17 +480,11 @@ impl Render for StreamThumbnailTab {
                             .flex()
                             .items_center()
                             .justify_center()
-                            .child(if icon == IconName::ImageUploadIcon {
-                                img(icon.path())
-                                    .size(px(20.))
-                                    .flex_none()
-                                    .into_any_element()
-                            } else {
+                            .child(
                                 Icon::new(icon)
                                     .size(px(20.))
-                                    .text_color(theme.text_muted)
-                                    .into_any_element()
-                            }),
+                                    .text_color(theme.tokens.text_secondary),
+                            ),
                     )
                     .child(
                         v_flex()

@@ -4,9 +4,9 @@ use std::sync::{Arc, LazyLock, Mutex};
 use gpui::{
     Anchor, Animation, AnimationExt, AnyElement, App, ClickEvent, ClipboardItem, Context,
     CursorStyle, DismissEvent, Div, Entity, EventEmitter, FocusHandle, Focusable, FontFeatures,
-    FontWeight, Hsla, Image, ImageFormat, IntoElement, MouseButton, MouseDownEvent, ObjectFit,
-    Pixels, RenderOnce, Rgba, ScrollHandle, SharedString, Stateful, StyledImage, Subscription,
-    Window, canvas, deferred, div, img, point, prelude::*, px, relative, rems, svg,
+    FontWeight, Hsla, IntoElement, MouseButton, MouseDownEvent, ObjectFit, Pixels, RenderOnce,
+    Rgba, ScrollHandle, SharedString, Stateful, StyledImage, Subscription, Window, canvas,
+    deferred, div, img, point, prelude::*, px, relative, rems, svg,
 };
 use mezon_store::{
     AppConfig, AudioStore, Channel, ChannelId, ClanId, DeviceKind, DeviceMenuKind, DisplayedFlower,
@@ -863,22 +863,8 @@ fn panel_control_button(
         .child(Icon::new(icon).size(px(20.)).text_color(icon_color))
 }
 
-const CHAT_ICON_SVG: &str = include_str!("../../assets/icons/chat.svg");
-
-pub(crate) fn chat_toggle_icon(color: Rgba, size: Pixels) -> gpui::Img {
-    let fill = format!(
-        "rgba({}, {}, {}, {})",
-        (color.r * 255.0).round() as u8,
-        (color.g * 255.0).round() as u8,
-        (color.b * 255.0).round() as u8,
-        color.a
-    );
-    let svg = CHAT_ICON_SVG.replace("currentColor", &fill);
-    img(Arc::new(Image::from_bytes(
-        ImageFormat::Svg,
-        svg.into_bytes(),
-    )))
-    .size(size)
+pub(crate) fn chat_toggle_icon(color: Rgba, size: Pixels) -> Icon {
+    Icon::new(IconName::Chat).text_color(color).size(size)
 }
 
 fn voice_header_icon_shell(

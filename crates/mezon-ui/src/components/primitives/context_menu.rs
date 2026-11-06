@@ -2,7 +2,7 @@ use std::rc::Rc;
 
 use gpui::{
     Anchor, AnyElement, App, ClickEvent, MouseButton, MouseDownEvent, Pixels, Point, SharedString,
-    Window, anchored, deferred, div, img, prelude::*, px, relative, svg,
+    Window, anchored, deferred, div, img, prelude::*, px, relative,
 };
 
 use super::icon::{Icon, IconName};
@@ -694,15 +694,10 @@ impl RenderOnce for ContextMenu {
                             })
                             .when(leading_icon.is_some(), |row| row.gap_2())
                             .when_some(leading_icon, |row, icon| {
-                                let icon_el = if icon == IconName::Flower {
-                                    svg()
-                                        .path(icon.path())
-                                        .size(px(24.))
-                                        .flex_none()
-                                        .text_color(icon_color)
-                                } else {
-                                    Icon::new(icon).size_4().text_color(icon_color)
-                                };
+                                let icon_el = Icon::new(icon)
+                                    .size_4()
+                                    .when(icon == IconName::Flower, |icon| icon.size(px(24.)))
+                                    .text_color(icon_color);
                                 row.child(icon_el)
                             })
                             .child(div().flex_1().child(label))
@@ -716,7 +711,8 @@ impl RenderOnce for ContextMenu {
                                         dismiss(window, cx);
                                     }
                                 })
-                            }),
+                            })
+                            .map(|row| Icon::motion_scope(row, !disabled)),
                     );
                 }
                 Item::Submenu {

@@ -1,4 +1,10 @@
-use gpui::{Svg, prelude::*, px, svg};
+use gpui::{
+    App, Bounds, DispatchPhase, Element, ElementId, GlobalElementId, Hitbox, HitboxBehavior,
+    InspectorElementId, InteractiveElement, Interactivity, IntoElement, LayoutId, MouseMoveEvent,
+    Pixels, StyleRefinement, Svg, Transformation, Window, prelude::*, px, svg,
+};
+
+use crate::icon_motion::{MotionPlayback, MotionSpec};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum IconName {
@@ -17,6 +23,7 @@ pub enum IconName {
     AnnotateRectangle,
     AnnotateSelect,
     Announcement,
+    AnonymousAvatar,
     AppChannelIcon,
     AppDirectoryFooterRobot,
     AppHelpIcon,
@@ -46,6 +53,7 @@ pub enum IconName {
     CanvasIcon,
     CDNIcon,
     ChannelBrowser,
+    ChannelAppFallback,
     Chat,
     Check,
     CheckedIcon,
@@ -72,6 +80,7 @@ pub enum IconName {
     CopyIcon,
     CreateCategoryIcon,
     DarkModeIcon,
+    DatePickerIndicator,
     DeviceDesktopIcon,
     DeviceMobileIcon,
     DollarIcon,
@@ -355,6 +364,7 @@ impl IconName {
             Self::AnnotateRectangle => "icons/annotate-rectangle.svg",
             Self::AnnotateSelect => "icons/annotate-select.svg",
             Self::Announcement => "icons/announcement.svg",
+            Self::AnonymousAvatar => "icons/anonymous-avatar.svg",
             Self::AppChannelIcon => "icons/app-channel-icon.svg",
             Self::AppDirectoryFooterRobot => "icons/app-directory-footer-robot.svg",
             Self::AppHelpIcon => "icons/app-help-icon.svg",
@@ -384,6 +394,7 @@ impl IconName {
             Self::CanvasIcon => "icons/canvas-icon.svg",
             Self::CDNIcon => "icons/cdn-icon.svg",
             Self::ChannelBrowser => "icons/channel-browser.svg",
+            Self::ChannelAppFallback => "icons/channel-app-fallback.svg",
             Self::Chat => "icons/chat.svg",
             Self::Check => "icons/check.svg",
             Self::CheckedIcon => "icons/checked-icon.svg",
@@ -410,6 +421,7 @@ impl IconName {
             Self::CopyIcon => "icons/copy-icon.svg",
             Self::CreateCategoryIcon => "icons/create-category-icon.svg",
             Self::DarkModeIcon => "icons/dark-mode-icon.svg",
+            Self::DatePickerIndicator => "icons/date-picker-indicator.svg",
             Self::DeviceDesktopIcon => "icons/device-desktop-icon.svg",
             Self::DeviceMobileIcon => "icons/device-mobile-icon.svg",
             Self::DollarIcon => "icons/dollar-icon.svg",
@@ -677,11 +689,340 @@ impl IconName {
     }
 }
 
-pub struct Icon;
+pub struct Icon {
+    svg: Svg,
+    name: IconName,
+    motion: Option<&'static MotionSpec>,
+    id: ElementId,
+    motion_enabled: bool,
+    explicit_transformation: bool,
+}
 
 impl Icon {
-    #[allow(clippy::new_ret_no_self)]
-    pub fn new(name: IconName) -> Svg {
-        svg().path(name.path()).size(px(16.)).flex_none()
+    pub fn motion_scope(element: impl IntoElement, enabled: bool) -> crate::IconMotionScope {
+        crate::IconMotionScope::new(element, enabled)
+    }
+
+    #[track_caller]
+    pub fn new(name: IconName) -> Self {
+        let motion = MotionSpec::for_path(name.path()).filter(|spec| spec.has_hover_motion());
+        Self {
+            svg: svg().path(name.path()).size(px(16.)).flex_none(),
+            name,
+            motion,
+            id: ElementId::CodeLocation(*std::panic::Location::caller()),
+            motion_enabled: true,
+            explicit_transformation: false,
+        }
+    }
+
+    pub fn motion_enabled(mut self, enabled: bool) -> Self {
+        self.motion_enabled = enabled;
+        self
+    }
+
+    pub fn with_transformation(mut self, transformation: Transformation) -> Self {
+        self.svg = self.svg.with_transformation(transformation);
+        self.explicit_transformation = true;
+        self
+    }
+
+    fn resolved_base_color(&mut self, window: &Window) -> gpui::Hsla {
+        self.svg
+            .style()
+            .text
+            .color
+            .unwrap_or_else(|| window.text_style().color)
+    }
+
+    fn supports_hover_motion(&self) -> bool {
+        self.motion_enabled
+            && self
+                .motion
+                .is_some_and(|spec| !self.explicit_transformation || spec.translates_only())
+    }
+}
+
+impl IntoElement for Icon {
+    type Element = Self;
+
+    fn into_element(self) -> Self {
+        self
+    }
+}
+
+impl Styled for Icon {
+    fn style(&mut self) -> &mut StyleRefinement {
+        self.svg.style()
+    }
+}
+
+impl InteractiveElement for Icon {
+    fn interactivity(&mut self) -> &mut Interactivity {
+        self.svg.interactivity()
+    }
+}
+
+impl Element for Icon {
+    type RequestLayoutState = ();
+    type PrepaintState = Option<Hitbox>;
+
+    fn id(&self) -> Option<ElementId> {
+        Element::id(&self.svg).or_else(|| self.supports_hover_motion().then(|| self.id.clone()))
+    }
+
+    fn source_location(&self) -> Option<&'static std::panic::Location<'static>> {
+        self.svg.source_location()
+    }
+
+    fn request_layout(
+        &mut self,
+        global_id: Option<&GlobalElementId>,
+        inspector_id: Option<&InspectorElementId>,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> (LayoutId, Self::RequestLayoutState) {
+        self.svg.request_layout(global_id, inspector_id, window, cx)
+    }
+
+    fn prepaint(
+        &mut self,
+        global_id: Option<&GlobalElementId>,
+        inspector_id: Option<&InspectorElementId>,
+        bounds: Bounds<Pixels>,
+        state: &mut Self::RequestLayoutState,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> Self::PrepaintState {
+        let hitbox = self
+            .svg
+            .prepaint(global_id, inspector_id, bounds, state, window, cx);
+        hitbox.or_else(|| {
+            self.supports_hover_motion()
+                .then(|| window.insert_hitbox(bounds, HitboxBehavior::Normal))
+        })
+    }
+
+    fn paint(
+        &mut self,
+        global_id: Option<&GlobalElementId>,
+        inspector_id: Option<&InspectorElementId>,
+        bounds: Bounds<Pixels>,
+        state: &mut Self::RequestLayoutState,
+        hitbox: &mut Self::PrepaintState,
+        window: &mut Window,
+        cx: &mut App,
+    ) {
+        let mut paint_bounds = bounds;
+        if let Some(global_id) = global_id {
+            let enabled = self.supports_hover_motion()
+                && window.is_window_active()
+                && crate::icon_motion::IconMotionPreferences::enabled(cx);
+            let hovered = enabled
+                && crate::icon_motion::scoped_hover(cx)
+                    .unwrap_or_else(|| hitbox.as_ref().is_some_and(|h| h.is_hovered(window)));
+            let now = std::time::Instant::now();
+            let frame =
+                window.with_element_state(global_id, |playback: Option<MotionPlayback>, _| {
+                    let mut playback = playback.unwrap_or_default();
+                    let frame = playback.frame(self.name.path(), self.motion, hovered, now);
+                    (frame, playback)
+                });
+            if let Some(frame) = frame {
+                if self.explicit_transformation {
+                    paint_bounds = frame.translated_bounds(bounds);
+                } else {
+                    let replacement = svg();
+                    let inner = std::mem::replace(&mut self.svg, replacement);
+                    self.svg = inner.with_transformation(frame.transformation(bounds));
+                }
+                if frame.running {
+                    window.request_animation_frame();
+                }
+            }
+        }
+        let explicit_color = self.svg.style().text.color;
+        self.svg.style().text.color = Some(self.resolved_base_color(window));
+        self.svg.paint(
+            global_id,
+            inspector_id,
+            paint_bounds,
+            state,
+            hitbox,
+            window,
+            cx,
+        );
+        self.svg.style().text.color = explicit_color;
+        if self.supports_hover_motion()
+            && crate::icon_motion::scoped_hover(cx).is_none()
+            && let Some(hitbox) = hitbox.as_ref()
+        {
+            let hitbox = hitbox.clone();
+            let view = window.current_view();
+            let mut was_hovered = hitbox.is_hovered(window);
+            window.on_mouse_event(move |_: &MouseMoveEvent, phase, window, cx| {
+                let hovered = hitbox.is_hovered(window);
+                if phase == DispatchPhase::Capture && hovered != was_hovered {
+                    was_hovered = hovered;
+                    cx.notify(view);
+                }
+            });
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use gpui::{Context, MouseButton, Render, TestApp, div, point};
+
+    struct Fixture {
+        clicks: usize,
+        transformed: bool,
+        hover_style: bool,
+        renders: usize,
+    }
+
+    impl Render for Fixture {
+        fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+            self.renders += 1;
+            div()
+                .id("icon-action")
+                .size(px(40.))
+                .on_click(cx.listener(|this, _, _, cx| {
+                    this.clicks += 1;
+                    cx.notify();
+                }))
+                .child(
+                    Icon::new(IconName::SelectFileIcon)
+                        .size(px(20.))
+                        .text_color(gpui::white())
+                        .when(self.hover_style, |icon| {
+                            icon.hover(|style| style.text_color(gpui::black()))
+                        })
+                        .when(self.transformed, |icon| {
+                            icon.with_transformation(Transformation::rotate(gpui::radians(1.)))
+                        }),
+                )
+        }
+    }
+
+    #[test]
+    fn animated_icon_keeps_parent_clicks_and_explicit_transform_consumer() {
+        let mut app = TestApp::new();
+        let mut window = app.open_window(|_, _| Fixture {
+            clicks: 0,
+            transformed: false,
+            hover_style: true,
+            renders: 0,
+        });
+        window.draw();
+        window.simulate_mouse_move(point(px(10.), px(10.)));
+        window.draw();
+        window.simulate_click(point(px(10.), px(10.)), MouseButton::Left);
+        assert_eq!(window.read(|view, _| view.clicks), 1);
+        window.update(|view, _, cx| {
+            view.transformed = true;
+            cx.notify();
+        });
+        window.draw();
+        window.simulate_click(point(px(10.), px(10.)), MouseButton::Left);
+        assert_eq!(window.read(|view, _| view.clicks), 2);
+        app.update(|cx| {
+            cx.set_global(crate::IconMotionPreferences {
+                reduced_motion: true,
+            })
+        });
+        window.draw();
+        window.simulate_click(point(px(10.), px(10.)), MouseButton::Left);
+        assert_eq!(window.read(|view, _| view.clicks), 3);
+    }
+
+    #[test]
+    fn unstyled_icon_repaints_on_pointer_entry_and_exit() {
+        let mut app = TestApp::new();
+        let mut window = app.open_window(|_, _| Fixture {
+            clicks: 0,
+            transformed: false,
+            hover_style: false,
+            renders: 0,
+        });
+        window.draw();
+        window.simulate_mouse_move(point(px(60.), px(60.)));
+        window.draw();
+        let outside = window.read(|view, _| view.renders);
+        window.simulate_mouse_move(point(px(10.), px(10.)));
+        window.draw();
+        let inside = window.read(|view, _| view.renders);
+        assert!(inside > outside);
+        window.simulate_mouse_move(point(px(60.), px(60.)));
+        window.draw();
+        assert!(window.read(|view, _| view.renders) > inside);
+        assert_eq!(window.read(|view, _| view.clicks), 0);
+    }
+
+    #[test]
+    fn icon_tint_tracks_parent_theme_changes_and_keeps_explicit_colors() {
+        use std::{cell::Cell, rc::Rc};
+
+        #[derive(IntoElement)]
+        struct TintProbe {
+            icon: Icon,
+            observed: Rc<Cell<Option<gpui::Hsla>>>,
+        }
+
+        impl RenderOnce for TintProbe {
+            fn render(mut self, window: &mut Window, _: &mut App) -> impl IntoElement {
+                self.observed
+                    .set(Some(self.icon.resolved_base_color(window)));
+                self.icon
+            }
+        }
+
+        struct TintFixture {
+            color: gpui::Hsla,
+            explicit_color: gpui::Hsla,
+            inherited: Rc<Cell<Option<gpui::Hsla>>>,
+            explicit: Rc<Cell<Option<gpui::Hsla>>>,
+        }
+
+        impl Render for TintFixture {
+            fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+                div()
+                    .text_color(self.color)
+                    .child(TintProbe {
+                        icon: Icon::new(IconName::IconFriends),
+                        observed: self.inherited.clone(),
+                    })
+                    .child(TintProbe {
+                        icon: Icon::new(IconName::IconFriends).text_color(self.explicit_color),
+                        observed: self.explicit.clone(),
+                    })
+            }
+        }
+
+        let mut app = TestApp::new();
+        let inherited = Rc::new(Cell::new(None));
+        let explicit = Rc::new(Cell::new(None));
+        let explicit_color: gpui::Hsla = gpui::rgb(0x5865f2).into();
+        let mut window = app.open_window(|_, _| TintFixture {
+            color: gpui::white(),
+            explicit_color,
+            inherited: inherited.clone(),
+            explicit: explicit.clone(),
+        });
+        for name in ["dark", "light", "purple_haze"] {
+            let theme = mezon_theme::resolve_theme(name);
+            for color in [theme.tokens.text_secondary, theme.tokens.text_theme_primary] {
+                let color = color.into();
+                window.update(|view, _, cx| {
+                    view.color = color;
+                    cx.notify();
+                });
+                window.draw();
+                assert_eq!(inherited.get(), Some(color));
+                assert_eq!(explicit.get(), Some(explicit_color));
+            }
+        }
     }
 }

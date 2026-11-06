@@ -1201,16 +1201,11 @@ impl CreateEventModal {
                     .flex()
                     .items_center()
                     .gap_3()
-                    .child(if icon == IconName::Location {
-                        img(IconName::Location.path())
-                            .size(px(23.))
-                            .into_any_element()
-                    } else {
+                    .child(
                         Icon::new(icon)
                             .size(px(23.))
-                            .text_color(theme.text_secondary)
-                            .into_any_element()
-                    })
+                            .text_color(theme.tokens.text_secondary),
+                    )
                     .child(
                         div()
                             .child(
@@ -1238,6 +1233,7 @@ impl CreateEventModal {
                     })
                     .when(selected, |d| d.bg(theme.brand)),
             )
+            .map(|element| Icon::motion_scope(element, enabled))
             .into_any_element()
     }
     fn required_label(&self, key: &'static str, cx: &Context<Self>) -> AnyElement {
@@ -1800,13 +1796,14 @@ impl CreateEventModal {
                             .items_center()
                             .gap_2()
                             .child(if self.location_kind == Some(LocationKind::Somewhere) {
-                                img(IconName::Location.path())
+                                Icon::new(IconName::Location)
+                                    .text_color(theme.tokens.text_secondary)
                                     .size(px(21.))
                                     .into_any_element()
                             } else {
                                 Icon::new(IconName::Speaker)
                                     .size(px(21.))
-                                    .text_color(theme.text_secondary)
+                                    .text_color(theme.tokens.text_secondary)
                                     .into_any_element()
                             })
                             .child(div().font_weight(FontWeight::SEMIBOLD).child(location)),

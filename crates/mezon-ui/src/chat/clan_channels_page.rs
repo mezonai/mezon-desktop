@@ -5,7 +5,7 @@ use std::sync::Arc;
 use gpui::{
     AnyElement, App, Context, Entity, FontWeight, ListAlignment, ListOffset, ListState,
     MouseButton, MouseDownEvent, Pixels, Point, Render, Subscription, WeakEntity, Window, deferred,
-    div, img, list, prelude::*, px, size,
+    div, list, prelude::*, px, size,
 };
 use mezon_store::{
     BadgeService, ChannelId, ChannelList, ChannelSetting, ChannelSettingsStore, ChannelType,
@@ -568,7 +568,9 @@ impl ClanChannelsPage {
                                 cx,
                             )
                         } else {
-                            img("icons/avatar-user.svg")
+                            Icon::new(IconName::AvatarUser)
+                                .motion_enabled(false)
+                                .text_color(cx.theme().tokens.text_secondary)
                                 .size(px(24.))
                                 .flex_none()
                                 .into_any_element()

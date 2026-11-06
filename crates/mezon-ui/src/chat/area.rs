@@ -801,7 +801,13 @@ fn latest_activity_strip(
             .border_1()
             .border_color(theme.border)
             .bg(theme.bg_hover)
-            .child(img(file_icon.path()).w(px(20.)).h(px(26.)).flex_none())
+            .child(
+                Icon::new(file_icon)
+                    .text_color(theme.tokens.text_secondary)
+                    .w(px(20.))
+                    .h(px(26.))
+                    .flex_none(),
+            )
             .child(
                 div()
                     .flex()
@@ -1026,7 +1032,13 @@ fn latest_activity_strip(
             .border_1()
             .border_color(theme.border)
             .bg(theme.bg_hover)
-            .child(img(file_icon.path()).w(px(20.)).h(px(26.)).flex_none())
+            .child(
+                Icon::new(file_icon)
+                    .text_color(theme.tokens.text_secondary)
+                    .w(px(20.))
+                    .h(px(26.))
+                    .flex_none(),
+            )
             .child(
                 div()
                     .flex()

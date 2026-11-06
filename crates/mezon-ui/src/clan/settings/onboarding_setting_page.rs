@@ -967,17 +967,10 @@ impl OnboardingSettingPage {
         theme: &Theme,
         on_click: impl Fn(&gpui::ClickEvent, &mut Window, &mut App) + 'static,
     ) -> gpui::AnyElement {
-        let row_icon = if icon == IconName::GuideIcon {
-            img(icon.path())
-                .size(px(26.0))
-                .flex_none()
-                .into_any_element()
-        } else {
-            Icon::new(icon)
-                .size(px(26.0))
-                .text_color(theme.text_secondary)
-                .into_any_element()
-        };
+        let row_icon = Icon::new(icon)
+            .size(px(26.0))
+            .text_color(theme.tokens.text_secondary)
+            .into_any_element();
 
         h_flex()
             .id(format!("{action_id}-row"))
@@ -1027,6 +1020,7 @@ impl OnboardingSettingPage {
                     })
                     .on_click(on_click),
             )
+            .map(|element| Icon::motion_scope(element, true))
             .into_any_element()
     }
 
