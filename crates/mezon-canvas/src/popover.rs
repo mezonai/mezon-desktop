@@ -264,7 +264,7 @@ fn render_header(
         .icon(
             Icon::new(IconName::Close)
                 .size_4()
-                .text_color(tokens.text_theme_primary_hover),
+                .text_color(tokens.text_theme_primary),
         )
         .ghost()
         .with_size(Size::Small)
