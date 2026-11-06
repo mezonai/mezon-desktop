@@ -675,8 +675,13 @@ impl Render for UserProfilePopover {
                     .map(|p| p.display_name.as_str())
                     .unwrap_or(""),
             );
+        let message_bg = {
+            let tokens = &cx.theme().tokens;
+            tokens.bg_surface.blend(tokens.bg_input_secondary).into()
+        };
         self.message_input.update(cx, |input, cx| {
             input.set_placeholder(message_placeholder, cx);
+            input.set_bg(Some(message_bg), cx);
         });
 
         let (display_name, username, avatar_raw, about_me, member_since_time, online) =
@@ -790,7 +795,7 @@ impl Render for UserProfilePopover {
             .w(px(300.))
             .overflow_hidden()
             .rounded_lg()
-            .bg(theme.bg_floating)
+            .bg(theme.tokens.theme_setting_primary)
             .key_context("menu")
             .track_focus(&self.focus_handle)
             .on_action(cx.listener(|_, _: &::menu::Cancel, _window, cx| {
@@ -802,11 +807,7 @@ impl Render for UserProfilePopover {
                 }))
             })
             .when(self.embedded, |el| {
-                el.w_full()
-                    .h_full()
-                    .rounded_none()
-                    .overflow_hidden()
-                    .bg(theme.surfaces.direct_message.ramp())
+                el.w_full().h_full().rounded_none().overflow_hidden()
             })
             .child(
                 div()
@@ -846,15 +847,14 @@ impl Render for UserProfilePopover {
                         .my(px(16.))
                         .border_1()
                         .border_color(theme.tokens.theme_border_input)
-                        .shadow_sm()
-                        .bg(theme.tokens.bg_active_member_channel)
+                        .bg(theme.tokens.bg_surface)
                         .flex()
                         .flex_col()
                         .child(
                             div()
                                 .font_weight(FontWeight::SEMIBOLD)
                                 .text_lg()
-                                .text_color(theme.tokens.text_theme_primary)
+                                .text_color(theme.tokens.text_theme_message)
                                 .overflow_hidden()
                                 .truncate()
                                 .child(display_name.clone()),
@@ -863,7 +863,7 @@ impl Render for UserProfilePopover {
                             div()
                                 .text_base()
                                 .font_weight(FontWeight::SEMIBOLD)
-                                .text_color(theme.tokens.text_theme_primary)
+                                .text_color(theme.tokens.text_theme_message)
                                 .overflow_hidden()
                                 .truncate()
                                 .child(username.clone()),
@@ -920,18 +920,11 @@ impl Render for UserProfilePopover {
                         })
                         .when(show_message_input, |d| {
                             d.child(
-                                div()
-                                    .occlude()
-                                    .mt_2()
-                                    .rounded(px(5.))
-                                    .border_1()
-                                    .border_color(theme.tokens.theme_border_input)
-                                    .bg(theme.tokens.bg_theme_contexify)
-                                    .child(
-                                        Input::new(&self.message_input)
-                                            .w_full()
-                                            .text_color(theme.tokens.text_theme_primary),
-                                    ),
+                                div().occlude().mt_2().rounded(px(5.)).child(
+                                    Input::new(&self.message_input)
+                                        .w_full()
+                                        .text_color(theme.tokens.text_theme_primary),
+                                ),
                             )
                         })
                         .when(username.is_empty() && !is_self && !is_blocked, |d| {
