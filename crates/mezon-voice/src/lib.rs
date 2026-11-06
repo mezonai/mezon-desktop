@@ -54,7 +54,7 @@ pub use camera::{
     CameraController, CameraDeviceInfo, enumerate_cameras, start_camera, start_camera_into,
 };
 #[cfg(any(target_os = "linux", target_os = "freebsd"))]
-pub use linux_session::record_wayland_session;
+pub use linux_session::{record_wayland_session, set_portal_parent_window};
 pub use mezon_record::{RecordError, RecordStats};
 pub use permission::{
     MediaDevice, MediaPermission, media_permission, media_permission_changes,
@@ -846,6 +846,13 @@ async fn session_main(
                             continue;
                         }
                         screen_mode = mode;
+                        if screen_session.is_none()
+                            && screen_picker::pick_uses_portal(&pick)
+                            && let Some(task) = screen_task.take()
+                        {
+                            task.abort();
+                            screen_gen = screen_gen.wrapping_add(1);
+                        }
                         if screen_session.is_none() && screen_task.is_none() {
                             screen_full_res.store(false, Ordering::Relaxed);
                             let factory = factory.clone();

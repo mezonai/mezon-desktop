@@ -1,6 +1,10 @@
 pub mod engine;
 
-use std::{error::Error, sync::mpsc, time::Duration};
+use std::{
+    error::Error,
+    sync::{atomic::AtomicBool, mpsc, Arc},
+    time::Duration,
+};
 
 use anyhow::anyhow;
 
@@ -72,6 +76,8 @@ pub struct Options {
     pub excluded_targets: Option<Vec<Target>>,
     pub portal_source_types: Option<u32>,
     pub use_portal: bool,
+    pub portal_parent_window: Option<String>,
+    pub portal_cancel: Option<Arc<AtomicBool>>,
 }
 
 pub struct Capturer {

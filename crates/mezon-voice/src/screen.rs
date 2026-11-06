@@ -18,8 +18,8 @@ type CapturedScreenFrame = BGRAFrame;
 
 use crate::annotation::AnnotationCompositor;
 use crate::screen_picker::{
-    PickedScreen, pick_is_window, pick_uses_portal, portal_source_types_for_pick,
-    scap_target_for_pick,
+    PickedScreen, pick_is_window, pick_uses_portal, portal_parent_window_for_pick,
+    portal_source_types_for_pick, scap_target_for_pick,
 };
 #[cfg(any(target_os = "linux", target_os = "freebsd"))]
 use crate::video::SharedMonitor;
@@ -264,6 +264,7 @@ pub fn start_screen(
             let is_window_share = pick_is_window(&pick);
             let use_portal = pick_uses_portal(&pick);
             let portal_source_types = portal_source_types_for_pick(&pick);
+            let portal_parent_window = portal_parent_window_for_pick(&pick);
             let capture_target = match scap_target_for_pick(pick) {
                 Ok(target) => target,
                 Err(e) => {
@@ -298,6 +299,8 @@ pub fn start_screen(
                 output_resolution: Resolution::_1080p,
                 portal_source_types,
                 use_portal,
+                portal_parent_window,
+                portal_cancel: use_portal.then(|| thread_stop.clone()),
                 ..Default::default()
             };
 

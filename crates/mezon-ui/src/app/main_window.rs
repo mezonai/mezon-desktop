@@ -31,6 +31,24 @@ pub fn register_main_window(handle: AnyWindowHandle, cx: &mut App) {
         tracing::warn!("register_main_window called more than once");
     }
     cx.set_global(MainWindowHandle(handle));
+    #[cfg(any(target_os = "linux", target_os = "freebsd"))]
+    register_portal_parent_window(handle, cx);
+}
+
+#[cfg(any(target_os = "linux", target_os = "freebsd"))]
+fn register_portal_parent_window(handle: AnyWindowHandle, cx: &mut App) {
+    use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+
+    let xid = cx.update_window(handle, |_, window, _| -> Option<u32> {
+        match HasWindowHandle::window_handle(&*window).ok()?.as_raw() {
+            RawWindowHandle::Xcb(xcb) => Some(xcb.window.get()),
+            RawWindowHandle::Xlib(xlib) => u32::try_from(xlib.window).ok(),
+            _ => None,
+        }
+    });
+    if let Ok(Some(xid)) = xid {
+        mezon_voice::set_portal_parent_window(xid);
+    }
 }
 
 pub fn handle(cx: &App) -> Option<AnyWindowHandle> {
