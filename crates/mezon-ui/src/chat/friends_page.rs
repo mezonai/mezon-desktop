@@ -3,7 +3,7 @@ use std::collections::HashMap;
 use gpui::{
     AnyElement, App, ClickEvent, Context, Entity, InteractiveElement, IntoElement, ParentElement,
     Pixels, Point, SharedString, StatefulInteractiveElement, Styled, Subscription,
-    UniformListScrollHandle, Window, div, img, prelude::*, px, relative, rgb, uniform_list,
+    UniformListScrollHandle, Window, div, prelude::*, px, relative, rgb, uniform_list,
 };
 use mezon_store::activity::{ACTIVITY_TYPE_LIVE, ACTIVITY_TYPE_PLAY, ACTIVITY_TYPE_WORK};
 use mezon_store::{
@@ -942,7 +942,7 @@ impl FriendsPage {
                             .items_center()
                             .font_weight(gpui::FontWeight::MEDIUM)
                             .text_color(theme.tokens.text_secondary)
-                            .child(img("icons/icon-friends.svg").size(px(20.)).flex_none())
+                            .child(Icon::new(IconName::FRIENDS_20).flex_none())
                             .child(mezon_i18n::t(locale, "friendsPage.friends")),
                     )
                     .child(
@@ -1031,9 +1031,7 @@ impl FriendsPage {
                     .flex()
                     .items_center()
                     .child(
-                        Icon::new(IconName::Search)
-                            .size_4()
-                            .text_color(theme.tokens.text_theme_primary),
+                        Icon::new(IconName::SEARCH_16).text_color(theme.tokens.text_theme_primary),
                     ),
             );
 
@@ -1360,8 +1358,7 @@ fn render_friend_row(
                 .right(px(-1.))
                 .size(px(10.))
                 .child(
-                    Icon::new(IconName::DarkModeIcon)
-                        .size(px(10.))
+                    Icon::new(IconName::MOON_16)
                         .with_transformation(gpui::Transformation::rotate(gpui::radians(
                             -std::f32::consts::FRAC_PI_2,
                         )))

@@ -4909,5 +4909,7 @@
   "screenShare.modeText": "Text",
   "screenShare.modeTextDescription": "Sharper text and slides, lower resource use.",
   "screenShare.modeVideo": "Video",
-  "screenShare.modeVideoDescription": "Smoother video; may reduce sharpness on a slow connection."
+  "screenShare.modeVideoDescription": "Smoother video; may reduce sharpness on a slow connection.",
+  "setting.appearance.iconAnimations": "Icon animations",
+  "setting.appearance.iconAnimationsDescription": "Animate icons when hovering over buttons and rows."
 }

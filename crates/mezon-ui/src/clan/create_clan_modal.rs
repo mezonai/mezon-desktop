@@ -294,11 +294,7 @@ impl CreateClanModal {
             .cursor_pointer()
             .hover(|s| s.border_color(theme.brand))
             .on_click(cx.listener(|this, _, _window, cx| this.go_to_details(None, cx)))
-            .child(
-                Icon::new(IconName::Sparkles)
-                    .size(px(20.))
-                    .text_color(theme.tokens.text_theme_primary),
-            )
+            .child(Icon::new(IconName::SPARKLES_20).text_color(theme.tokens.text_theme_primary))
             .child(
                 div()
                     .font_weight(gpui::FontWeight::SEMIBOLD)
@@ -320,18 +316,10 @@ impl CreateClanModal {
                 let label: SharedString = mezon_i18n::t(locale, entry.key).to_string().into();
                 let template_id = entry.id;
                 let icon = entry.icon;
-                let template_icon = match template_id {
-                    TemplateId::Gaming | TemplateId::Friends | TemplateId::LocalCommunity => {
-                        img(icon.path())
-                            .size(px(20.))
-                            .flex_none()
-                            .into_any_element()
-                    }
-                    _ => Icon::new(icon)
-                        .size(px(20.))
-                        .text_color(theme.tokens.text_theme_primary)
-                        .into_any_element(),
-                };
+                let template_icon = Icon::new(icon)
+                    .size(px(20.))
+                    .text_color(theme.tokens.text_theme_primary)
+                    .into_any_element();
                 div()
                     .id(SharedString::from(format!("template-{}", entry.key)))
                     .w_full()
@@ -357,6 +345,7 @@ impl CreateClanModal {
                             .text_color(theme.tokens.text_theme_primary)
                             .child(label),
                     )
+                    .map(|element| Icon::motion_scope(element, true))
                     .into_any_element()
             })
             .collect();
@@ -439,20 +428,8 @@ impl CreateClanModal {
                 .items_center()
                 .justify_center()
                 .cursor_pointer()
-                .relative()
                 .on_click(cx.listener(|this, _, window, cx| this.pick_logo(window, cx)))
-                .child(
-                    div()
-                        .absolute()
-                        .top(px(-3.))
-                        .right(px(0.))
-                        .child(Icon::new(IconName::AddIcon).size(px(16.))),
-                )
-                .child(
-                    Icon::new(IconName::UploadImage)
-                        .size(px(24.))
-                        .text_color(theme.text_secondary),
-                )
+                .child(Icon::new(IconName::CAMERA_24).selected(false))
                 .child(
                     div()
                         .text_size(px(14.))

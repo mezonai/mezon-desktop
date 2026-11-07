@@ -269,11 +269,7 @@ impl RoleSettingPage {
                 h_flex()
                     .items_center()
                     .gap_2()
-                    .child(
-                        Icon::new(IconName::RoleIcon)
-                            .size(px(20.0))
-                            .text_color(theme.text_muted),
-                    )
+                    .child(Icon::new(IconName::ROLE_20).selected(false))
                     .child(
                         div()
                             .text_sm()

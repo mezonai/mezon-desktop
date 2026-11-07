@@ -450,11 +450,7 @@ impl Render for EventDetailView {
                     .p_1()
                     .hover(|el| el.bg(theme.bg_hover))
                     .on_click(move |_, window, cx| on_back(window, cx))
-                    .child(
-                        Icon::new(IconName::ArrowLeft)
-                            .size(px(20.))
-                            .text_color(theme.text_primary),
-                    ),
+                    .child(Icon::new(IconName::CHEVRON_LEFT_20).text_color(theme.text_primary)),
             )
             .child(
                 v_flex()
@@ -506,11 +502,7 @@ impl Render for EventDetailView {
                                 h_flex()
                                     .gap_1()
                                     .items_center()
-                                    .child(
-                                        Icon::new(IconName::History)
-                                            .size(px(14.))
-                                            .text_color(theme.text_secondary),
-                                    )
+                                    .child(Icon::new(IconName::HISTORY_16).selected(false))
                                     .child(
                                         div()
                                             .text_xs()
@@ -533,11 +525,7 @@ impl Render for EventDetailView {
                         .on_click(cx.listener(|this, _, window, cx| {
                             this.pick_files(window, cx);
                         }))
-                        .child(
-                            Icon::new(IconName::ImageThumbnail)
-                                .size(px(20.))
-                                .text_color(theme.text_primary),
-                        ),
+                        .child(Icon::new(IconName::FILE_IMAGE_20).text_color(theme.text_primary)),
                 )
             })
             .into_any_element();
@@ -738,11 +726,7 @@ fn render_detail_top(
                             .ok();
                     }
                 })
-                .child(
-                    Icon::new(IconName::PenEdit)
-                        .size(px(16.))
-                        .text_color(theme.text_secondary),
-                )
+                .child(Icon::new(IconName::EDIT_16).selected(false))
                 .child(
                     div()
                         .text_sm()
@@ -794,11 +778,7 @@ fn render_detail_top(
                                     .ok();
                                 }
                             })
-                            .child(
-                                Icon::new(IconName::CloseIcon)
-                                    .size(px(16.))
-                                    .text_color(theme.text_secondary),
-                            )
+                            .child(Icon::new(IconName::CLOSE_CIRCLE_16).selected(false))
                             .child(mezon_i18n::t(
                                 locale,
                                 "channelCreator.fields.eventDetail.cancel",
@@ -838,8 +818,7 @@ fn render_detail_top(
                             .child(if saving {
                                 Spinner::new().into_any_element()
                             } else {
-                                Icon::new(IconName::CheckIcon)
-                                    .size(px(16.))
+                                Icon::new(IconName::CHECK_16)
                                     .text_color(rgb(0xffffff))
                                     .into_any_element()
                             })
@@ -941,11 +920,7 @@ fn render_add_media_tile(theme: &Theme, view: WeakEntity<EventDetailView>) -> im
             .on_click(move |_, window, cx| {
                 view.update(cx, |this, cx| this.pick_files(window, cx)).ok();
             })
-            .child(
-                Icon::new(IconName::PlusIcon)
-                    .size(px(32.))
-                    .text_color(theme.text_secondary),
-            ),
+            .child(Icon::new(IconName::PLUS_CIRCLE_32).selected(false)),
     )
 }
 

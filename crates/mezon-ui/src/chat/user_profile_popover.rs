@@ -393,8 +393,7 @@ impl UserProfilePopover {
                         .bg(color)
                         .cursor_pointer()
                         .child(
-                            Icon::new(IconName::IconRemove)
-                                .size(px(8.))
+                            Icon::new(IconName::CLOSE_16)
                                 .text_color(color)
                                 .group_hover(group.clone(), |style| {
                                     style.text_color(gpui::black())
@@ -455,11 +454,7 @@ impl UserProfilePopover {
                     .p_1()
                     .cursor_pointer()
                     .text_color(theme.tokens.text_theme_primary)
-                    .child(
-                        Icon::new(IconName::Plus)
-                            .size(px(20.))
-                            .text_color(theme.tokens.text_theme_primary),
-                    )
+                    .child(Icon::new(IconName::PLUS_20).text_color(theme.tokens.text_theme_primary))
                     .child(
                         div()
                             .text_xs()
@@ -539,13 +534,9 @@ impl UserProfilePopover {
                                     .text_color(theme.tokens.text_theme_primary),
                             ),
                     )
-                    .child(
-                        div().absolute().right(px(8.)).top(px(8.)).child(
-                            Icon::new(IconName::Search)
-                                .size(px(20.))
-                                .text_color(theme.tokens.text_theme_primary),
-                        ),
-                    ),
+                    .child(div().absolute().right(px(8.)).top(px(8.)).child(
+                        Icon::new(IconName::SEARCH_20).text_color(theme.tokens.text_theme_primary),
+                    )),
             )
             .child(list)
             .into_any_element()
@@ -987,24 +978,24 @@ const BANNER_ICON_BG: u32 = 0x272120;
 const BANNER_ICON_BG_HOVER: u32 = 0x1e1a19;
 const BANNER_ICON_PENDING_BG: u32 = 0x4e5058;
 pub(crate) fn share_contact_icon(cache: gpui::Entity<LruImageCache>) -> gpui::AnyElement {
-    profile_asset_icon("icons/icon-share-contact.svg", cache)
+    profile_asset_icon(IconName::IconShareContact, cache)
 }
 
 pub(crate) fn friend_icon(cache: gpui::Entity<LruImageCache>) -> gpui::AnyElement {
-    profile_asset_icon("icons/icon-friend.svg", cache)
+    profile_asset_icon(IconName::IconFriend, cache)
 }
 
 pub(crate) fn add_person_icon(cache: gpui::Entity<LruImageCache>) -> gpui::AnyElement {
-    profile_asset_icon("icons/add-person.svg", cache)
+    profile_asset_icon(IconName::AddPerson, cache)
 }
 
 pub(crate) fn accept_friend_icon(cache: gpui::Entity<LruImageCache>) -> gpui::AnyElement {
-    profile_asset_icon("icons/i-con-accept-friend.svg", cache)
+    profile_asset_icon(IconName::IConAcceptFriend, cache)
 }
 
-fn profile_asset_icon(path: &'static str, cache: gpui::Entity<LruImageCache>) -> gpui::AnyElement {
-    img(path)
-        .image_cache(&cache)
+fn profile_asset_icon(icon: IconName, _cache: gpui::Entity<LruImageCache>) -> gpui::AnyElement {
+    Icon::new(icon)
+        .text_color(gpui::white())
         .size(px(16.))
         .flex_none()
         .into_any_element()
@@ -1086,8 +1077,7 @@ fn render_banner_actions(
             let locale: SharedString = this.settings.read(cx).language.clone().into();
             SendTokenModal::open(locale, Some((recipient_id, username)), window, cx);
         }),
-        Icon::new(IconName::Transaction)
-            .size(px(16.))
+        Icon::new(IconName::TRANSACTION_16)
             .text_color(gpui::white())
             .into_any_element(),
     ));
@@ -1428,8 +1418,7 @@ fn render_voice_button(
             );
         })
         .child(
-            Icon::new(IconName::Speaker)
-                .size(px(14.))
+            Icon::new(IconName::SPEAKER_16)
                 .text_color(crate::util::user_status::in_voice_icon_color(theme)),
         )
         .into_any_element()

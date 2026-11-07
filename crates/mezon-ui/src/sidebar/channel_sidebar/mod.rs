@@ -1546,11 +1546,7 @@ impl Render for ChannelSidebar {
                                         .text_color(theme.text_primary)
                                         .child(clan_name.clone()),
                                 )
-                                .child(
-                                    Icon::new(IconName::ChevronDownIcon)
-                                        .size(px(20.))
-                                        .text_color(theme.text_secondary),
-                                ),
+                                .child(Icon::new(IconName::CHEVRON_DOWN_20).selected(false)),
                         )
                     })
                     .when(!has_clan, |el| {
@@ -2015,11 +2011,7 @@ fn onboarding_get_started(
                                 .font_weight(gpui::FontWeight::BOLD)
                                 .child(total.to_string()),
                         )
-                        .child(
-                            Icon::new(IconName::ArrowRight)
-                                .size(px(12.))
-                                .text_color(theme.text_secondary),
-                        ),
+                        .child(Icon::new(IconName::CHEVRON_RIGHT_16).selected(false)),
                 ),
         )
         .child(
@@ -2332,13 +2324,12 @@ fn render_banner_and_events(
         .when(guide_active, |element| element.bg(theme.bg_hover))
         .hover(|style| style.bg(theme.bg_hover))
         .text_color(if guide_active {
-            theme.text_primary
+            theme.tokens.text_theme_primary
         } else {
-            theme.text_secondary
+            theme.tokens.text_secondary
         })
         .child(
-            gpui::img(IconName::GuideIcon.path())
-                .size(px(20.))
+            Icon::new(IconName::GUIDE_20)
                 .flex_none()
                 .when(!guide_active, |icon| {
                     icon.opacity(0.65)
@@ -2441,10 +2432,14 @@ fn render_banner_and_events(
         .p_2()
         .gap_1()
         .children(onboarding_card)
-        .when(clan_has_onboarding, |element| element.child(guide_row))
-        .child(events_row)
-        .child(members_row)
-        .when(can_view_channels, |element| element.child(channels_row));
+        .when(clan_has_onboarding, |element| {
+            element.child(Icon::motion_scope(guide_row, true))
+        })
+        .child(Icon::motion_scope(events_row, true))
+        .child(Icon::motion_scope(members_row, true))
+        .when(can_view_channels, |element| {
+            element.child(Icon::motion_scope(channels_row, true))
+        });
 
     col = col.child(nav_col);
 
@@ -2488,10 +2483,7 @@ fn render_banner_and_events(
                     )
                     .into_any_element()
             } else {
-                gpui::svg()
-                    .path("icons/channel-app-fallback.svg")
-                    .w(px(24.))
-                    .h(px(24.))
+                Icon::new(IconName::CHANNEL_APP_24)
                     .text_color(theme.text_primary)
                     .into_any_element()
             };
@@ -2544,11 +2536,7 @@ fn render_banner_and_events(
                             sidebar.open_app_list(all_apps.clone(), cx);
                         });
                     })
-                    .child(
-                        Icon::new(IconName::RightIcon)
-                            .size(px(24.))
-                            .text_color(theme.text_primary),
-                    ),
+                    .child(Icon::new(IconName::CHEVRON_RIGHT_24).text_color(theme.text_primary)),
             );
         }
 
@@ -2691,11 +2679,7 @@ fn render_sidebar_item(
                                 Shell::global(cx)
                                     .update(cx, |shell, cx| shell.show_modal(modal.into(), cx));
                             })
-                            .child(
-                                Icon::new(IconName::Plus)
-                                    .size(px(18.))
-                                    .text_color(theme.text_muted),
-                            ),
+                            .child(Icon::new(IconName::PLUS_20).selected(false)),
                     )
                 })
                 .on_click({
@@ -3191,8 +3175,7 @@ fn render_sidebar_item(
                     )
                     .when(member.sharing_screen, |el| {
                         el.child(
-                            Icon::new(IconName::VoiceScreenShareIcon)
-                                .size(px(16.))
+                            Icon::new(IconName::SCREEN_SHARE_16)
                                 .text_color(crate::util::user_status::in_voice_icon_color(theme)),
                         )
                     })
@@ -3226,11 +3209,7 @@ fn viewer_count_badge(viewer_count: u32, theme: &Theme) -> gpui::Div {
         .gap_1()
         .text_xs()
         .text_color(theme.text_muted)
-        .child(
-            Icon::new(IconName::EyeOpen)
-                .size(px(14.))
-                .text_color(theme.text_muted),
-        )
+        .child(Icon::new(IconName::EYE_16).selected(false))
         .child(viewer_count.to_string())
 }
 

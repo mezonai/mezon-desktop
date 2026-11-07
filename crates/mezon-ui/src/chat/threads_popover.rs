@@ -363,11 +363,7 @@ fn render_header(
         .flex_shrink_0()
         .border_r_1()
         .border_color(tokens.border_primary)
-        .child(
-            Icon::new(IconName::ThreadIcon)
-                .size_4()
-                .text_color(tokens.bg_icon_theme),
-        )
+        .child(Icon::new(IconName::THREAD_16).text_color(tokens.bg_icon_theme))
         .child(
             div()
                 .text_base()
@@ -416,11 +412,7 @@ fn render_header(
         );
 
     let close_btn = Button::new("thread-close-btn")
-        .icon(
-            Icon::new(IconName::Close)
-                .size_4()
-                .text_color(tokens.text_theme_primary_hover),
-        )
+        .icon(Icon::new(IconName::CLOSE_16).text_color(tokens.text_theme_primary_hover))
         .ghost()
         .with_size(Size::Small)
         .on_click(move |_: &ClickEvent, _window, cx| {
@@ -552,7 +544,11 @@ fn render_empty_body(
                 .p(px(22.))
                 .rounded_full()
                 .bg(tokens.bg_active_member_channel)
-                .child(img("icons/thread-empty.svg").size(px(36.)).flex_none())
+                .child(
+                    Icon::new(IconName::THREAD_40)
+                        .text_color(tokens.text_secondary)
+                        .flex_none(),
+                )
                 .child(
                     div().absolute().top_0().left(px(-10.)).child(
                         img("icons/empty-unread-style.svg")

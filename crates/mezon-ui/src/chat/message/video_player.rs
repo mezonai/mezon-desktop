@@ -1200,18 +1200,14 @@ impl VideoPlayerView {
             .when(!compact, |card| card.justify_center().p_4().gap_2())
             .bg(SCRIM)
             .when(!compact, |card| {
-                card.child(
-                    Icon::new(IconName::TriangleAlert)
-                        .size(px(22.))
-                        .text_color(body_color),
-                )
-                .child(
-                    div()
-                        .text_size(px(14.))
-                        .font_weight(gpui::FontWeight::MEDIUM)
-                        .text_color(title_color)
-                        .child(mezon_i18n::t(locale, "media.video.error.title")),
-                )
+                card.child(Icon::new(IconName::WARNING_24).text_color(body_color))
+                    .child(
+                        div()
+                            .text_size(px(14.))
+                            .font_weight(gpui::FontWeight::MEDIUM)
+                            .text_color(title_color)
+                            .child(mezon_i18n::t(locale, "media.video.error.title")),
+                    )
             })
             .child(
                 div()
@@ -1315,11 +1311,7 @@ impl VideoPlayerView {
                     cx,
                 );
             }))
-            .child(
-                Icon::new(IconName::Download)
-                    .size(px(16.))
-                    .text_color(icon_color),
-            )
+            .child(Icon::new(IconName::DOWNLOAD_16).text_color(icon_color))
     }
 
     fn render_controls(&self, cx: &mut Context<Self>) -> impl IntoElement {

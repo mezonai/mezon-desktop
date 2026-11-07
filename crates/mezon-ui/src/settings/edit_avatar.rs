@@ -1,3 +1,5 @@
+use crate::components::primitives::{Icon, IconName};
+
 use std::{
     path::PathBuf,
     rc::Rc,
@@ -16,8 +18,7 @@ use mezon_store::Settings;
 use crate::{
     app::shell::Shell,
     components::primitives::{
-        Button, ButtonVariants, Icon, IconName, Slider, SliderEvent, SliderState, Spinner, h_flex,
-        v_flex,
+        Button, ButtonVariants, Slider, SliderEvent, SliderState, Spinner, h_flex, v_flex,
     },
     theme::ActiveTheme,
 };
@@ -164,11 +165,7 @@ impl Render for EditAvatar {
                             .rounded_md()
                             .cursor_pointer()
                             .hover(|el| el.bg(theme.bg_hover))
-                            .child(
-                                Icon::new(IconName::Close)
-                                    .size(px(22.))
-                                    .text_color(theme.text_muted),
-                            )
+                            .child(Icon::new(IconName::CLOSE_24).selected(false))
                             .on_click(|_, _, cx| Self::close(cx)),
                     ),
             )
@@ -264,16 +261,10 @@ impl Render for EditAvatar {
                             .gap_3()
                             .items_center()
                             .justify_center()
-                            .child(
-                                Icon::new(IconName::ImageThumbnail)
-                                    .size(px(14.))
-                                    .text_color(theme.text_muted),
-                            )
+                            .child(Icon::new(IconName::FILE_IMAGE_16).selected(false))
                             .child(div().w(px(190.)).child(Slider::new(&self.slider)))
                             .child(
-                                Icon::new(IconName::ImageThumbnail)
-                                    .size(px(22.))
-                                    .text_color(theme.text_primary),
+                                Icon::new(IconName::FILE_IMAGE_24).text_color(theme.text_primary),
                             )
                             .child(
                                 div()
@@ -286,11 +277,7 @@ impl Render for EditAvatar {
                                     .rounded_md()
                                     .cursor_pointer()
                                     .hover(|el| el.bg(theme.bg_hover))
-                                    .child(
-                                        Icon::new(IconName::RotateRightIcon)
-                                            .size(px(22.))
-                                            .text_color(theme.text_muted),
-                                    )
+                                    .child(Icon::new(IconName::ROTATE_RIGHT_24).selected(false))
                                     .on_click(cx.listener(|this, _, _, cx| {
                                         this.rotation = (this.rotation + 90) % 360;
                                         cx.notify();

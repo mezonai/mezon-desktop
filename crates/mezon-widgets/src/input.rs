@@ -9,7 +9,7 @@ use gpui::{
     KeyDownEvent, LayoutId, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, PaintQuad,
     Pixels, Point, Render, RenderOnce, ShapedLine, SharedString, Style, StyleRefinement, Styled,
     TextAlign, TextRun, UTF16Selection, UnderlineStyle, Window, WrappedLine, div, fill, point,
-    prelude::*, px, size, svg,
+    prelude::*, px, size,
 };
 use unicode_segmentation::UnicodeSegmentation;
 
@@ -2020,14 +2020,13 @@ impl RenderOnce for Input {
                 .items_center()
                 .cursor_pointer()
                 .child(
-                    svg()
-                        .path(if masked {
-                            "icons/eye-open.svg"
-                        } else {
-                            "icons/eye-close.svg"
-                        })
-                        .size(px(20.))
-                        .text_color(toggle_color),
+                    crate::Icon::new(if masked {
+                        crate::IconName::EyeOpen
+                    } else {
+                        crate::IconName::EyeClose
+                    })
+                    .size(px(20.))
+                    .text_color(toggle_color),
                 )
                 .on_click(move |_, window, cx| {
                     state.update(cx, |input, cx| {
@@ -2035,6 +2034,7 @@ impl RenderOnce for Input {
                         input.set_masked(next, window, cx);
                     });
                 })
+                .map(|element| crate::Icon::motion_scope(element, true))
         });
 
         self.base

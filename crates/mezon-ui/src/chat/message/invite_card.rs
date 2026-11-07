@@ -1,3 +1,5 @@
+use crate::components::primitives::{Icon, IconName};
+
 use gpui::{
     AnyElement, App, FontWeight, ObjectFit, SharedString, div, img, prelude::*, px, rgb, rgba,
 };
@@ -6,7 +8,6 @@ use mezon_store::{AcceptInviteError, AcceptInviteResult, ClanId, ClanList, Invit
 use super::content::{SelectableSectionCursor, SelectableTextContext, open_message_link};
 use super::context::RowCtx;
 use crate::app::shell::Shell;
-use crate::components::primitives::{Icon, IconName};
 use crate::router::{Route, navigate};
 
 const COMMUNITY_GREEN: u32 = 0x22_c5_5e;
@@ -147,11 +148,7 @@ pub fn render_invite_card(
                 .h(px(20.))
                 .rounded_full()
                 .bg(rgb(COMMUNITY_GREEN))
-                .child(
-                    Icon::new(IconName::CheckIcon)
-                        .size(px(12.))
-                        .text_color(theme.tokens.text_theme_primary),
-                ),
+                .child(Icon::new(IconName::CHECK_16).text_color(theme.tokens.text_theme_primary)),
         );
     }
 

@@ -1188,11 +1188,8 @@ impl ProfilePage {
                                             .and_then(|profile| profile.logo_url.as_ref())
                                             .is_none(),
                                         |element| {
-                                            element.child(
-                                                Icon::new(IconName::Plus)
-                                                    .size(px(22.))
-                                                    .text_color(theme.text_muted),
-                                            )
+                                            element
+                                                .child(Icon::new(IconName::PLUS_24).selected(false))
                                         },
                                     )
                                     .on_click(cx.listener(|this, _, _, cx| {

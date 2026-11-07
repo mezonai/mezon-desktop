@@ -591,8 +591,7 @@ impl ChannelSettingScreen {
                             .cursor_pointer()
                             .hover(|style| style.bg(theme.bg_hover))
                             .child(
-                                Icon::new(IconName::CloseButton)
-                                    .size(px(16.0))
+                                Icon::new(IconName::CLOSE_16)
                                     .text_color(theme.tokens.text_theme_primary),
                             )
                             .on_click(|_, _, cx| crate::router::go_back(cx)),

@@ -80,11 +80,7 @@ fn viewer_thumb_placeholder(bg: gpui::Rgba, muted: gpui::Rgba) -> gpui::AnyEleme
         .items_center()
         .justify_center()
         .bg(bg)
-        .child(
-            Icon::new(IconName::ImageThumbnail)
-                .size(px(16.))
-                .text_color(muted),
-        )
+        .child(Icon::new(IconName::FILE_IMAGE_16).text_color(muted))
         .into_any()
 }
 
@@ -1414,8 +1410,7 @@ impl ImageViewer {
                                                 .items_center()
                                                 .justify_center()
                                                 .child(
-                                                    Icon::new(IconName::PlayButton)
-                                                        .size(px(16.))
+                                                    Icon::new(IconName::PLAY_16)
                                                         .text_color(gpui::white()),
                                                 ),
                                         ),

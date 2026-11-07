@@ -5152,5 +5152,7 @@
   "chat.activityStrip.messageFrom": "Сообщение от {{name}}: {{message}}",
   "chat.activityStrip.hideAction": "Скрыть панель закреплений и тем",
   "chat.activityStrip.hideConfirm.title": "Скрыть панель закреплений и тем",
-  "chat.activityStrip.hideConfirm.description": "Скрыть панель закреплений и тем для этого канала? Она автоматически появится снова при новом закреплении или новой теме."
+  "chat.activityStrip.hideConfirm.description": "Скрыть панель закреплений и тем для этого канала? Она автоматически появится снова при новом закреплении или новой теме.",
+  "setting.appearance.iconAnimations": "Анимация значков",
+  "setting.appearance.iconAnimationsDescription": "Анимировать значки при наведении указателя на кнопки и строки."
 }

@@ -121,8 +121,7 @@ pub(super) fn render_message_button(
     element = element.child(div().child(button.label.clone()));
     if has_url {
         element = element.child(
-            Icon::new(IconName::ForwardRightClick)
-                .size_4()
+            Icon::new(IconName::FORWARD_16)
                 .ml_2()
                 .text_color(text_color),
         );
@@ -246,8 +245,7 @@ pub(super) fn render_message_select(
         .cursor_pointer()
         .child(left.into_any_element())
         .child(
-            Icon::new(IconName::ArrowDownFill)
-                .size_4()
+            Icon::new(IconName::CARET_DOWN_16)
                 .text_color(theme.tokens.text_theme_primary)
                 .into_any_element(),
         );

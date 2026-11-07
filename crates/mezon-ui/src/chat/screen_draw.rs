@@ -452,11 +452,7 @@ fn close_button(
         .bg(gpui::rgba(0xef444433))
         .hover(|h| h.bg(gpui::rgb(CLOSE_RED)))
         .when(tooltip, |s| s.tooltip(Tooltip::text(tooltip_text)))
-        .child(
-            Icon::new(IconName::Close)
-                .size(px(16.))
-                .text_color(gpui::rgb(0xffffff)),
-        )
+        .child(Icon::new(IconName::CLOSE_16).text_color(gpui::rgb(0xffffff)))
         .on_click(move |e, window, cx| {
             cx.stop_propagation();
             on_click(e, window, cx);

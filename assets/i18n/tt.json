@@ -4922,5 +4922,7 @@
   "chat.activityStrip.messageFrom": "{{name}} кулланучысыннан хәбәр: {{message}}",
   "chat.activityStrip.hideAction": "Беркетмәләр һәм темалар панелен яшерү",
   "chat.activityStrip.hideConfirm.title": "Беркетмәләр һәм темалар панелен яшерү",
-  "chat.activityStrip.hideConfirm.description": "Бу канал өчен беркетмәләр һәм темалар панелен яшерергәме? Яңа беркетмә яки тема булганда ул автоматик рәвештә яңадан күренәчәк."
+  "chat.activityStrip.hideConfirm.description": "Бу канал өчен беркетмәләр һәм темалар панелен яшерергәме? Яңа беркетмә яки тема булганда ул автоматик рәвештә яңадан күренәчәк.",
+  "setting.appearance.iconAnimations": "Билгеләр анимациясе",
+  "setting.appearance.iconAnimationsDescription": "Тычкан күрсәткечен төймәләргә һәм юлларга китергәндә билгеләрне җанландыру."
 }

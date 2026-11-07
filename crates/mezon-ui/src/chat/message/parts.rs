@@ -484,8 +484,7 @@ pub fn render_head(msg: &Message, ctx: &RowCtx) -> AnyElement {
     };
     if shows_anonymous_hat(msg, ctx.app) {
         name = name.flex().flex_row().items_center().child(
-            Icon::new(IconName::HatIcon)
-                .size(px(16.))
+            Icon::new(IconName::ANONYMOUS_16)
                 .ml(px(4.))
                 .flex_none()
                 .text_color(theme.tokens.text_theme_primary),
@@ -574,11 +573,7 @@ pub fn render_reply(msg: &Message, reference: &MessageReference, ctx: &RowCtx) -
                     .justify_center()
                     .rounded_full()
                     .bg(theme.tokens.bg_active_member_channel)
-                    .child(
-                        Icon::new(IconName::IconReplyMessDeletedWeb)
-                            .size_4()
-                            .text_color(theme.tokens.text_secondary),
-                    ),
+                    .child(Icon::new(IconName::REPLY_16).selected(false)),
             )
             .child(
                 div()
@@ -670,9 +665,7 @@ pub fn render_reply(msg: &Message, reference: &MessageReference, ctx: &RowCtx) -
                         .child(mezon_i18n::t(ctx.locale, "chat.clickToSeeAttachment")),
                 )
                 .child(
-                    Icon::new(IconName::ImageThumbnail)
-                        .size_4()
-                        .text_color(theme.tokens.text_theme_primary),
+                    Icon::new(IconName::FILE_IMAGE_16).text_color(theme.tokens.text_theme_primary),
                 )
                 .into_any_element()
         } else if reference.is_poll {
@@ -1014,11 +1007,7 @@ fn render_private_source_placeholder(ctx: &RowCtx) -> AnyElement {
                 .h(px(160.))
                 .rounded_md()
                 .bg(theme.tokens.bg_secondary)
-                .child(
-                    Icon::new(IconName::LockIcon)
-                        .size(px(24.))
-                        .text_color(theme.tokens.text_secondary),
-                )
+                .child(Icon::new(IconName::LOCK_24).selected(false))
                 .child(
                     div()
                         .px_3()
@@ -1104,9 +1093,7 @@ fn attachment_failed_overlay(
     box_height: f32,
 ) -> impl IntoElement {
     let fits_label = box_width >= SENDING_LABEL_MIN_WIDTH && box_height >= SENDING_LABEL_MIN_HEIGHT;
-    let icon = Icon::new(IconName::TriangleAlert)
-        .size(px(16.))
-        .text_color(theme.danger_text);
+    let icon = Icon::new(IconName::WARNING_16).text_color(theme.danger_text);
     let badge = if fits_label {
         div()
             .flex()
@@ -1545,11 +1532,7 @@ fn render_photo(
                         .items_center()
                         .justify_center()
                         .bg(fallback_bg)
-                        .child(
-                            Icon::new(IconName::ImageThumbnail)
-                                .size(px(32.))
-                                .text_color(fallback_fg),
-                        )
+                        .child(Icon::new(IconName::FILE_IMAGE_32).text_color(fallback_fg))
                         .into_any_element()
                 }),
         );
@@ -1674,11 +1657,7 @@ fn render_photo(
                     .items_center()
                     .justify_center()
                     .bg(fallback_bg)
-                    .child(
-                        Icon::new(IconName::ImageThumbnail)
-                            .size(px(32.))
-                            .text_color(fallback_fg),
-                    )
+                    .child(Icon::new(IconName::FILE_IMAGE_32).text_color(fallback_fg))
                     .into_any_element()
             }),
     );
@@ -1810,11 +1789,7 @@ fn render_video_poster(
                     b: 0.,
                     a: 0.5,
                 })
-                .child(
-                    Icon::new(IconName::PlayButton)
-                        .size(px(20.))
-                        .text_color(gpui::white()),
-                ),
+                .child(Icon::new(IconName::PLAY_20).text_color(gpui::white())),
         );
     container
         .cursor_pointer()
@@ -1966,11 +1941,7 @@ fn render_file_box(
                     )
                 })
                 .when(failed, |d| {
-                    d.child(
-                        Icon::new(IconName::TriangleAlert)
-                            .size(px(28.))
-                            .text_color(theme.danger_text),
-                    )
+                    d.child(Icon::new(IconName::WARNING_32).text_color(theme.danger_text))
                 }),
         )
         .child(
@@ -2146,11 +2117,7 @@ fn add_reaction_button(message_id: MessageId, ctx: &RowCtx) -> AnyElement {
             d.cursor_pointer()
                 .bg(bg)
                 .hover(move |s| s.bg(bg_hover))
-                .child(
-                    Icon::new(IconName::Smile)
-                        .size(px(20.))
-                        .text_color(icon_color),
-                )
+                .child(Icon::new(IconName::EMOJI_20).text_color(icon_color))
                 .on_click(move |_, window, cx| {
                     let position = window.mouse_position();
                     let _ = host.update(cx, |this, cx| {

@@ -1,4 +1,4 @@
-use gpui::{FontWeight, div, prelude::*, px};
+use gpui::{FontWeight, div, prelude::*};
 
 use crate::channel_app::launch_channel_app_from_store;
 use crate::components::primitives::{Icon, IconName};
@@ -64,8 +64,7 @@ pub fn render_channel_app_bar(
                     );
                 })
                 .child(
-                    Icon::new(IconName::Joystick)
-                        .size(px(24.))
+                    Icon::new(IconName::GAMEPAD_24)
                         .text_color(icon_color)
                         .group_hover("channel-app-launch", |s| s.text_color(icon_hover_color)),
                 )
@@ -74,7 +73,8 @@ pub fn render_channel_app_bar(
                         .text_sm()
                         .font_weight(FontWeight::MEDIUM)
                         .child(launch_label),
-                ),
+                )
+                .map(|element| Icon::motion_scope(element, true)),
         )
         .child(
             div()
@@ -97,8 +97,7 @@ pub fn render_channel_app_bar(
                 .bg(theme.tokens.bg_active_member_channel)
                 .text_color(theme.tokens.text_theme_primary)
                 .child(
-                    Icon::new(IconName::AppHelpIcon)
-                        .size(px(24.))
+                    Icon::new(IconName::GUIDE_24)
                         .text_color(icon_color)
                         .group_hover("channel-app-help", |s| s.text_color(icon_hover_color)),
                 )
@@ -107,6 +106,7 @@ pub fn render_channel_app_bar(
                         .text_sm()
                         .font_weight(FontWeight::MEDIUM)
                         .child(help_label),
-                ),
+                )
+                .map(|element| Icon::motion_scope(element, true)),
         )
 }

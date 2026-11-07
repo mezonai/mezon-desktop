@@ -292,8 +292,7 @@ impl EmojiSettingPage {
             .border_color(theme.border)
             .bg(theme.tokens.theme_setting_nav)
             .child(
-                Icon::new(IconName::Smile)
-                    .size(px(40.0))
+                Icon::new(IconName::EMOJI_40)
                     .text_color(theme.tokens.text_theme_primary)
                     .mb(px(8.0)),
             )
@@ -439,11 +438,7 @@ fn render_emoji_row(
                     .items_center()
                     .gap_2()
                     .when(row.is_for_sale, |actions| {
-                        actions.child(
-                            Icon::new(IconName::MarketIcons)
-                                .size(px(16.0))
-                                .text_color(gpui::rgb(0xfacc15)),
-                        )
+                        actions.child(Icon::new(IconName::SHOP_16).text_color(gpui::rgb(0xfacc15)))
                     })
                     .when(can_modify, |actions| {
                         let entity = entity.clone();
@@ -463,9 +458,7 @@ fn render_emoji_row(
                                     .bg(theme.bg_secondary)
                                     .cursor_pointer()
                                     .child(
-                                        Icon::new(IconName::Close)
-                                            .size(px(14.0))
-                                            .text_color(theme.danger_text),
+                                        Icon::new(IconName::CLOSE_16).text_color(theme.danger_text),
                                     )
                                     .on_click(move |_, window, cx| {
                                         cx.stop_propagation();

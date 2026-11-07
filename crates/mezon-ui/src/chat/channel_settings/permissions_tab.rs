@@ -142,8 +142,7 @@ pub(super) fn member_avatar(row: &MemberRow, size: gpui::Pixels) -> Avatar {
 
 pub(super) fn role_glyph(row: &RoleRow, cx: &mut App) -> gpui::AnyElement {
     if row.icon.is_empty() {
-        Icon::new(IconName::RoleIcon)
-            .size(px(20.0))
+        Icon::new(IconName::ROLE_20)
             .flex_shrink_0()
             .text_color(row.color)
             .into_any_element()
@@ -1149,8 +1148,7 @@ impl PermissionsTab {
                     .p_4()
                     .items_start()
                     .child(
-                        Icon::new(IconName::SyncIcon)
-                            .size(px(20.0))
+                        Icon::new(IconName::SYNC_20)
                             .flex_shrink_0()
                             .mr_2()
                             .text_color(rgb(SYNC_ICON_COLOR)),
@@ -1252,12 +1250,7 @@ impl PermissionsTab {
                         h_flex()
                             .mb_2()
                             .items_center()
-                            .child(
-                                Icon::new(IconName::LockIcon)
-                                    .size(px(20.0))
-                                    .flex_shrink_0()
-                                    .text_color(theme.tokens.text_secondary),
-                            )
+                            .child(Icon::new(IconName::LOCK_20).flex_shrink_0().selected(false))
                             .child(
                                 div()
                                     .ml_2()
@@ -1423,7 +1416,7 @@ impl PermissionsTab {
                         el.child(
                             h_flex()
                                 .gap_2()
-                                .child(Icon::new(IconName::Search).size(px(16.0)))
+                                .child(Icon::new(IconName::SEARCH_16))
                                 .child(div().flex_1().min_w_0().child(Input::new(&input)))
                                 .flex_shrink_0()
                                 .w(px(MEMBER_SEARCH_WIDTH))
@@ -1528,8 +1521,7 @@ impl PermissionsTab {
                 .items_center()
                 .text_color(theme.tokens.text_theme_primary)
                 .child(
-                    Icon::new(IconName::RoleIcon)
-                        .size(px(20.0))
+                    Icon::new(IconName::ROLE_20)
                         .flex_shrink_0()
                         .text_color(theme.tokens.text_theme_primary),
                 )

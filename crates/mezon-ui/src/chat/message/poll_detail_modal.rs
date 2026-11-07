@@ -1,3 +1,5 @@
+use crate::components::primitives::{Icon, IconName};
+
 use std::sync::Arc;
 
 use gpui::{
@@ -7,7 +9,6 @@ use gpui::{
 use mezon_store::{MessageId, MessagesStore, PollAnswerView, PollVoter};
 
 use crate::app::shell::Shell;
-use crate::components::primitives::{Icon, IconName};
 use crate::image_cache::LruImageCache;
 use crate::theme::ActiveTheme;
 
@@ -272,9 +273,7 @@ impl Render for PollDetailModal {
                     .hover(|s| s.bg(theme.tokens.bg_item_hover))
                     .on_click(|_, _, cx| Self::close(cx))
                     .child(
-                        Icon::new(IconName::Close)
-                            .size(px(20.))
-                            .text_color(theme.tokens.text_theme_primary),
+                        Icon::new(IconName::CLOSE_20).text_color(theme.tokens.text_theme_primary),
                     ),
             );
 

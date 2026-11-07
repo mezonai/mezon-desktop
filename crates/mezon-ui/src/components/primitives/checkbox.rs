@@ -1,5 +1,8 @@
-use gpui::{App, ElementId, SharedString, Window, div, prelude::*, px, svg};
+use crate::components::primitives::IconName;
 
+use gpui::{App, ElementId, SharedString, Window, div, prelude::*, px};
+
+use super::icon::Icon;
 use super::stack::h_flex;
 use crate::theme::ActiveTheme;
 
@@ -68,9 +71,8 @@ impl RenderOnce for Checkbox {
             .when(checked, |el| el.bg(theme.brand))
             .when(checked, |el| {
                 el.child(
-                    svg()
-                        .path("icons/check.svg")
-                        .size(px(12.))
+                    Icon::new(IconName::CHECK_16)
+                        .motion_enabled(enabled)
                         .flex_none()
                         .text_color(gpui::white()),
                 )
@@ -89,6 +91,7 @@ impl RenderOnce for Checkbox {
             })
             .child(box_el)
             .when_some(self.label, |el, label| el.child(label))
+            .map(|element| Icon::motion_scope(element, enabled))
     }
 }
 

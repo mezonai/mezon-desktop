@@ -1,8 +1,8 @@
-use gpui::{Entity, FontWeight, SharedString, div, img, prelude::*, px, relative, rgb};
+use gpui::{Entity, FontWeight, SharedString, div, prelude::*, px, relative, rgb};
 use mezon_store::{AppConfig, ChannelTimeline, TimelineCardSide, timeline_card_position};
 use ui::Tooltip;
 
-use crate::components::primitives::h_flex;
+use crate::components::primitives::{Icon, IconName, h_flex};
 use crate::image_cache::LruImageCache;
 use crate::theme::Theme;
 
@@ -67,7 +67,11 @@ pub fn render_timeline_header(
                         "channelCreator.fields.eventDetail.calendar",
                     )))
                     .on_click(move |_, window, cx| handler(window, cx))
-                    .child(img("icons/bullet-list-icon.svg").size(px(20.)).flex_none()),
+                    .child(
+                        Icon::new(IconName::LIST_BULLET_20)
+                            .selected(false)
+                            .flex_none(),
+                    ),
             )
         })
 }

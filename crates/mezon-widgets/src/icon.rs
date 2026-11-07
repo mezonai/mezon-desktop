@@ -1,4 +1,16 @@
-use gpui::{Svg, prelude::*, px, svg};
+use gpui::{
+    App, Bounds, DispatchPhase, Element, ElementId, GlobalElementId, Hitbox, HitboxBehavior,
+    InspectorElementId, InteractiveElement, Interactivity, IntoElement, LayoutId, MouseMoveEvent,
+    Pixels, StyleRefinement, Svg, Transformation, Window, prelude::*, px, svg,
+};
+
+use crate::icon_motion::{ColorPlayback, MotionPlayback, MotionSpec};
+
+#[derive(Default)]
+struct IconPlayback {
+    motion: MotionPlayback,
+    color: ColorPlayback,
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum IconName {
@@ -17,6 +29,7 @@ pub enum IconName {
     AnnotateRectangle,
     AnnotateSelect,
     Announcement,
+    AnonymousAvatar,
     AppChannelIcon,
     AppDirectoryFooterRobot,
     AppHelpIcon,
@@ -46,6 +59,7 @@ pub enum IconName {
     CanvasIcon,
     CDNIcon,
     ChannelBrowser,
+    ChannelAppFallback,
     Chat,
     Check,
     CheckedIcon,
@@ -72,6 +86,7 @@ pub enum IconName {
     CopyIcon,
     CreateCategoryIcon,
     DarkModeIcon,
+    DatePickerIndicator,
     DeviceDesktopIcon,
     DeviceMobileIcon,
     DollarIcon,
@@ -338,6 +353,11 @@ pub enum IconName {
 }
 
 impl IconName {
+    pub fn path_for_size(self, size: u16) -> &'static str {
+        let size = crate::mz_icon::standard_size(f32::from(size));
+        crate::mz_icons::legacy_pair(self.path(), size).map_or(self.path(), |icon| icon.path())
+    }
+
     pub fn path(self) -> &'static str {
         match self {
             Self::AddCircle => "icons/add-circle.svg",
@@ -355,6 +375,7 @@ impl IconName {
             Self::AnnotateRectangle => "icons/annotate-rectangle.svg",
             Self::AnnotateSelect => "icons/annotate-select.svg",
             Self::Announcement => "icons/announcement.svg",
+            Self::AnonymousAvatar => "icons/anonymous-avatar.svg",
             Self::AppChannelIcon => "icons/app-channel-icon.svg",
             Self::AppDirectoryFooterRobot => "icons/app-directory-footer-robot.svg",
             Self::AppHelpIcon => "icons/app-help-icon.svg",
@@ -384,6 +405,7 @@ impl IconName {
             Self::CanvasIcon => "icons/canvas-icon.svg",
             Self::CDNIcon => "icons/cdn-icon.svg",
             Self::ChannelBrowser => "icons/channel-browser.svg",
+            Self::ChannelAppFallback => "icons/channel-app-fallback.svg",
             Self::Chat => "icons/chat.svg",
             Self::Check => "icons/check.svg",
             Self::CheckedIcon => "icons/checked-icon.svg",
@@ -410,6 +432,7 @@ impl IconName {
             Self::CopyIcon => "icons/copy-icon.svg",
             Self::CreateCategoryIcon => "icons/create-category-icon.svg",
             Self::DarkModeIcon => "icons/dark-mode-icon.svg",
+            Self::DatePickerIndicator => "icons/date-picker-indicator.svg",
             Self::DeviceDesktopIcon => "icons/device-desktop-icon.svg",
             Self::DeviceMobileIcon => "icons/device-mobile-icon.svg",
             Self::DollarIcon => "icons/dollar-icon.svg",
@@ -677,11 +700,535 @@ impl IconName {
     }
 }
 
-pub struct Icon;
+pub enum IconSource {
+    Named(IconName),
+    Sized(crate::MzIcon),
+}
+
+impl From<IconName> for IconSource {
+    fn from(name: IconName) -> Self {
+        Self::Named(name)
+    }
+}
+
+impl From<crate::MzIcon> for IconSource {
+    fn from(icon: crate::MzIcon) -> Self {
+        Self::Sized(icon)
+    }
+}
+
+pub struct Icon {
+    pub(crate) svg: Svg,
+    path: &'static str,
+    legacy: Option<&'static str>,
+    motion: Option<MotionSpec>,
+    id: ElementId,
+    motion_enabled: bool,
+    explicit_transformation: bool,
+    base_transformation: Transformation,
+    pub(crate) selected: bool,
+    pub(crate) preserve_color: bool,
+}
 
 impl Icon {
-    #[allow(clippy::new_ret_no_self)]
-    pub fn new(name: IconName) -> Svg {
-        svg().path(name.path()).size(px(16.)).flex_none()
+    pub fn motion_scope(element: impl IntoElement, enabled: bool) -> crate::IconMotionScope {
+        crate::IconMotionScope::new(element, enabled)
+    }
+
+    #[track_caller]
+    pub fn new(source: impl Into<IconSource>) -> Self {
+        let name = match source.into() {
+            IconSource::Named(name) => name,
+            IconSource::Sized(icon) => return Self::from_mz(icon),
+        };
+        let motion = MotionSpec::for_path(name.path())
+            .filter(|spec| spec.has_hover_motion())
+            .copied();
+        Self {
+            svg: svg().path(name.path()).size(px(16.)).flex_none(),
+            path: name.path(),
+            legacy: Some(name.path()),
+            motion,
+            id: ElementId::CodeLocation(*std::panic::Location::caller()),
+            motion_enabled: true,
+            explicit_transformation: false,
+            base_transformation: Transformation::default(),
+            selected: false,
+            preserve_color: false,
+        }
+    }
+
+    #[track_caller]
+    pub(crate) fn from_mz(icon: crate::MzIcon) -> Self {
+        Self {
+            svg: svg()
+                .path(icon.path())
+                .size(px(f32::from(icon.size)))
+                .flex_none(),
+            path: icon.path(),
+            legacy: None,
+            motion: MotionSpec::for_mz(icon),
+            id: ElementId::CodeLocation(*std::panic::Location::caller()),
+            motion_enabled: true,
+            explicit_transformation: false,
+            base_transformation: Transformation::default(),
+            selected: false,
+            preserve_color: false,
+        }
+    }
+
+    pub fn motion_enabled(mut self, enabled: bool) -> Self {
+        self.motion_enabled = enabled;
+        self
+    }
+
+    pub fn with_transformation(mut self, transformation: Transformation) -> Self {
+        self.svg = self.svg.with_transformation(transformation);
+        self.explicit_transformation = true;
+        self.base_transformation = transformation;
+        self
+    }
+
+    #[cfg(test)]
+    fn resolved_base_color(&mut self, window: &Window, cx: &App) -> gpui::Hsla {
+        let explicit = self.svg.style().text.color;
+        self.resolve_color(explicit, window, cx)
+    }
+
+    fn resolve_color(&self, explicit: Option<gpui::Hsla>, window: &Window, cx: &App) -> gpui::Hsla {
+        if self.preserve_color
+            && let Some(color) = explicit
+        {
+            return color;
+        }
+        if self.path.starts_with("icons/mz/")
+            && let Some(theme) = mezon_theme::try_theme(cx)
+        {
+            if self.selected {
+                return theme.tokens.icon_selected().into();
+            }
+            if let Some(color) = explicit {
+                if color == gpui::Hsla::from(theme.tokens.bg_icon_theme_active) {
+                    return theme.tokens.icon_selected().into();
+                }
+                if [
+                    theme.tokens.bg_icon_theme,
+                    theme.text_secondary,
+                    theme.text_muted,
+                    theme.tokens.text_theme_primary,
+                    theme.tokens.text_secondary,
+                ]
+                .into_iter()
+                .any(|neutral| color == gpui::Hsla::from(neutral))
+                {
+                    return theme.tokens.icon_normal().into();
+                }
+            }
+            return explicit.unwrap_or_else(|| theme.tokens.icon_normal().into());
+        }
+        explicit.unwrap_or_else(|| window.text_style().color)
+    }
+
+    fn supports_hover_motion(&self) -> bool {
+        self.motion_enabled
+            && self
+                .motion
+                .is_some_and(|spec| !self.explicit_transformation || spec.translates_only())
+    }
+}
+
+impl IntoElement for Icon {
+    type Element = Self;
+
+    fn into_element(self) -> Self {
+        self
+    }
+}
+
+impl Styled for Icon {
+    fn style(&mut self) -> &mut StyleRefinement {
+        self.svg.style()
+    }
+}
+
+impl InteractiveElement for Icon {
+    fn interactivity(&mut self) -> &mut Interactivity {
+        self.svg.interactivity()
+    }
+}
+
+impl Element for Icon {
+    type RequestLayoutState = ();
+    type PrepaintState = Option<Hitbox>;
+
+    fn id(&self) -> Option<ElementId> {
+        Some(Element::id(&self.svg).unwrap_or_else(|| self.id.clone()))
+    }
+
+    fn source_location(&self) -> Option<&'static std::panic::Location<'static>> {
+        self.svg.source_location()
+    }
+
+    fn request_layout(
+        &mut self,
+        global_id: Option<&GlobalElementId>,
+        inspector_id: Option<&InspectorElementId>,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> (LayoutId, Self::RequestLayoutState) {
+        if let Some(legacy) = self.legacy {
+            let requested = match self.svg.style().size.width {
+                Some(gpui::Length::Definite(gpui::DefiniteLength::Absolute(length))) => {
+                    f32::from(length.to_pixels(window.rem_size()))
+                }
+                _ => 16.,
+            };
+            let size = crate::mz_icon::standard_size(requested);
+            if let Some(icon) = crate::mz_icons::legacy_pair(legacy, size) {
+                self.path = icon.path();
+                self.motion = MotionSpec::for_mz(icon);
+                let previous = std::mem::replace(&mut self.svg, svg());
+                self.svg = previous.path(icon.path()).size(px(if requested > 48. {
+                    requested
+                } else {
+                    f32::from(size)
+                }));
+            }
+        }
+        self.svg.request_layout(global_id, inspector_id, window, cx)
+    }
+
+    fn prepaint(
+        &mut self,
+        global_id: Option<&GlobalElementId>,
+        inspector_id: Option<&InspectorElementId>,
+        bounds: Bounds<Pixels>,
+        state: &mut Self::RequestLayoutState,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> Self::PrepaintState {
+        let hitbox = self
+            .svg
+            .prepaint(global_id, inspector_id, bounds, state, window, cx);
+        hitbox.or_else(|| {
+            self.supports_hover_motion()
+                .then(|| window.insert_hitbox(bounds, HitboxBehavior::Normal))
+        })
+    }
+
+    fn paint(
+        &mut self,
+        global_id: Option<&GlobalElementId>,
+        inspector_id: Option<&InspectorElementId>,
+        bounds: Bounds<Pixels>,
+        _state: &mut Self::RequestLayoutState,
+        hitbox: &mut Self::PrepaintState,
+        window: &mut Window,
+        cx: &mut App,
+    ) {
+        let mut inner = std::mem::replace(&mut self.svg, svg());
+        inner.interactivity().paint(
+            global_id,
+            inspector_id,
+            bounds,
+            hitbox.as_ref(),
+            window,
+            cx,
+            |style, window, cx| {
+                let mut paint_bounds = bounds;
+                let target_color = self.resolve_color(style.text.color, window, cx);
+                let mut paint_color = target_color;
+                let mut transformation = self.base_transformation;
+                if let Some(global_id) = global_id {
+                    let enabled = self.supports_hover_motion()
+                        && window.is_window_active()
+                        && crate::icon_motion::IconMotionPreferences::enabled(cx);
+                    let hovered = enabled
+                        && crate::icon_motion::scoped_hover(cx).unwrap_or_else(|| {
+                            hitbox.as_ref().is_some_and(|h| h.is_hovered(window))
+                        });
+                    let now = std::time::Instant::now();
+                    let (frame, color, color_running) = window.with_element_state(
+                        global_id,
+                        |playback: Option<IconPlayback>, _| {
+                            let mut playback = playback.unwrap_or_default();
+                            let frame = playback.motion.frame(
+                                self.path,
+                                self.motion.as_ref(),
+                                hovered,
+                                now,
+                            );
+                            let (color, running) = playback.color.frame(target_color, now);
+                            ((frame, color, running), playback)
+                        },
+                    );
+                    paint_color = color;
+                    if color_running && window.is_window_active() {
+                        window.request_animation_frame();
+                    }
+                    if let Some(frame) = frame {
+                        if self.explicit_transformation {
+                            paint_bounds = frame.translated_bounds(bounds);
+                        } else {
+                            transformation = frame.transformation(bounds);
+                        }
+                        if frame.running {
+                            window.request_animation_frame();
+                        }
+                    }
+                }
+                svg()
+                    .path(self.path)
+                    .with_transformation(transformation)
+                    .text_color(paint_color)
+                    .paint(None, None, paint_bounds, &mut (), &mut None, window, cx);
+            },
+        );
+        self.svg = inner;
+        if self.supports_hover_motion()
+            && crate::icon_motion::scoped_hover(cx).is_none()
+            && let Some(hitbox) = hitbox.as_ref()
+        {
+            let hitbox = hitbox.clone();
+            let view = window.current_view();
+            let mut was_hovered = hitbox.is_hovered(window);
+            window.on_mouse_event(move |_: &MouseMoveEvent, phase, window, cx| {
+                let hovered = hitbox.is_hovered(window);
+                if phase == DispatchPhase::Capture && hovered != was_hovered {
+                    was_hovered = hovered;
+                    cx.notify(view);
+                }
+            });
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use gpui::{Context, MouseButton, Render, TestApp, div, point};
+
+    #[test]
+    fn icon_name_resolves_size_specific_assets() {
+        assert_eq!(IconName::BELL_20.size, 20);
+        let mut paired = Icon::new(IconName::BELL_20);
+        assert_eq!(paired.path, "icons/mz/20/bell.svg");
+        assert_eq!(paired.svg.style().size.width, Some(px(20.).into()));
+        assert!(paired.legacy.is_none());
+        for size in [16, 20, 24, 32, 40, 48] {
+            assert_eq!(
+                IconName::Bell.path_for_size(size),
+                format!("icons/mz/{size}/bell.svg")
+            );
+        }
+        assert_eq!(IconName::Bell.path_for_size(18), "icons/mz/20/bell.svg");
+        assert_eq!(IconName::Bell.path_for_size(70), "icons/mz/48/bell.svg");
+        assert_eq!(IconName::Apple.path_for_size(20), IconName::Apple.path());
+    }
+
+    #[test]
+    fn legacy_static_icons_keep_identity_through_layout() {
+        struct StaticFixture {
+            name: IconName,
+        }
+
+        impl Render for StaticFixture {
+            fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+                div().child(Icon::new(self.name).motion_enabled(false).size(px(20.)))
+            }
+        }
+
+        let mut app = TestApp::new();
+        for name in [IconName::OnlineStatus, IconName::SelectFileIcon] {
+            let mut window = app.open_window(move |_, _| StaticFixture { name });
+            window.draw();
+            window.draw();
+        }
+    }
+
+    #[test]
+    fn typed_icons_follow_runtime_theme_and_preserve_surface_foregrounds() {
+        let mut app = TestApp::new();
+        let mut window = app.open_window(|_, _| Fixture {
+            clicks: 0,
+            transformed: false,
+            hover_style: false,
+            renders: 0,
+        });
+        for name in ["dark", "light", "purple_haze", "sunrise"] {
+            window.update(|_, window, cx| {
+                let theme = mezon_theme::resolve_theme(name);
+                let normal = theme.tokens.icon_normal();
+                let selected = theme.tokens.icon_selected();
+                mezon_theme::set_theme(theme, cx);
+                assert_eq!(
+                    crate::mz_icon(crate::mz::BELL_20).resolved_base_color(window, cx),
+                    normal.into()
+                );
+                assert_eq!(
+                    crate::mz_icon(crate::mz::BELL_20)
+                        .selected(true)
+                        .resolved_base_color(window, cx),
+                    selected.into()
+                );
+                let foreground = gpui::rgb(0xff0000);
+                assert_eq!(
+                    crate::mz_icon(crate::mz::BELL_20)
+                        .color(foreground)
+                        .resolved_base_color(window, cx),
+                    foreground.into()
+                );
+            });
+        }
+    }
+
+    struct Fixture {
+        clicks: usize,
+        transformed: bool,
+        hover_style: bool,
+        renders: usize,
+    }
+
+    impl Render for Fixture {
+        fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+            self.renders += 1;
+            div()
+                .id("icon-action")
+                .size(px(40.))
+                .on_click(cx.listener(|this, _, _, cx| {
+                    this.clicks += 1;
+                    cx.notify();
+                }))
+                .child(
+                    Icon::new(IconName::SelectFileIcon)
+                        .size(px(20.))
+                        .text_color(gpui::white())
+                        .when(self.hover_style, |icon| {
+                            icon.hover(|style| style.text_color(gpui::black()))
+                        })
+                        .when(self.transformed, |icon| {
+                            icon.with_transformation(Transformation::rotate(gpui::radians(1.)))
+                        }),
+                )
+        }
+    }
+
+    #[test]
+    fn animated_icon_keeps_parent_clicks_and_explicit_transform_consumer() {
+        let mut app = TestApp::new();
+        let mut window = app.open_window(|_, _| Fixture {
+            clicks: 0,
+            transformed: false,
+            hover_style: true,
+            renders: 0,
+        });
+        window.draw();
+        window.simulate_mouse_move(point(px(10.), px(10.)));
+        window.draw();
+        window.simulate_click(point(px(10.), px(10.)), MouseButton::Left);
+        assert_eq!(window.read(|view, _| view.clicks), 1);
+        window.update(|view, _, cx| {
+            view.transformed = true;
+            cx.notify();
+        });
+        window.draw();
+        window.simulate_click(point(px(10.), px(10.)), MouseButton::Left);
+        assert_eq!(window.read(|view, _| view.clicks), 2);
+        app.update(|cx| {
+            cx.set_global(crate::IconMotionPreferences {
+                reduced_motion: true,
+            })
+        });
+        window.draw();
+        window.simulate_click(point(px(10.), px(10.)), MouseButton::Left);
+        assert_eq!(window.read(|view, _| view.clicks), 3);
+    }
+
+    #[test]
+    fn unstyled_icon_repaints_on_pointer_entry_and_exit() {
+        let mut app = TestApp::new();
+        let mut window = app.open_window(|_, _| Fixture {
+            clicks: 0,
+            transformed: false,
+            hover_style: false,
+            renders: 0,
+        });
+        window.draw();
+        window.simulate_mouse_move(point(px(60.), px(60.)));
+        window.draw();
+        let outside = window.read(|view, _| view.renders);
+        window.simulate_mouse_move(point(px(10.), px(10.)));
+        window.draw();
+        let inside = window.read(|view, _| view.renders);
+        assert!(inside > outside);
+        window.simulate_mouse_move(point(px(60.), px(60.)));
+        window.draw();
+        assert!(window.read(|view, _| view.renders) > inside);
+        assert_eq!(window.read(|view, _| view.clicks), 0);
+    }
+
+    #[test]
+    fn icon_tint_tracks_parent_theme_changes_and_keeps_explicit_colors() {
+        use std::{cell::Cell, rc::Rc};
+
+        #[derive(IntoElement)]
+        struct TintProbe {
+            icon: Icon,
+            observed: Rc<Cell<Option<gpui::Hsla>>>,
+        }
+
+        impl RenderOnce for TintProbe {
+            fn render(mut self, window: &mut Window, cx: &mut App) -> impl IntoElement {
+                self.observed
+                    .set(Some(self.icon.resolved_base_color(window, cx)));
+                self.icon
+            }
+        }
+
+        struct TintFixture {
+            color: gpui::Hsla,
+            explicit_color: gpui::Hsla,
+            inherited: Rc<Cell<Option<gpui::Hsla>>>,
+            explicit: Rc<Cell<Option<gpui::Hsla>>>,
+        }
+
+        impl Render for TintFixture {
+            fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+                div()
+                    .text_color(self.color)
+                    .child(TintProbe {
+                        icon: Icon::new(IconName::IconFriends),
+                        observed: self.inherited.clone(),
+                    })
+                    .child(TintProbe {
+                        icon: Icon::new(IconName::IconFriends).text_color(self.explicit_color),
+                        observed: self.explicit.clone(),
+                    })
+            }
+        }
+
+        let mut app = TestApp::new();
+        let inherited = Rc::new(Cell::new(None));
+        let explicit = Rc::new(Cell::new(None));
+        let explicit_color: gpui::Hsla = gpui::rgb(0x5865f2).into();
+        let mut window = app.open_window(|_, _| TintFixture {
+            color: gpui::white(),
+            explicit_color,
+            inherited: inherited.clone(),
+            explicit: explicit.clone(),
+        });
+        for name in ["dark", "light", "purple_haze"] {
+            let theme = mezon_theme::resolve_theme(name);
+            for color in [theme.tokens.text_secondary, theme.tokens.text_theme_primary] {
+                let color = color.into();
+                window.update(|view, _, cx| {
+                    view.color = color;
+                    cx.notify();
+                });
+                window.draw();
+                assert_eq!(inherited.get(), Some(color));
+                assert_eq!(explicit.get(), Some(explicit_color));
+            }
+        }
     }
 }

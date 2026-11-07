@@ -356,11 +356,7 @@ impl Render for AnnotationToolbar {
             .items_center()
             .justify_center()
             .cursor(CursorStyle::OpenHand)
-            .child(
-                Icon::new(IconName::AnnotateGrip)
-                    .size(px(16.))
-                    .text_color(gpui::rgba(0xffffff99)),
-            );
+            .child(Icon::new(IconName::GRIP_16).text_color(gpui::rgba(0xffffff99)));
         #[cfg(target_os = "windows")]
         let grip = grip.window_control_area(WindowControlArea::Drag);
         #[cfg(target_os = "macos")]

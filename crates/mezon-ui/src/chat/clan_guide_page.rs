@@ -213,24 +213,9 @@ impl ClanGuidePage {
                             .child(clan_name),
                     )
                     .child(
-                        div()
-                            .relative()
-                            .size(px(24.))
+                        Icon::new(IconName::CLAN_BADGE_24)
                             .flex_none()
-                            .child(
-                                Icon::new(IconName::ClanGuideSeal)
-                                    .absolute()
-                                    .size(px(24.))
-                                    .text_color(theme.tokens.text_theme_primary),
-                            )
-                            .child(
-                                Icon::new(IconName::ClanGuideHouse)
-                                    .absolute()
-                                    .top(px(4.))
-                                    .right(px(4.))
-                                    .size(px(16.))
-                                    .text_color(theme.tokens.text_secondary),
-                            ),
+                            .text_color(theme.tokens.text_theme_primary),
                     )
                     .child(
                         div().flex_1().flex().justify_end().child(
@@ -451,8 +436,7 @@ impl ClanGuidePage {
             section = section.child(guide_card(
                 SharedString::from(format!("clan-guide-rule-{}", rule.id)),
                 theme,
-                Icon::new(IconName::RuleIcon)
-                    .size(px(24.))
+                Icon::new(IconName::RULES_24)
                     .text_color(theme.tokens.text_theme_primary)
                     .into_any_element(),
                 rule.title.clone().into(),
@@ -507,11 +491,7 @@ impl ClanGuidePage {
                     .flex()
                     .items_center()
                     .justify_center()
-                    .child(
-                        Icon::new(IconName::Tick)
-                            .size(px(24.))
-                            .text_color(rgb(TICK_COLOR)),
-                    )
+                    .child(Icon::new(IconName::CHECK_24).text_color(rgb(TICK_COLOR)))
                     .into_any_element()
             });
             let task_type = mission.task_type;
@@ -519,8 +499,7 @@ impl ClanGuidePage {
                 guide_card(
                     SharedString::from(format!("clan-guide-mission-{}", mission.id)),
                     theme,
-                    Icon::new(IconName::TargetIcon)
-                        .size(px(24.))
+                    Icon::new(IconName::TARGET_24)
                         .text_color(theme.tokens.text_theme_primary)
                         .into_any_element(),
                     mission.title.clone().into(),

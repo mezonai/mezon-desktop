@@ -5,8 +5,8 @@ use chrono::{Local, TimeZone as _};
 use gpui::{
     Animation, AnimationExt as _, AnyElement, App, ClickEvent, ClipboardItem, Context, FocusHandle,
     Focusable, FontWeight, ListAlignment, ListState, SharedString, Subscription, Transformation,
-    WeakEntity, Window, div, ease_in_out, img, linear_color_stop, linear_gradient, list,
-    percentage, prelude::*, px, relative, rgb, rgba,
+    WeakEntity, Window, div, ease_in_out, linear_color_stop, linear_gradient, list, percentage,
+    prelude::*, px, relative, rgb, rgba,
 };
 use mezon_store::{
     AccountEvent, AccountStore, BadgeService, ClanMembersEvent, ClanMembersStore, DirectEvent,
@@ -378,9 +378,7 @@ impl TransactionHistoryModal {
     fn render_header(&self, theme: &Theme, window: &Window, cx: &mut Context<Self>) -> AnyElement {
         let locale = self.locale.clone();
         let tk = |key: &'static str| mezon_i18n::t(&locale, key).to_string();
-        let reload = Icon::new(IconName::ReloadIcon)
-            .size(px(20.))
-            .text_color(theme.tokens.text_theme_primary);
+        let reload = Icon::new(IconName::REFRESH_20).text_color(theme.tokens.text_theme_primary);
         let reload = if self.loading && window.is_window_active() {
             reload
                 .with_animation(
@@ -426,9 +424,7 @@ impl TransactionHistoryModal {
                                 linear_color_stop(rgb(HEADER_GRADIENT_TO), 1.),
                             ))
                             .child(
-                                Icon::new(IconName::HistoryTransaction)
-                                    .size(px(36.))
-                                    .text_color(rgb(HEADER_ICON_COLOR)),
+                                Icon::new(IconName::HISTORY_40).text_color(rgb(HEADER_ICON_COLOR)),
                             ),
                     )
                     .child(
@@ -477,8 +473,7 @@ impl TransactionHistoryModal {
                             .hover(|s| s.bg(theme.tokens.bg_item_theme_hover))
                             .on_click(|_: &ClickEvent, _window, cx| Self::close(cx))
                             .child(
-                                Icon::new(IconName::Close)
-                                    .size(px(20.))
+                                Icon::new(IconName::CLOSE_20)
                                     .text_color(theme.tokens.text_theme_primary),
                             ),
                     ),
@@ -618,11 +613,7 @@ impl TransactionHistoryModal {
                     ),
             );
         } else if self.has_more {
-            content = content.child(
-                Icon::new(IconName::ArrowDown)
-                    .size(px(16.))
-                    .text_color(theme.tokens.text_secondary),
-            );
+            content = content.child(Icon::new(IconName::ARROW_DOWN_16).selected(false));
         } else if !self.rows.is_empty() {
             content = content.child(
                 mezon_i18n::t(&locale, "transactionHistory.footers.noti")
@@ -895,16 +886,10 @@ fn render_detail(
 }
 
 fn field_icon(theme: &Theme, icon: IconName) -> AnyElement {
-    match icon {
-        IconName::DollarIcon | IconName::UserIcon => img(icon.path())
-            .size(px(12.))
-            .flex_none()
-            .into_any_element(),
-        _ => Icon::new(icon)
-            .size(px(12.))
-            .text_color(theme.tokens.text_theme_primary)
-            .into_any_element(),
-    }
+    Icon::new(icon)
+        .size(px(12.))
+        .text_color(theme.tokens.text_theme_primary)
+        .into_any_element()
 }
 
 fn detail_field(
@@ -947,11 +932,7 @@ fn detail_field(
                         mezon_i18n::t(&locale, "token.historyTransaction.copied").to_string();
                     Shell::global(cx).update(cx, |shell, cx| shell.success(message, cx));
                 })
-                .child(
-                    Icon::new(IconName::CopyIcon)
-                        .size(px(12.))
-                        .text_color(theme.tokens.text_theme_primary),
-                ),
+                .child(Icon::new(IconName::COPY_16).text_color(theme.tokens.text_theme_primary)),
         );
     }
 
@@ -1065,12 +1046,7 @@ fn render_placeholder(
                 .flex()
                 .items_center()
                 .justify_center()
-                .child(
-                    img(IconName::FileThumbEmpty.path())
-                        .w(px(30.))
-                        .h(px(40.))
-                        .flex_none(),
-                ),
+                .child(Icon::new(IconName::FILE_40).selected(false).flex_none()),
         )
         .child(
             div()

@@ -33,13 +33,20 @@ pub(crate) fn channel_type_icon(
     }
 }
 
-/// React draws the padlock of a private channel in `--bg-icon-theme-active`, one
-/// shade brighter than the glyph under it. GPUI tints a whole SVG a single
-/// colour, so the padlock has to be a second element stacked on the glyph.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub struct ChannelIcon {
     pub base: IconName,
     pub lock: Option<IconName>,
+}
+
+impl ChannelIcon {
+    fn combined_glyph(self) -> IconName {
+        match self.lock {
+            Some(IconName::HashtagLock) => IconName::HashtagLocked,
+            Some(IconName::ThreadLock) => IconName::ThreadIconLocker,
+            _ => self.base,
+        }
+    }
 }
 
 pub(crate) fn channel_icon(
@@ -71,26 +78,11 @@ pub(crate) fn render_channel_icon(
     icon: ChannelIcon,
     size: Pixels,
     color: Hsla,
-    lock_color: Hsla,
+    _lock_color: Hsla,
 ) -> AnyElement {
-    let Some(lock) = icon.lock else {
-        return Icon::new(icon.base)
-            .size(size)
-            .text_color(color)
-            .into_any_element();
-    };
-    div()
-        .relative()
+    Icon::new(icon.combined_glyph())
         .size(size)
-        .flex_shrink_0()
-        .child(Icon::new(icon.base).size(size).text_color(color))
-        .child(
-            div()
-                .absolute()
-                .top_0()
-                .left_0()
-                .child(Icon::new(lock).size(size).text_color(lock_color)),
-        )
+        .text_color(color)
         .into_any_element()
 }
 
@@ -106,6 +98,26 @@ pub(crate) fn voice_busy_tag(theme: &Theme) -> AnyElement {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn combined_private_glyph_has_no_extra_lock_layer() {
+        assert_eq!(
+            channel_icon(ChannelType::Text, true, 0).combined_glyph(),
+            IconName::HashtagLocked
+        );
+        assert_eq!(
+            channel_icon(ChannelType::Thread, true, 0).combined_glyph(),
+            IconName::ThreadIconLocker
+        );
+        assert_eq!(
+            channel_icon(ChannelType::Text, false, 0).combined_glyph(),
+            IconName::Hashtag
+        );
+        assert_eq!(
+            channel_icon(ChannelType::Text, true, 1).combined_glyph(),
+            IconName::HashtagWarning
+        );
+    }
 
     fn icon_path(channel_type: ChannelType, private: bool, age_restricted: i32) -> &'static str {
         channel_type_icon(channel_type, private, age_restricted).path()

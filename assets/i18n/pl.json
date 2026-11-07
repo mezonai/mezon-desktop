@@ -4909,5 +4909,7 @@
   "chat.activityStrip.messageFrom": "Wiadomość od {{name}}: {{message}}",
   "chat.activityStrip.hideAction": "Ukryj pasek przypięć i tematów",
   "chat.activityStrip.hideConfirm.title": "Ukryj pasek przypięć i tematów",
-  "chat.activityStrip.hideConfirm.description": "Ukryć pasek przypięć i tematów dla tego kanału? Pojawi się automatycznie ponownie po dodaniu nowego przypięcia lub tematu."
+  "chat.activityStrip.hideConfirm.description": "Ukryć pasek przypięć i tematów dla tego kanału? Pojawi się automatycznie ponownie po dodaniu nowego przypięcia lub tematu.",
+  "setting.appearance.iconAnimations": "Animacje ikon",
+  "setting.appearance.iconAnimationsDescription": "Animuj ikony po najechaniu wskaźnikiem na przyciski i wiersze."
 }

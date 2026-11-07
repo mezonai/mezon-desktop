@@ -5,7 +5,7 @@ use std::sync::Arc;
 use gpui::{
     AnyElement, App, Context, Entity, FontWeight, ListAlignment, ListOffset, ListState,
     MouseButton, MouseDownEvent, Pixels, Point, Render, Subscription, WeakEntity, Window, deferred,
-    div, img, list, prelude::*, px, size,
+    div, list, prelude::*, px, size,
 };
 use mezon_store::{
     BadgeService, ChannelId, ChannelList, ChannelSetting, ChannelSettingsStore, ChannelType,
@@ -354,8 +354,7 @@ impl ClanChannelsPage {
             })
             .child(label)
             .child(
-                Icon::new(IconName::ArrowDown)
-                    .size(px(13.))
+                Icon::new(IconName::ARROW_DOWN_16)
                     .text_color(if active {
                         cx.theme().text_primary
                     } else {
@@ -469,35 +468,15 @@ impl ClanChannelsPage {
             locale,
             chrono::Local::now(),
         );
-        let channel_icon = if matches!(channel_type, ChannelType::Thread) && row.private {
-            div()
-                .relative()
-                .flex_shrink_0()
-                .size(px(if is_thread { 20. } else { 22. }))
-                .child(
-                    Icon::new(IconName::ThreadIcon)
-                        .size(px(if is_thread { 20. } else { 22. }))
-                        .text_color(cx.theme().text_secondary),
-                )
-                .child(
-                    div().absolute().inset_0().child(
-                        Icon::new(IconName::HashtagLock)
-                            .size(px(if is_thread { 22. } else { 24. }))
-                            .text_color(cx.theme().text_primary),
-                    ),
-                )
-                .into_any_element()
-        } else {
-            let age_restricted = ChannelList::global(cx)
-                .read(cx)
-                .channel(self.clan_id, row.id)
-                .map(|channel| channel.age_restricted)
-                .unwrap_or(0);
-            Icon::new(channel_type_icon(channel_type, row.private, age_restricted))
-                .size(px(if is_thread { 20. } else { 22. }))
-                .text_color(cx.theme().text_secondary)
-                .into_any_element()
-        };
+        let age_restricted = ChannelList::global(cx)
+            .read(cx)
+            .channel(self.clan_id, row.id)
+            .map(|channel| channel.age_restricted)
+            .unwrap_or(0);
+        let channel_icon = Icon::new(channel_type_icon(channel_type, row.private, age_restricted))
+            .size(px(if is_thread { 20. } else { 22. }))
+            .text_color(cx.theme().text_secondary)
+            .into_any_element();
         div()
             .id(format!("channel-setting-row-{}", row.id.get()))
             .w_full()
@@ -568,8 +547,9 @@ impl ClanChannelsPage {
                                 cx,
                             )
                         } else {
-                            img("icons/avatar-user.svg")
-                                .size(px(24.))
+                            Icon::new(IconName::USER_CIRCLE_24)
+                                .motion_enabled(false)
+                                .text_color(cx.theme().tokens.text_secondary)
                                 .flex_none()
                                 .into_any_element()
                         })
@@ -695,8 +675,7 @@ impl ClanChannelsPage {
                 .hover(|style| style.bg(cx.theme().bg_hover))
                 .child(self.page_size.to_string())
                 .child(
-                    Icon::new(IconName::ChevronDown)
-                        .size(px(14.))
+                    Icon::new(IconName::CHEVRON_DOWN_16)
                         .text_color(cx.theme().text_secondary)
                         .with_transformation(gpui::Transformation::rotate(gpui::radians(
                             chevron_angle,
@@ -914,11 +893,7 @@ impl Render for ClanChannelsPage {
                     .bottom_0()
                     .flex()
                     .items_center()
-                    .child(
-                        Icon::new(IconName::Search)
-                            .size(px(18.))
-                            .text_color(cx.theme().text_secondary),
-                    ),
+                    .child(Icon::new(IconName::SEARCH_20).text_color(cx.theme().text_secondary)),
             )
             .on_mouse_down_out(|_, window, _| window.blur());
         let footer = div()

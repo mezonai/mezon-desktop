@@ -4,9 +4,9 @@ use std::sync::{Arc, LazyLock, Mutex};
 use gpui::{
     Anchor, Animation, AnimationExt, AnyElement, App, ClickEvent, ClipboardItem, Context,
     CursorStyle, DismissEvent, Div, Entity, EventEmitter, FocusHandle, Focusable, FontFeatures,
-    FontWeight, Hsla, Image, ImageFormat, IntoElement, MouseButton, MouseDownEvent, ObjectFit,
-    Pixels, RenderOnce, Rgba, ScrollHandle, SharedString, Stateful, StyledImage, Subscription,
-    Window, canvas, deferred, div, img, point, prelude::*, px, relative, rems, svg,
+    FontWeight, Hsla, IntoElement, MouseButton, MouseDownEvent, ObjectFit, Pixels, RenderOnce,
+    Rgba, ScrollHandle, SharedString, Stateful, StyledImage, Subscription, Window, canvas,
+    deferred, div, img, point, prelude::*, px, relative, rems, svg,
 };
 use mezon_store::{
     AppConfig, AudioStore, Channel, ChannelId, ClanId, DeviceKind, DeviceMenuKind, DisplayedFlower,
@@ -25,6 +25,7 @@ use crate::chat::media_permission_prompt::{
 };
 use crate::chat::screen_annotation::{desktop_annotation_supported, toggle_desktop_annotation};
 use crate::chat::screen_draw::{render_draw_toolbox, render_screen_draw_overlay};
+use crate::components::compositions::channel_row::channel_type_icon;
 use crate::components::primitives::{
     Avatar, ContextMenu, Icon, IconName, Sizable, Size, Slider, SliderEvent, SliderState, Spinner,
     context_menu_at, h_flex, v_flex,
@@ -62,6 +63,7 @@ struct VoiceRoom<'a> {
     name: &'a str,
     voice_members: &'a [VoiceMember],
     external: bool,
+    header_icon: IconName,
 }
 
 impl<'a> VoiceRoom<'a> {
@@ -71,6 +73,11 @@ impl<'a> VoiceRoom<'a> {
             name: &channel.name,
             voice_members: &channel.voice_members,
             external: false,
+            header_icon: channel_type_icon(
+                channel.channel_type,
+                channel.private,
+                channel.age_restricted,
+            ),
         }
     }
 
@@ -80,6 +87,7 @@ impl<'a> VoiceRoom<'a> {
             name,
             voice_members: &[],
             external: true,
+            header_icon: IconName::Speaker,
         }
     }
 
@@ -454,6 +462,7 @@ fn render_meeting_pre_join(
             theme,
             locale,
             label,
+            IconName::Speaker,
             None,
             false,
             0,
@@ -622,11 +631,7 @@ pub fn render_mini_bar(
                         .flex_row()
                         .items_center()
                         .gap_1()
-                        .child(
-                            Icon::new(IconName::Speaker)
-                                .size(px(16.))
-                                .text_color(header_color),
-                        )
+                        .child(Icon::new(IconName::SPEAKER_16).text_color(header_color))
                         .child(
                             div()
                                 .text_sm()
@@ -863,22 +868,8 @@ fn panel_control_button(
         .child(Icon::new(icon).size(px(20.)).text_color(icon_color))
 }
 
-const CHAT_ICON_SVG: &str = include_str!("../../assets/icons/chat.svg");
-
-pub(crate) fn chat_toggle_icon(color: Rgba, size: Pixels) -> gpui::Img {
-    let fill = format!(
-        "rgba({}, {}, {}, {})",
-        (color.r * 255.0).round() as u8,
-        (color.g * 255.0).round() as u8,
-        (color.b * 255.0).round() as u8,
-        color.a
-    );
-    let svg = CHAT_ICON_SVG.replace("currentColor", &fill);
-    img(Arc::new(Image::from_bytes(
-        ImageFormat::Svg,
-        svg.into_bytes(),
-    )))
-    .size(size)
+pub(crate) fn chat_toggle_icon(color: Rgba, size: Pixels) -> Icon {
+    Icon::new(IconName::Chat).text_color(color).size(size)
 }
 
 fn voice_header_icon_shell(
@@ -907,6 +898,7 @@ fn voice_header<H: CallLayoutHost>(
     theme: &Theme,
     locale: &str,
     name: &str,
+    icon: IconName,
     voice: Option<&Entity<VoiceStore>>,
     show_chat: bool,
     chat_unread: usize,
@@ -1006,11 +998,7 @@ fn voice_header<H: CallLayoutHost>(
                 .flex_row()
                 .items_center()
                 .gap_2()
-                .child(
-                    Icon::new(IconName::Speaker)
-                        .size(px(20.0))
-                        .text_color(theme.text_muted),
-                )
+                .child(Icon::new(icon).size(px(20.0)).text_color(theme.text_muted))
                 .child(
                     div()
                         .text_sm()
@@ -1144,7 +1132,7 @@ impl RenderOnce for VoiceInboxTrigger {
             .child(
                 div()
                     .relative()
-                    .child(Icon::new(IconName::Inbox).size(px(18.)).text_color(tint))
+                    .child(Icon::new(IconName::INBOX_20).text_color(tint))
                     .when(self.show_badge, |d| {
                         d.child(
                             div()
@@ -1326,6 +1314,11 @@ fn render_pre_join(
             theme,
             locale,
             &channel.name,
+            channel_type_icon(
+                channel.channel_type,
+                channel.private,
+                channel.age_restricted,
+            ),
             None,
             show_chat,
             0,
@@ -1447,11 +1440,7 @@ fn join_role_button(
                         .cursor_pointer()
                         .hover(move |s| s.bg(green_hover))
                         .text_color(gpui::rgb(0xffffff))
-                        .child(
-                            Icon::new(IconName::ChevronDown)
-                                .size(px(12.))
-                                .text_color(gpui::rgb(0xffffff)),
-                        )
+                        .child(Icon::new(IconName::CHEVRON_DOWN_16).text_color(gpui::rgb(0xffffff)))
                         .on_click({
                             let voice = voice.clone();
                             move |_, _, cx| {
@@ -1846,9 +1835,7 @@ fn raised_hands_overlay(
                             .child(name),
                     )
                     .child(
-                        Icon::new(IconName::VoiceRaiseHandIcon)
-                            .size(px(32.))
-                            .text_color(gpui::rgb(RAISE_HAND_GOLD)),
+                        Icon::new(IconName::HAND_RAISE_32).text_color(gpui::rgb(RAISE_HAND_GOLD)),
                     )
             }))
             .into_any_element(),
@@ -2218,6 +2205,7 @@ fn render_in_call<H: CallLayoutHost>(
             theme,
             locale,
             room.name,
+            room.header_icon,
             Some(voice),
             show_chat,
             chat_unread,
@@ -2278,9 +2266,9 @@ pub(crate) fn render_screen_fullscreen_overlay(
     let frame_dims = frame_opt.as_ref().map(|f| f.dimensions());
     let media = match frame_opt {
         Some(frame) => render_voice_frame(frame, ObjectFit::Contain),
-        None => Icon::new(IconName::VoiceScreenShareIcon)
-            .size(px(64.))
-            .text_color(theme.text_muted)
+        None => Icon::new(IconName::SCREEN_SHARE_48)
+            .size(px(64.0))
+            .selected(false)
             .into_any_element(),
     };
 
@@ -2298,11 +2286,7 @@ pub(crate) fn render_screen_fullscreen_overlay(
         .bg(gpui::rgba(0x000000a6))
         .cursor_pointer()
         .hover(|s| s.bg(gpui::rgba(0x000000d9)))
-        .child(
-            Icon::new(IconName::ExitFullScreen)
-                .size(px(20.))
-                .text_color(gpui::rgb(0xffffff)),
-        )
+        .child(Icon::new(IconName::FULLSCREEN_EXIT_20).text_color(gpui::rgb(0xffffff)))
         .on_click(move |_, _, cx| {
             cx.stop_propagation();
             exit_voice.update(cx, |store, cx| store.clear_fullscreen_screen(cx));
@@ -2405,11 +2389,7 @@ fn kick_confirm_modal(
                         .h(px(56.))
                         .rounded_full()
                         .bg(theme.bg_hover)
-                        .child(
-                            Icon::new(IconName::CloseIcon)
-                                .size(px(26.))
-                                .text_color(theme.danger_text),
-                        ),
+                        .child(Icon::new(IconName::CLOSE_CIRCLE_24).text_color(theme.danger_text)),
                 )
                 .child(
                     div()
@@ -2870,11 +2850,7 @@ fn render_focus_layout<H: CallLayoutHost>(
                 .size(px(20.))
                 .text_color(gpui::rgb(0xffffff)),
             )
-            .child(
-                Icon::new(IconName::MemberList)
-                    .size(px(20.))
-                    .text_color(gpui::rgb(0xffffff)),
-            )
+            .child(Icon::new(IconName::MEMBERS_20).text_color(gpui::rgb(0xffffff)))
             .child(
                 div()
                     .pl(px(2.))
@@ -3377,7 +3353,7 @@ fn video_tile(
 }
 
 fn tile_inner(
-    theme: &Theme,
+    _theme: &Theme,
     store: &VoiceStore,
     cell: &VideoCell,
     avatar_size: Pixels,
@@ -3394,9 +3370,8 @@ fn tile_inner(
     }
 
     if cell.is_screen {
-        return Icon::new(IconName::VoiceScreenShareIcon)
-            .size(px(48.))
-            .text_color(theme.text_muted)
+        return Icon::new(IconName::SCREEN_SHARE_48)
+            .selected(false)
             .into_any_element();
     }
 
@@ -3450,16 +3425,14 @@ fn tile_metadata(locale: &str, cell: &VideoCell) -> AnyElement {
                 .bg(gpui::rgba(0x00000080))
                 .when(cell.muted && !cell.is_screen, |this| {
                     this.child(
-                        Icon::new(IconName::VoiceMicDisabledIcon)
-                            .size(px(16.))
+                        Icon::new(IconName::MIC_OFF_16)
                             .flex_none()
                             .text_color(gpui::rgba(0xffffff80)),
                     )
                 })
                 .when(cell.is_screen, |this| {
                     this.child(
-                        Icon::new(IconName::VoiceScreenShareIcon)
-                            .size(px(16.))
+                        Icon::new(IconName::SCREEN_SHARE_16)
                             .flex_none()
                             .text_color(gpui::rgb(0xffffff)),
                     )
@@ -3524,11 +3497,7 @@ fn tile_sound_overlay(store: &VoiceStore, cell: &VideoCell) -> Option<AnyElement
             .border_1()
             .border_color(gpui::rgba(0xffffff33))
             .shadow_lg()
-            .child(
-                Icon::new(IconName::VoiceSoundControlIcon)
-                    .size(px(16.))
-                    .text_color(gpui::rgb(0xffffff)),
-            )
+            .child(Icon::new(IconName::SOUNDBOARD_16).text_color(gpui::rgb(0xffffff)))
             .into_any_element(),
     )
 }
@@ -4140,8 +4109,7 @@ fn control_bar(
                     div()
                         .id("voice-record-stalled")
                         .child(
-                            Icon::new(IconName::VoiceScreenShareStopIcon)
-                                .size(px(12.))
+                            Icon::new(IconName::SCREEN_SHARE_OFF_16)
                                 .text_color(gpui::rgb(RAISE_HAND_GOLD)),
                         )
                         .tooltip(Tooltip::text(mezon_i18n::t(
@@ -4244,8 +4212,7 @@ fn render_network_warning_callout(locale: &str, voice: &Entity<VoiceStore>) -> A
                         .rounded_full()
                         .bg(with_alpha(gpui::rgb(NETWORK_WARNING_ICON), 0.15))
                         .child(
-                            Icon::new(IconName::TriangleAlert)
-                                .size(px(18.))
+                            Icon::new(IconName::WARNING_20)
                                 .text_color(gpui::rgb(NETWORK_WARNING_ICON)),
                         ),
                 )
@@ -4281,9 +4248,7 @@ fn render_network_warning_callout(locale: &str, voice: &Entity<VoiceStore>) -> A
                         .cursor_pointer()
                         .hover(|s| s.bg(gpui::rgba(0x0000000d)))
                         .child(
-                            Icon::new(IconName::Close)
-                                .size(px(16.))
-                                .text_color(with_alpha(text_color, 0.7)),
+                            Icon::new(IconName::CLOSE_16).text_color(with_alpha(text_color, 0.7)),
                         )
                         .on_click(move |_, _, cx| {
                             dismiss.update(cx, |store, cx| store.dismiss_network_warning(cx));
@@ -4432,8 +4397,7 @@ fn render_control_hint_callout(
                                 .cursor_pointer()
                                 .hover(|s| s.bg(gpui::rgba(0xffffff1a)))
                                 .child(
-                                    Icon::new(IconName::Close)
-                                        .size(px(16.))
+                                    Icon::new(IconName::CLOSE_16)
                                         .text_color(theme.tokens.text_theme_primary),
                                 )
                                 .on_click(move |_, _, cx| on_dismiss(cx)),
@@ -4651,11 +4615,7 @@ impl Render for InteractiveAppPopoverPanel {
                                 .items_center()
                                 .gap_2()
                                 .text_color(green)
-                                .child(
-                                    Icon::new(IconName::Joystick)
-                                        .size(px(16.))
-                                        .text_color(green),
-                                )
+                                .child(Icon::new(IconName::GAMEPAD_16).text_color(green))
                                 .child(mezon_i18n::t(&self.locale, key).to_string()),
                         )
                         .child(
@@ -4676,11 +4636,7 @@ impl Render for InteractiveAppPopoverPanel {
                                 .items_center()
                                 .gap_2()
                                 .text_color(green)
-                                .child(
-                                    Icon::new(IconName::Joystick)
-                                        .size(px(16.))
-                                        .text_color(green),
-                                )
+                                .child(Icon::new(IconName::GAMEPAD_16).text_color(green))
                                 .child(mezon_i18n::t(&self.locale, key).to_string()),
                         )
                         .child(
@@ -5132,11 +5088,7 @@ fn device_row(
                         .child(active_name),
                 ),
         )
-        .child(
-            Icon::new(IconName::ChevronRight)
-                .size(px(14.))
-                .text_color(theme.text_muted),
-        )
+        .child(Icon::new(IconName::CHEVRON_RIGHT_16).selected(false))
         .on_hover(move |hovered, _, cx| {
             if *hovered {
                 voice.update(cx, |store, cx| store.set_device_submenu(Some(kind), cx));

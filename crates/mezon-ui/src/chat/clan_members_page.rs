@@ -507,8 +507,7 @@ impl ClanMembersPage {
                             .justify_center()
                             .when(assigned, |element| {
                                 element.child(
-                                    Icon::new(IconName::Check)
-                                        .size(px(16.))
+                                    Icon::new(IconName::CHECK_16)
                                         .text_color(theme.tokens.text_theme_primary),
                                 )
                             }),
@@ -669,8 +668,7 @@ impl ClanMembersPage {
             })
             .child(label)
             .child(
-                Icon::new(IconName::ArrowDown)
-                    .size(px(14.))
+                Icon::new(IconName::ARROW_DOWN_16)
                     .text_color(if active {
                         cx.theme().text_primary
                     } else {
@@ -751,11 +749,7 @@ impl ClanMembersPage {
                             .bottom_0()
                             .flex()
                             .items_center()
-                            .child(
-                                Icon::new(IconName::Search)
-                                    .size(px(18.))
-                                    .text_color(theme.text_secondary),
-                            ),
+                            .child(Icon::new(IconName::SEARCH_20).selected(false)),
                     )
                     .on_mouse_down_out(|_, window, _| window.blur()),
             )
@@ -772,8 +766,7 @@ impl ClanMembersPage {
                     .text_color(gpui::white())
                     .gap_1()
                     .child(
-                        Icon::new(IconName::ConvertAccount)
-                            .size(px(18.))
+                        Icon::new(IconName::SWAP_20)
                             .text_color(gpui::white())
                             .with_transformation(gpui::Transformation::rotate(gpui::radians(
                                 std::f32::consts::FRAC_PI_2,
@@ -847,8 +840,7 @@ impl ClanMembersPage {
                 .hover(|style| style.bg(cx.theme().bg_hover))
                 .child(self.page_size.to_string())
                 .child(
-                    Icon::new(IconName::ChevronDown)
-                        .size(px(14.))
+                    Icon::new(IconName::CHEVRON_DOWN_16)
                         .text_color(cx.theme().text_secondary)
                         .with_transformation(gpui::Transformation::rotate(gpui::radians(
                             chevron_angle,

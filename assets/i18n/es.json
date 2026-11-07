@@ -4948,5 +4948,7 @@
   "chat.activityStrip.messageFrom": "Mensaje de {{name}}: {{message}}",
   "chat.activityStrip.hideAction": "Ocultar barra de fijados y temas",
   "chat.activityStrip.hideConfirm.title": "Ocultar barra de fijados y temas",
-  "chat.activityStrip.hideConfirm.description": "¿Ocultar la barra de fijados y temas de este canal? Volverá a aparecer automáticamente cuando haya un nuevo fijado o tema."
+  "chat.activityStrip.hideConfirm.description": "¿Ocultar la barra de fijados y temas de este canal? Volverá a aparecer automáticamente cuando haya un nuevo fijado o tema.",
+  "setting.appearance.iconAnimations": "Animaciones de iconos",
+  "setting.appearance.iconAnimationsDescription": "Animar los iconos al pasar el cursor sobre botones y filas."
 }

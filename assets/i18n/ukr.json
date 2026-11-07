@@ -4909,5 +4909,7 @@
   "chat.activityStrip.messageFrom": "Повідомлення від {{name}}: {{message}}",
   "chat.activityStrip.hideAction": "Приховати панель закріплень і тем",
   "chat.activityStrip.hideConfirm.title": "Приховати панель закріплень і тем",
-  "chat.activityStrip.hideConfirm.description": "Приховати панель закріплень і тем для цього каналу? Вона автоматично з’явиться знову після нового закріплення або нової теми."
+  "chat.activityStrip.hideConfirm.description": "Приховати панель закріплень і тем для цього каналу? Вона автоматично з’явиться знову після нового закріплення або нової теми.",
+  "setting.appearance.iconAnimations": "Анімація значків",
+  "setting.appearance.iconAnimationsDescription": "Анімувати значки під час наведення вказівника на кнопки та рядки."
 }

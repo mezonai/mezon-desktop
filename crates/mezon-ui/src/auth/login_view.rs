@@ -4,14 +4,15 @@ use std::time::Duration;
 use gpui::{
     Animation, AnimationExt as _, App, Context, Entity, FocusHandle, Focusable, FontWeight, Hsla,
     MouseButton, RenderImage, SharedString, Subscription, Task, Window, div, img,
-    linear_color_stop, linear_gradient, prelude::*, px, rgb, rgba, svg, white,
+    linear_color_stop, linear_gradient, prelude::*, px, rgb, rgba, white,
 };
 use mezon_store::{AuthState, LoginMethod, LoginStore, Session, Settings, WalletStore};
 
 use crate::app::window_controls;
 use crate::components::compositions::OtpInput;
 use crate::components::primitives::{
-    Dropdown, DropdownTriggerStyle, FocusCycle, Input, InputEvent, InputState, Spinner,
+    Dropdown, DropdownTriggerStyle, FocusCycle, Icon, IconName, Input, InputEvent, InputState,
+    Spinner,
 };
 use crate::phone_util::{LOGIN_COUNTRIES, build_login_phone, mask_phone, phone_error_key};
 
@@ -1102,12 +1103,7 @@ impl LoginView {
                             .rounded_full()
                             .bg(white())
                             .shadow_md()
-                            .child(
-                                svg()
-                                    .path("icons/reload-icon.svg")
-                                    .size(px(22.))
-                                    .text_color(rgb(0x155eef)),
-                            ),
+                            .child(Icon::new(IconName::REFRESH_24).text_color(rgb(0x155eef))),
                     ),
             );
         }
@@ -1227,12 +1223,7 @@ impl Render for LoginView {
                         .justify_center()
                         .when(checked, |el| el.bg(blue))
                         .when(checked, |el| {
-                            el.child(
-                                svg()
-                                    .path("icons/check.svg")
-                                    .size(px(11.))
-                                    .text_color(white()),
-                            )
+                            el.child(Icon::new(IconName::CHECK_16).text_color(white()))
                         }),
                 )
                 .child(

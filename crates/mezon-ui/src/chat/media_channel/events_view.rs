@@ -32,11 +32,7 @@ pub fn render_events_header(
                 .p_1()
                 .hover(|el| el.bg(theme.bg_hover))
                 .on_click(move |_, window, cx| on_back(window, cx))
-                .child(
-                    Icon::new(IconName::ArrowLeft)
-                        .size(px(20.))
-                        .text_color(theme.text_primary),
-                ),
+                .child(Icon::new(IconName::CHEVRON_LEFT_20).text_color(theme.text_primary)),
         )
         .child(
             div()
@@ -227,11 +223,7 @@ pub fn render_events_list_card(
                             .mt_2()
                             .text_xs()
                             .text_color(theme.text_muted)
-                            .child(
-                                Icon::new(IconName::History)
-                                    .size(px(14.))
-                                    .text_color(theme.text_muted),
-                            )
+                            .child(Icon::new(IconName::HISTORY_16).selected(false))
                             .child(date.clone()),
                     )
                 })

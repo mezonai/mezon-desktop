@@ -1,5 +1,6 @@
 use gpui::{AnyElement, App, Hsla, Pixels, SharedString, Window, div, img, prelude::*, px};
 
+use super::icon::{Icon, IconName};
 use super::sizing::{Sizable, Size};
 use crate::theme::ActiveTheme;
 
@@ -18,7 +19,6 @@ pub struct Avatar {
     pending: bool,
 }
 
-const ANONYMOUS_AVATAR_ICON: &str = "icons/anonymous-avatar.svg";
 const USER_AVATAR_ICON: &str = "icons/avatar-user.svg";
 
 impl Avatar {
@@ -238,7 +238,12 @@ fn anonymous_circle(d: Pixels) -> AnyElement {
         .size(d)
         .rounded_full()
         .bg(Hsla::from(gpui::rgb(0xffffff)))
-        .child(img(ANONYMOUS_AVATAR_ICON).size(d * 0.8))
+        .child(
+            Icon::new(IconName::AnonymousAvatar)
+                .motion_enabled(false)
+                .text_color(gpui::black())
+                .size(d * 0.8),
+        )
         .into_any_element()
 }
 
@@ -254,10 +259,10 @@ fn loading_circle(d: Pixels, fill: Hsla, border: Hsla) -> AnyElement {
 }
 
 pub(crate) fn default_user_avatar(size: Pixels, corner_radius: Pixels) -> AnyElement {
-    img(USER_AVATAR_ICON)
+    Icon::new(IconName::AvatarUser)
+        .motion_enabled(false)
         .size(size)
         .rounded(corner_radius)
-        .object_fit(gpui::ObjectFit::Cover)
         .into_any_element()
 }
 
@@ -284,6 +289,16 @@ fn clipped_image(
     loading: impl Fn() -> AnyElement + 'static,
     on_error: impl Fn() -> AnyElement + 'static,
 ) -> AnyElement {
+    if src.as_ref() == USER_AVATAR_ICON {
+        return div()
+            .size(size)
+            .flex_shrink_0()
+            .rounded_full()
+            .overflow_hidden()
+            .bg(element_bg)
+            .child(default_user_avatar(size, size / 2.))
+            .into_any_element();
+    }
     div()
         .size(size)
         .flex_shrink_0()
@@ -331,6 +346,7 @@ impl RenderOnce for Avatar {
         let fallback = move || default_user_avatar(image_size, image_size / 2.);
 
         div()
+            .text_color(cx.theme().tokens.text_secondary)
             .size(container_size)
             .flex_shrink_0()
             .rounded_full()
@@ -413,6 +429,11 @@ mod avatar_tests {
             .render_single_frame(&asset.data, 1.0)
             .expect("default user avatar renders");
         let pixels = image.as_bytes(0).expect("avatar has pixels");
+        let opaque_pixels = pixels
+            .chunks_exact(4)
+            .filter(|pixel| pixel[3] > 240)
+            .count();
+        assert!(opaque_pixels >= 20, "avatar alpha mask is empty");
         for name in [
             "dark",
             "light",
@@ -426,14 +447,9 @@ mod avatar_tests {
         ] {
             let theme = crate::theme::resolve_theme(name);
             for background in [theme.surfaces.primary.solid, theme.bg_tertiary] {
-                let visible_pixels = pixels
-                    .chunks_exact(4)
-                    .filter(|pixel| {
-                        pixel[3] > 240 && (f32::from(pixel[1]) / 255. - background.g).abs() > 0.2
-                    })
-                    .count();
+                let color = theme.tokens.text_secondary;
                 assert!(
-                    visible_pixels >= 20,
+                    (color.g - background.g).abs() > 0.2,
                     "avatar is indistinguishable on {name}"
                 );
             }

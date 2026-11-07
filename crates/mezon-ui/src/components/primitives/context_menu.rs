@@ -2,7 +2,7 @@ use std::rc::Rc;
 
 use gpui::{
     Anchor, AnyElement, App, ClickEvent, MouseButton, MouseDownEvent, Pixels, Point, SharedString,
-    Window, anchored, deferred, div, img, prelude::*, px, relative, svg,
+    Window, anchored, deferred, div, img, prelude::*, px, relative,
 };
 
 use super::icon::{Icon, IconName};
@@ -619,8 +619,7 @@ impl RenderOnce for ContextMenu {
                                     .items_center()
                                     .justify_center()
                                     .child(
-                                        Icon::new(IconName::ImageThumbnail)
-                                            .size(px(16.))
+                                        Icon::new(IconName::FILE_IMAGE_16)
                                             .text_color(fallback_color),
                                     )
                                     .into_any_element()
@@ -694,15 +693,10 @@ impl RenderOnce for ContextMenu {
                             })
                             .when(leading_icon.is_some(), |row| row.gap_2())
                             .when_some(leading_icon, |row, icon| {
-                                let icon_el = if icon == IconName::Flower {
-                                    svg()
-                                        .path(icon.path())
-                                        .size(px(24.))
-                                        .flex_none()
-                                        .text_color(icon_color)
-                                } else {
-                                    Icon::new(icon).size_4().text_color(icon_color)
-                                };
+                                let icon_el = Icon::new(icon)
+                                    .size_4()
+                                    .when(icon == IconName::Flower, |icon| icon.size(px(24.)))
+                                    .text_color(icon_color);
                                 row.child(icon_el)
                             })
                             .child(div().flex_1().child(label))
@@ -716,7 +710,8 @@ impl RenderOnce for ContextMenu {
                                         dismiss(window, cx);
                                     }
                                 })
-                            }),
+                            })
+                            .map(|row| Icon::motion_scope(row, !disabled)),
                     );
                 }
                 Item::Submenu {
@@ -768,9 +763,7 @@ impl RenderOnce for ContextMenu {
                                             .child(option.label.clone()),
                                     )
                                     .when(option.selected, |el| {
-                                        el.child(
-                                            Icon::new(IconName::Check).size_4().text_color(text),
-                                        )
+                                        el.child(Icon::new(IconName::CHECK_16).text_color(text))
                                     })
                                     .when(!disabled, |el| {
                                         el.on_click(move |_: &ClickEvent, window, cx| {
@@ -849,7 +842,7 @@ impl RenderOnce for ContextMenu {
                                 })
                             })
                             .child(label_col)
-                            .child(Icon::new(IconName::ChevronRight).size_4().text_color(muted))
+                            .child(Icon::new(IconName::CHEVRON_RIGHT_16).text_color(muted))
                             .children(submenu),
                     );
                 }
@@ -894,9 +887,7 @@ impl RenderOnce for ContextMenu {
                                     .when(checked, |d| d.bg(brand))
                                     .when(checked, |d| {
                                         d.child(
-                                            Icon::new(IconName::Check)
-                                                .size(px(11.))
-                                                .text_color(gpui::white()),
+                                            Icon::new(IconName::CHECK_16).text_color(gpui::white()),
                                         )
                                     }),
                             )
@@ -975,8 +966,7 @@ impl RenderOnce for ContextMenu {
                                                 .items_center()
                                                 .justify_center()
                                                 .child(
-                                                    Icon::new(IconName::ImageThumbnail)
-                                                        .size(px(16.))
+                                                    Icon::new(IconName::FILE_IMAGE_16)
                                                         .text_color(muted),
                                                 )
                                                 .into_any_element()
@@ -1041,7 +1031,7 @@ impl RenderOnce for ContextMenu {
                                 }
                             })
                             .child(div().flex_1().child(label))
-                            .child(Icon::new(IconName::ChevronRight).size_4().text_color(muted))
+                            .child(Icon::new(IconName::CHEVRON_RIGHT_16).text_color(muted))
                             .children(submenu),
                     );
                 }

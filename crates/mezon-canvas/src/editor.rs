@@ -3413,16 +3413,8 @@ fn render_bubble_menu(
                     h_flex()
                         .items_center()
                         .gap_1()
-                        .child(
-                            Icon::new(IconName::ParagraphIcon)
-                                .size(px(14.))
-                                .text_color(icon_color),
-                        )
-                        .child(
-                            Icon::new(IconName::ArrowDown)
-                                .size(px(12.))
-                                .text_color(icon_color),
-                        ),
+                        .child(Icon::new(IconName::PARAGRAPH_16).text_color(icon_color))
+                        .child(Icon::new(IconName::ARROW_DOWN_16).text_color(icon_color)),
                 )
                 .on_mouse_down(MouseButton::Left, {
                     let editor = editor.clone();
@@ -3510,11 +3502,7 @@ fn render_bubble_menu(
                     .rounded(px(4.))
                     .cursor_pointer()
                     .tooltip(TooltipView::text(remove_link_tooltip))
-                    .child(
-                        Icon::new(IconName::Close)
-                            .size(px(12.))
-                            .text_color(icon_color),
-                    )
+                    .child(Icon::new(IconName::CLOSE_16).text_color(icon_color))
                     .on_mouse_down(MouseButton::Left, {
                         let editor = editor.clone();
                         move |_, _, cx| {
@@ -3650,11 +3638,7 @@ fn block_menu_items(
                         .items_center()
                         .justify_center()
                         .when(active, |el| {
-                            el.child(
-                                Icon::new(IconName::Check)
-                                    .size(px(16.))
-                                    .text_color(active_color),
-                            )
+                            el.child(Icon::new(IconName::CHECK_16).text_color(active_color))
                         }),
                 )
                 .child(Icon::new(icon).size(px(16.)).text_color(if active {
