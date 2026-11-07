@@ -538,6 +538,7 @@ fn install_panic_hook() {
 
 fn run_app(lock: SingleInstance, initial_url: Option<String>) {
     let settings = Settings::load_sync();
+    let start_hidden = mezon_store::take_start_hidden_marker();
 
     tracing::debug!(
         "Settings: theme={}, zoom={}, auto_start={}",
@@ -765,7 +766,11 @@ fn run_app(lock: SingleInstance, initial_url: Option<String>) {
             api.clone(),
             transport.clone(),
             initial_auth_state,
+            start_hidden,
         );
+        if start_hidden {
+            let _ = cx.update_window(window_handle, |_, window, _| window.hide_window());
+        }
 
         let _mcp_runtime = if let Some((runtime, mcp_cmd_rx)) = mcp_runtime {
             mcp::McpRuntime::spawn_ui_bridge(
@@ -925,7 +930,9 @@ fn run_app(lock: SingleInstance, initial_url: Option<String>) {
             deep_link_task.detach();
         }
 
-        cx.activate(true);
+        if !start_hidden {
+            cx.activate(true);
+        }
     });
 }
 
@@ -956,6 +963,7 @@ fn open_dev_gallery_window(cx: &mut App) {
     cx.activate(true);
 }
 
+#[allow(clippy::too_many_arguments)]
 fn open_main_window(
     cx: &mut App,
     settings: &Settings,
@@ -964,6 +972,7 @@ fn open_main_window(
     api: Arc<AppApi>,
     transport: Arc<TransportClient>,
     initial_auth: AuthState,
+    start_hidden: bool,
 ) -> (Entity<AuthState>, gpui::AnyWindowHandle) {
     let window_bounds = if let Some([x, y, w, h]) = settings.window_bounds {
         WindowBounds::Windowed(Bounds {
@@ -989,15 +998,21 @@ fn open_main_window(
             px(mezon_ui::MAIN_WINDOW_MIN_HEIGHT),
         )),
         kind: gpui::WindowKind::Normal,
-        focus: true,
-        show: true,
+        focus: !start_hidden,
+        show: !start_hidden,
         window_decorations: main_window_decorations(),
         app_id: linux_app_id(),
         ..Default::default()
     };
 
     let auth_state = cx.new(|_| initial_auth);
-    mezon_store::AutoUpdateStore::init(mezon_store::AppConfig::global(cx).update_url.clone(), cx);
+    let auto_update = mezon_store::AutoUpdateStore::init(
+        mezon_store::AppConfig::global(cx).update_url.clone(),
+        cx,
+    );
+    if start_hidden {
+        auto_update.update(cx, |store, cx| store.set_main_window_hidden(true, cx));
+    }
     mezon_store::WinstoreUpdateStore::init(cx);
     let title_bar = cx.new(|cx| TitleBar::new(settings_entity.clone(), cx));
 
