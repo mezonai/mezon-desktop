@@ -208,6 +208,8 @@ impl Render for QrProfileModal {
 pub struct AccountPage {
     settings: Entity<Settings>,
     avatar_image_cache: Entity<LruImageCache>,
+    cover_image_cache: Entity<LruImageCache>,
+    cover_url: Option<String>,
     banner_color: Option<Rgba>,
     banner_source: String,
     banner_task: Option<Task<()>>,
@@ -225,6 +227,8 @@ impl AccountPage {
         let mut page = Self {
             settings,
             avatar_image_cache: crate::image_cache::shared_avatar_cache(cx),
+            cover_image_cache: crate::image_cache::profile_cover_cache(cx),
+            cover_url: None,
             banner_color: None,
             banner_source: String::new(),
             banner_task: None,
@@ -242,6 +246,13 @@ impl AccountPage {
     }
 
     fn refresh_banner_source(&mut self, cx: &mut Context<Self>) {
+        self.cover_url = AccountStore::global(cx)
+            .read(cx)
+            .account
+            .as_ref()
+            .and_then(|account| account.banner.as_deref())
+            .filter(|url| !url.is_empty())
+            .map(|url| crate::util::imgproxy::profile_cover_url(cx, url));
         let raw = AccountStore::global(cx)
             .read(cx)
             .account
@@ -390,8 +401,8 @@ impl Render for AccountPage {
                             .w_full()
                             .bg(banner_color)
                             .overflow_hidden()
-                            .children(account.banner.clone().filter(|url| !url.is_empty()).map(|url| {
-                                gpui::img(url).rounded_t_lg().w_full().h_full().object_fit(gpui::ObjectFit::Cover)
+                            .children(self.cover_url.clone().map(|url| {
+                                gpui::img(url).image_cache(&self.cover_image_cache).rounded_t_lg().w_full().h_full().object_fit(gpui::ObjectFit::Cover)
                             }))
                             .rounded_t_lg(),
                     )

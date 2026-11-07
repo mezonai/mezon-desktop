@@ -60,6 +60,7 @@ pub struct UserProfilePopover {
     context: ProfileContext,
     settings: gpui::Entity<Settings>,
     avatar_image_cache: gpui::Entity<LruImageCache>,
+    cover_image_cache: gpui::Entity<LruImageCache>,
     banner_url: Option<SharedString>,
     banner_color: Option<gpui::Rgba>,
     banner_avatar: (String, String),
@@ -191,7 +192,10 @@ impl UserProfilePopover {
         let friend_sub = cx.observe(&FriendStore::global(cx), |_, _, cx| cx.notify());
         let presence_sub = cx.observe(&PresenceStore::global(cx), |_, _, cx| cx.notify());
         let users = UsersByUserStore::global(cx);
-        users.update(cx, |store, cx| store.ensure_loaded(cx));
+        users.update(cx, |store, cx| {
+            store.ensure_loaded(cx);
+            store.ensure_cover_profile(user_id, cx);
+        });
         let users_sub = cx.observe(&users, |this, _, cx| {
             this.refresh_profile_banner(cx);
             cx.notify();
@@ -238,6 +242,7 @@ impl UserProfilePopover {
             context,
             settings,
             avatar_image_cache,
+            cover_image_cache: crate::image_cache::profile_cover_cache(cx),
             message_input,
             role_search,
             roles: RoleSection::default(),
@@ -268,7 +273,10 @@ impl UserProfilePopover {
         let avatar = crate::util::imgproxy::avatar_url(cx, &avatar_raw);
         let cover = mezon_store::resolve_profile_banner(self.user_id, cx);
         let cover = cover
-            .map(|url| (!url.is_empty()).then(|| SharedString::from(url)))
+            .map(|url| {
+                (!url.is_empty())
+                    .then(|| SharedString::from(crate::util::imgproxy::profile_cover_url(cx, &url)))
+            })
             .unwrap_or_else(|| self.banner_url.clone());
         let source = (avatar, avatar_raw);
         let avatar_changed = source != self.banner_avatar;
@@ -904,6 +912,7 @@ impl Render for UserProfilePopover {
                     .bg(banner_bg)
                     .children(self.banner_url.clone().map(|url| {
                         img(url)
+                            .image_cache(&self.cover_image_cache)
                             .absolute()
                             .inset_0()
                             .size_full()

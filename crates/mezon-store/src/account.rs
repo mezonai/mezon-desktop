@@ -476,37 +476,25 @@ impl AccountStore {
                 }
             },
         };
-        let current = self.account.as_ref();
-        let avatar_update = current
-            .is_none_or(|a| {
-                a.avatar_url.as_deref().unwrap_or_default()
-                    != avatar_url.as_deref().unwrap_or_default()
-            })
-            .then(|| avatar_url.clone().unwrap_or_default());
-        let about_update = current
-            .is_none_or(|a| a.about_me.as_deref().unwrap_or_default() != about_me)
-            .then(|| about_me.clone());
-        let logo_update = current
-            .is_none_or(|a| {
-                a.logo.as_deref().unwrap_or_default() != logo_url.as_deref().unwrap_or_default()
-            })
-            .then(|| logo_url.clone().unwrap_or_default());
-        let banner_update = current
-            .is_none_or(|a| {
-                a.banner.as_deref().unwrap_or_default() != banner.as_deref().unwrap_or_default()
-            })
-            .then(|| banner.clone().unwrap_or_default());
+        let request = account_profile_request(
+            self.account.as_ref(),
+            display_name_update.clone(),
+            avatar_url.as_deref(),
+            &about_me,
+            logo_url.as_deref(),
+            banner.as_deref(),
+        );
         let generation = self.reset_generation;
         let api = self.api.clone();
         cx.spawn(async move |this, cx| {
             match api
                 .update_account(
-                    display_name_update.as_deref(),
-                    avatar_update.as_deref(),
-                    about_update.as_deref(),
-                    logo_update.as_deref(),
+                    request.display_name.as_deref(),
+                    request.avatar_url.as_deref(),
+                    request.about_me.as_deref(),
+                    request.logo.as_deref(),
                     None,
-                    banner_update.as_deref(),
+                    request.banner.as_deref(),
                 )
                 .await
             {
@@ -1222,6 +1210,36 @@ pub(crate) fn clear_cached_account() {
     let _ = std::fs::remove_file(account_cache_path());
 }
 
+fn account_profile_request(
+    current: Option<&UserAccount>,
+    display_name: Option<String>,
+    avatar_url: Option<&str>,
+    about_me: &str,
+    logo: Option<&str>,
+    banner: Option<&str>,
+) -> mezon_proto::api::UpdateAccountRequest {
+    mezon_proto::api::UpdateAccountRequest {
+        display_name,
+        avatar_url: current
+            .is_none_or(|account| {
+                account.avatar_url.as_deref().unwrap_or_default() != avatar_url.unwrap_or_default()
+            })
+            .then(|| avatar_url.unwrap_or_default().to_owned()),
+        about_me: Some(about_me.to_owned()),
+        logo: current
+            .is_none_or(|account| {
+                account.logo.as_deref().unwrap_or_default() != logo.unwrap_or_default()
+            })
+            .then(|| logo.unwrap_or_default().to_owned()),
+        banner: current
+            .is_none_or(|account| {
+                account.banner.as_deref().unwrap_or_default() != banner.unwrap_or_default()
+            })
+            .then(|| banner.unwrap_or_default().to_owned()),
+        ..Default::default()
+    }
+}
+
 fn user_account_from_api(acct: ApiAccount) -> UserAccount {
     let display = acct
         .display_name
@@ -1460,6 +1478,46 @@ mod tests {
     }
 
     use super::*;
+
+    #[test]
+    fn cover_only_request_preserves_bio_and_explicit_bio_removal() {
+        use prost::Message;
+        let current = user_account_from_api(
+            serde_json::from_value(serde_json::json!({
+                "user_id": 7, "username": "user", "about_me": "Bio", "password_setted": false,
+                "banner": "old.png", "avatar_url": "avatar.png", "logo": "logo.png"
+            }))
+            .unwrap(),
+        );
+        for bio in ["Bio", ""] {
+            let request = account_profile_request(
+                Some(&current),
+                None,
+                Some("avatar.png"),
+                bio,
+                Some("logo.png"),
+                Some("new.png"),
+            );
+            let decoded =
+                mezon_proto::api::UpdateAccountRequest::decode(request.encode_to_vec().as_slice())
+                    .unwrap();
+            assert_eq!(decoded.about_me.as_deref(), Some(bio));
+            assert_eq!(decoded.banner.as_deref(), Some("new.png"));
+            assert_eq!(decoded.avatar_url, None);
+            assert_eq!(decoded.logo, None);
+            assert_eq!(decoded.display_name, None);
+        }
+        let removed = account_profile_request(
+            Some(&current),
+            None,
+            Some("avatar.png"),
+            "Bio",
+            Some("logo.png"),
+            None,
+        );
+        assert_eq!(removed.banner.as_deref(), Some(""));
+        assert_eq!(removed.about_me.as_deref(), Some("Bio"));
+    }
 
     #[test]
     fn account_fetch_keeps_cover_saved_after_request_started() {

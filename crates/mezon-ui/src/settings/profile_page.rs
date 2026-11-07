@@ -106,6 +106,8 @@ pub struct ProfilePage {
     avatar_local_preview: Option<std::path::PathBuf>,
     dm_icon_menu_position: Option<Point<Pixels>>,
     avatar_image_cache: Entity<LruImageCache>,
+    cover_image_cache: Entity<LruImageCache>,
+    cover_url: Option<String>,
     banner_color: Option<Rgba>,
     banner_source: String,
     banner_task: Option<Task<()>>,
@@ -311,6 +313,8 @@ impl ProfilePage {
             avatar_local_preview: None,
             dm_icon_menu_position: None,
             avatar_image_cache: crate::image_cache::shared_avatar_cache(cx),
+            cover_image_cache: crate::image_cache::profile_cover_cache(cx),
+            cover_url: None,
             banner_color: None,
             banner_source: String::new(),
             banner_task: None,
@@ -376,7 +380,17 @@ impl ProfilePage {
         cx.notify();
     }
 
+    fn refresh_cover_url(&mut self, cx: &gpui::App) {
+        self.cover_url = self
+            .profile
+            .as_ref()
+            .and_then(|profile| profile.banner.as_deref())
+            .filter(|url| !url.is_empty())
+            .map(|url| crate::util::imgproxy::profile_cover_url(cx, url));
+    }
+
     fn refresh_banner_color(&mut self, cx: &mut Context<Self>) {
+        self.refresh_cover_url(cx);
         if let Some(path) = self.avatar_local_preview.clone() {
             let source = format!("local:{}", path.display());
             if source == self.banner_source {
@@ -639,6 +653,7 @@ impl ProfilePage {
                         if let Some(profile) = &mut this.profile {
                             profile.banner = Some(url.into());
                         }
+                        this.refresh_cover_url(cx);
                     }
                     Err(_) => {
                         tracing::warn!(target: "profile_cover", "Cover upload failed");
@@ -1152,6 +1167,7 @@ impl ProfilePage {
                                         if let Some(profile) = &mut this.profile
                                             && profile.remove_cover(uploading)
                                         {
+                                            this.refresh_cover_url(cx);
                                             cx.notify();
                                         }
                                     })),
@@ -1521,19 +1537,14 @@ impl ProfilePage {
                             .rounded_tr_lg()
                             .bg(banner_color)
                             .overflow_hidden()
-                            .children(
-                                self.profile
-                                    .as_ref()
-                                    .and_then(|p| p.banner.as_ref())
-                                    .filter(|s| !s.is_empty())
-                                    .map(|url| {
-                                        gpui::img(url.clone())
-                                            .rounded_t_lg()
-                                            .w_full()
-                                            .h_full()
-                                            .object_fit(gpui::ObjectFit::Cover)
-                                    }),
-                            ),
+                            .children(self.cover_url.as_ref().map(|url| {
+                                gpui::img(url.clone())
+                                    .image_cache(&self.cover_image_cache)
+                                    .rounded_t_lg()
+                                    .w_full()
+                                    .h_full()
+                                    .object_fit(gpui::ObjectFit::Cover)
+                            })),
                     )
                     .child(
                         v_flex()

@@ -28,6 +28,7 @@ pub struct UserProfileModal {
     direct_id: Option<ChannelId>,
     settings: Entity<Settings>,
     avatar_image_cache: Entity<LruImageCache>,
+    cover_image_cache: Entity<LruImageCache>,
     banner_color: Option<Rgba>,
     banner_source: (String, String),
     banner_url: Option<String>,
@@ -128,7 +129,9 @@ impl UserProfileModal {
                 cx.notify();
             }
         });
-        let users_sub = cx.observe(&UsersByUserStore::global(cx), |this, _, cx| {
+        let users = UsersByUserStore::global(cx);
+        users.update(cx, |store, cx| store.ensure_cover_profile(user_id, cx));
+        let users_sub = cx.observe(&users, |this, _, cx| {
             this.refresh_banner_source(cx);
         });
         let direct_sub = direct_id
@@ -147,6 +150,7 @@ impl UserProfileModal {
             direct_id,
             settings,
             avatar_image_cache,
+            cover_image_cache: crate::image_cache::profile_cover_cache(cx),
             banner_color: None,
             banner_source: (String::new(), String::new()),
             banner_url: None,
@@ -244,7 +248,9 @@ impl UserProfileModal {
         let raw = self.identity(cx).2;
         let source = (crate::util::imgproxy::avatar_url(cx, &raw), raw);
         let cover = mezon_store::resolve_profile_banner(self.user_id, cx)
-            .map(|url| (!url.is_empty()).then_some(url))
+            .map(|url| {
+                (!url.is_empty()).then(|| crate::util::imgproxy::profile_cover_url(cx, &url))
+            })
             .unwrap_or_else(|| self.banner_url.clone());
         let avatar_changed = source != self.banner_source;
         if !avatar_changed && cover == self.banner_url {
@@ -406,6 +412,7 @@ impl Render for UserProfileModal {
                             .when_some(self.banner_url.clone(), |header, url| {
                                 header.child(
                                     img(url)
+                                        .image_cache(&self.cover_image_cache)
                                         .absolute()
                                         .inset_0()
                                         .size_full()

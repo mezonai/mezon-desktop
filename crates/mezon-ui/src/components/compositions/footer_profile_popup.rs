@@ -75,6 +75,7 @@ pub struct FooterProfilePopup {
     banner_avatar: (String, String),
     banner_task: Option<Task<()>>,
     avatar_image_cache: Entity<LruImageCache>,
+    cover_image_cache: Entity<LruImageCache>,
     balance: SharedString,
     status: UserPresence,
     user_status: String,
@@ -164,6 +165,7 @@ impl FooterProfilePopup {
         let avatar_image_cache = crate::image_cache::shared_avatar_cache(cx);
         let mut this = Self {
             avatar_image_cache,
+            cover_image_cache: crate::image_cache::profile_cover_cache(cx),
             banner_url: None,
             banner_color: None,
             banner_avatar: (String::new(), String::new()),
@@ -200,7 +202,9 @@ impl FooterProfilePopup {
                 .as_ref()
                 .and_then(|account| account.banner.clone())
         });
-        let cover = cover.filter(|url| !url.is_empty()).map(SharedString::from);
+        let cover = cover
+            .filter(|url| !url.is_empty())
+            .map(|url| SharedString::from(crate::util::imgproxy::profile_cover_url(cx, &url)));
         let source = (self.avatar.to_string(), self.avatar_raw.to_string());
         let avatar_changed = source != self.banner_avatar;
         if !avatar_changed && self.banner_url == cover {
@@ -461,6 +465,7 @@ impl Render for FooterProfilePopup {
             .bg(bg_banner)
             .children(self.banner_url.clone().map(|url| {
                 img(url)
+                    .image_cache(&self.cover_image_cache)
                     .absolute()
                     .inset_0()
                     .size_full()

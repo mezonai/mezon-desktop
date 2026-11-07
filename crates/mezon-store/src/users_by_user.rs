@@ -197,21 +197,43 @@ impl UsersByUserStore {
     }
 
     pub fn ensure_user_profiles(&mut self, user_ids: Vec<UserId>, cx: &mut Context<Self>) {
+        self.ensure_profiles(user_ids, false, cx);
+    }
+
+    pub fn ensure_cover_profile(&mut self, user_id: UserId, cx: &mut Context<Self>) {
+        self.ensure_profiles(vec![user_id], true, cx);
+    }
+
+    fn ensure_profiles(
+        &mut self,
+        user_ids: Vec<UserId>,
+        include_cover: bool,
+        cx: &mut Context<Self>,
+    ) {
         let cached = ClanMembersStore::try_global(cx);
         let mut changed = false;
         for id in user_ids {
-            if !self.by_id.contains_key(&id)
+            if self
+                .user(id)
+                .is_none_or(|user| include_cover && user.banner.is_none())
                 && let Some(user) = cached
                     .as_ref()
                     .and_then(|store| store.read(cx).find_user(id))
                     .cloned()
             {
-                self.by_id.insert(id, user);
-                changed = true;
+                match self.by_id.get_mut(&id) {
+                    Some(existing) => changed |= existing.update_profile(&user),
+                    None => {
+                        self.by_id.insert(id, user);
+                        changed = true;
+                    }
+                }
             }
             if id.get() > 0
                 && !self.profile_lookup_results.is_fresh(&id, crate::CACHE_TTL)
-                && self.user(id).is_none()
+                && self
+                    .user(id)
+                    .is_none_or(|user| include_cover && user.banner.is_none())
             {
                 self.missing_profile_ids.insert(id);
             }
@@ -274,10 +296,17 @@ impl UsersByUserStore {
                         if this.missing_profile_ids.contains(id)
                             && let Some(user) = members.find_user(*id)
                         {
-                            if !this.confirmed_profiles.contains(id) && !this.by_id.contains_key(id)
-                            {
-                                this.by_id.insert(*id, user.clone());
-                                changed = true;
+                            if !this.confirmed_profiles.contains(id) {
+                                match this.by_id.get_mut(id) {
+                                    Some(existing) if existing.banner.is_none() => {
+                                        changed |= existing.update_profile(user);
+                                    }
+                                    Some(_) => {}
+                                    None => {
+                                        this.by_id.insert(*id, user.clone());
+                                        changed = true;
+                                    }
+                                }
                             }
                             this.missing_profile_ids.remove(id);
                             this.profile_lookup_results.insert(*id, Ok(()), None);
@@ -411,7 +440,8 @@ impl UsersByUserStore {
             self.search_query = query;
         }
         let mut users_changed = false;
-        for user in users.into_iter().filter_map(user_from_api) {
+        for mut user in users.into_iter().filter_map(user_from_api) {
+            user.banner = None;
             match self.by_id.get_mut(&user.id) {
                 Some(existing) if !self.confirmed_profiles.contains(&user.id) => {
                     if existing.username != user.username
@@ -1225,6 +1255,79 @@ mod tests {
                 assert_eq!(user.about_me, "bio");
                 assert_eq!(user.create_time_seconds, 42);
             });
+        });
+    }
+
+    #[gpui::test]
+    fn search_cover_falls_back_to_clan_and_can_be_enriched_without_a_new_user(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        cx.update(|cx| {
+            let store = init_store(cx);
+            cx.set_global(GlobalUsersByUserStore(store.clone()));
+            let clan = ClanMembersStore::init(store.read(cx).api.clone(), cx);
+            let user = user_from_api(api::User {
+                banner: "clan-cover.png".into(),
+                ..hit(7, "user", "User")
+            })
+            .unwrap();
+            clan.update(cx, |clan, _| {
+                clan.seed_members_for_test(
+                    crate::ClanId(9),
+                    vec![crate::clan_members::ClanMember {
+                        user,
+                        ..Default::default()
+                    }],
+                )
+            });
+            store.update(cx, |store, cx| {
+                store.merge_users("user".into(), vec![hit(7, "user", "User")], cx)
+            });
+            assert_eq!(
+                crate::resolve_profile_banner(UserId(7), cx).as_deref(),
+                Some("clan-cover.png")
+            );
+            store.update(cx, |store, cx| {
+                store.ensure_cover_profile(UserId(7), cx);
+                assert_eq!(
+                    store.user(UserId(7)).unwrap().banner.as_deref(),
+                    Some("clan-cover.png")
+                );
+                assert!(!store.missing_profile_ids.contains(&UserId(7)));
+            });
+        });
+    }
+
+    #[gpui::test]
+    fn search_cover_unknown_can_be_enriched_and_removal_stays_authoritative(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        cx.update(|cx| {
+            let store = init_store(cx);
+            cx.set_global(GlobalUsersByUserStore(store.clone()));
+            store.update(cx, |store, cx| {
+                store.merge_users("user".into(), vec![hit(7, "user", "User")], cx);
+                assert_eq!(store.user(UserId(7)).unwrap().banner, None);
+                let mut full = user_from_api(api::User {
+                    banner: "cover.png".into(),
+                    ..hit(7, "user", "User")
+                })
+                .unwrap();
+                store.apply_user_profile(full.clone(), cx);
+                store.merge_users("us".into(), vec![hit(7, "user", "User")], cx);
+                assert_eq!(
+                    store.user(UserId(7)).unwrap().banner.as_deref(),
+                    Some("cover.png")
+                );
+                full.banner = Some(String::new());
+                store.apply_user_profile(full, cx);
+                store.merge_users("u".into(), vec![hit(7, "user", "User")], cx);
+                assert_eq!(store.user(UserId(7)).unwrap().banner.as_deref(), Some(""));
+            });
+            assert_eq!(
+                crate::resolve_profile_banner(UserId(7), cx).as_deref(),
+                Some("")
+            );
         });
     }
 
