@@ -4909,5 +4909,13 @@
   "chat.activityStrip.messageFrom": "Message de {{name}} : {{message}}",
   "chat.activityStrip.hideAction": "Masquer la barre des épingles et sujets",
   "chat.activityStrip.hideConfirm.title": "Masquer la barre des épingles et sujets",
-  "chat.activityStrip.hideConfirm.description": "Masquer la barre des épingles et sujets de ce canal ? Elle réapparaîtra automatiquement lors d’une nouvelle épingle ou d’un nouveau sujet."
+  "chat.activityStrip.hideConfirm.description": "Masquer la barre des épingles et sujets de ce canal ? Elle réapparaîtra automatiquement lors d’une nouvelle épingle ou d’un nouveau sujet.",
+  "setting.account.qrProfile.centerLogo": "Logo central du QR",
+  "setting.account.qrProfile.chooseFromDevice": "Choisir depuis l'appareil",
+  "setting.account.qrProfile.resetDefaultLogo": "Réinitialiser le logo Mezon",
+  "setting.account.qrProfile.qrDownloaded": "Image QR téléchargée",
+  "setting.account.qrProfile.brandName": "MEZON",
+  "setting.account.qrProfile.verifiedByMezon": "VERIFIED BY MEZON",
+  "setting.account.qrProfile.errorExport": "Impossible d’exporter le QR du profil",
+  "setting.account.qrProfile.errorImage": "Impossible de charger l’image"
 }
