@@ -91,9 +91,26 @@ pub(super) struct ScreenAdaptation {
     previous: Option<ScreenStats>,
     low_samples: u32,
     recovery: Option<(usize, u32)>,
+    fresh_frames: Option<u64>,
 }
 
 impl ScreenAdaptation {
+    pub fn update_unless_idle(
+        &mut self,
+        current: usize,
+        profile: &ScreenProfile,
+        stats: ScreenStats,
+        fresh_frames: u64,
+    ) -> Option<(usize, ScreenSample)> {
+        if self.fresh_frames.replace(fresh_frames) == Some(fresh_frames) {
+            self.previous = Some(stats);
+            self.low_samples = 0;
+            self.recovery = None;
+            return None;
+        }
+        self.update(current, profile, stats)
+    }
+
     pub fn update(
         &mut self,
         current: usize,

@@ -1,5 +1,5 @@
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use libwebrtc::video_frame::{I420Buffer, VideoFrame, VideoRotation};
@@ -18,8 +18,8 @@ type CapturedScreenFrame = BGRAFrame;
 
 use crate::annotation::AnnotationCompositor;
 use crate::screen_picker::{
-    PickedScreen, pick_is_window, pick_uses_portal, portal_source_types_for_pick,
-    scap_target_for_pick,
+    PickedScreen, pick_is_window, pick_uses_portal, portal_parent_window_for_pick,
+    portal_source_types_for_pick, scap_target_for_pick,
 };
 #[cfg(any(target_os = "linux", target_os = "freebsd"))]
 use crate::video::SharedMonitor;
@@ -39,6 +39,7 @@ const PREVIEW_MAX_HEIGHT: u32 = 800;
 const SLOT_WAIT: Duration = Duration::from_millis(250);
 const FIRST_FRAME_TIMEOUT: Duration = Duration::from_secs(10);
 const PRECISE_SEND_WAIT: Duration = Duration::from_millis(20);
+const IDLE_REPEAT_INTERVAL: Duration = Duration::from_millis(500);
 const SEND_GAP_MARGIN_MS: f64 = 1.0;
 const VP9_LIMITER_GAP_RATIO: f64 = 0.85;
 const VP9_LIMITER_GAP_MARGIN_MS: f64 = 3.0;
@@ -99,6 +100,7 @@ impl LatestFrameSlot {
         stop: &AtomicBool,
         deadline: Option<Instant>,
         send_due: Option<Instant>,
+        repeat_due: Option<Instant>,
     ) -> Option<SlotItem> {
         let mut state = self.state.lock();
         loop {
@@ -120,6 +122,9 @@ impl LatestFrameSlot {
             if deadline.is_some_and(|at| now >= at) {
                 return None;
             }
+            if repeat_due.is_some_and(|at| now >= at) {
+                return Some(SlotItem::SendDue);
+            }
             match send_due {
                 Some(at) if now >= at => return Some(SlotItem::SendDue),
                 Some(at) if at - now <= PRECISE_SEND_WAIT => {
@@ -130,7 +135,8 @@ impl LatestFrameSlot {
                     self.cond.wait_for(&mut state, SLOT_WAIT.min(coarse));
                 }
                 None => {
-                    self.cond.wait_for(&mut state, SLOT_WAIT);
+                    let wait = repeat_due.map_or(SLOT_WAIT, |at| SLOT_WAIT.min(at - now));
+                    self.cond.wait_for(&mut state, wait);
                 }
             }
         }
@@ -166,20 +172,34 @@ impl ScreenCaptureControl {
 }
 
 #[derive(Clone)]
-pub(crate) struct ScreenSendPace(Arc<AtomicU32>);
+pub(crate) struct ScreenSendPace {
+    fps: Arc<AtomicU32>,
+    fresh_frames: Arc<AtomicU64>,
+}
 
 impl ScreenSendPace {
     fn new(fps: u32) -> Self {
-        Self(Arc::new(AtomicU32::new(fps)))
+        Self {
+            fps: Arc::new(AtomicU32::new(fps)),
+            fresh_frames: Arc::new(AtomicU64::new(0)),
+        }
     }
 
     pub(crate) fn set_fps(&self, fps: u32) {
-        self.0.store(fps, Ordering::Relaxed);
+        self.fps.store(fps, Ordering::Relaxed);
     }
 
     fn interval(&self) -> Option<Duration> {
-        let fps = self.0.load(Ordering::Relaxed);
+        let fps = self.fps.load(Ordering::Relaxed);
         (fps > 0).then(|| paced_send_interval(fps))
+    }
+
+    fn note_fresh_frame(&self) {
+        self.fresh_frames.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub(crate) fn fresh_frames(&self) -> u64 {
+        self.fresh_frames.load(Ordering::Relaxed)
     }
 }
 
@@ -264,6 +284,7 @@ pub fn start_screen(
             let is_window_share = pick_is_window(&pick);
             let use_portal = pick_uses_portal(&pick);
             let portal_source_types = portal_source_types_for_pick(&pick);
+            let portal_parent_window = portal_parent_window_for_pick(&pick);
             let capture_target = match scap_target_for_pick(pick) {
                 Ok(target) => target,
                 Err(e) => {
@@ -298,6 +319,8 @@ pub fn start_screen(
                 output_resolution: Resolution::_1080p,
                 portal_source_types,
                 use_portal,
+                portal_parent_window,
+                portal_cancel: use_portal.then(|| thread_stop.clone()),
                 ..Default::default()
             };
 
@@ -489,7 +512,12 @@ pub fn start_screen(
                     _ if paced_pending => Some(Instant::now()),
                     _ => None,
                 };
-                let Some(item) = slot.take_latest(&thread_stop, deadline, send_due) else {
+                let repeat_due = match (send_due, send_interval, last_emit) {
+                    (None, None, Some(at)) if has_paced_frame => Some(at + IDLE_REPEAT_INTERVAL),
+                    _ => None,
+                };
+                let Some(item) = slot.take_latest(&thread_stop, deadline, send_due, repeat_due)
+                else {
                     break;
                 };
                 let captured = match item {
@@ -509,6 +537,9 @@ pub fn start_screen(
                             buffer,
                         });
                         last_emit = Some(Instant::now());
+                        if send_interval.is_some() {
+                            thread_send_pace.note_fresh_frame();
+                        }
                         continue;
                     }
                     SlotItem::Repaint => {
@@ -538,6 +569,7 @@ pub fn start_screen(
                         };
                         source.capture_frame(&frame);
                         last_emit = Some(Instant::now());
+                        thread_send_pace.note_fresh_frame();
                         paced_pending = false;
                         publish_i420_preview(
                             &frame_store,
@@ -547,7 +579,7 @@ pub fn start_screen(
                             base.height,
                             &mut display_buf,
                         );
-                        paced_buffer = send_interval.is_some().then_some(frame.buffer);
+                        paced_buffer = Some(frame.buffer);
                         continue;
                     }
                 };
@@ -708,6 +740,7 @@ pub fn start_screen(
                     if send_due.is_none_or(|at| Instant::now() >= at) {
                         source.capture_frame(&frame);
                         last_emit = Some(Instant::now());
+                        thread_send_pace.note_fresh_frame();
                         paced_pending = false;
                     } else {
                         paced_pending = true;
@@ -766,7 +799,7 @@ pub fn start_screen(
                     });
                     paced_buffer = None;
                 } else {
-                    paced_buffer = send_interval.is_some().then_some(frame.buffer);
+                    paced_buffer = Some(frame.buffer);
                 }
             }
 

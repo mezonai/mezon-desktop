@@ -551,6 +551,8 @@ impl WaylandCapturer {
             .context("Failed to create dbus connection")?;
         let stream = ScreenCastPortal::new(&connection)
             .source_types(options.portal_source_types)
+            .parent_window(options.portal_parent_window.clone())
+            .cancel_on(options.portal_cancel.clone())
             .show_cursor(options.show_cursor)
             .context("Unsupported screen capture cursor display mode")?
             .create_stream()

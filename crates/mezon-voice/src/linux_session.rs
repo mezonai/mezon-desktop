@@ -1,6 +1,16 @@
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
 static WAYLAND_SESSION: AtomicBool = AtomicBool::new(false);
+static PORTAL_PARENT_XID: AtomicU32 = AtomicU32::new(0);
+
+pub fn set_portal_parent_window(xid: u32) {
+    PORTAL_PARENT_XID.store(xid, Ordering::Relaxed);
+}
+
+pub(crate) fn portal_parent_window() -> Option<String> {
+    let xid = PORTAL_PARENT_XID.load(Ordering::Relaxed);
+    (xid != 0).then(|| format!("x11:{xid:x}"))
+}
 
 pub fn record_wayland_session() -> bool {
     let is_wayland = environment_is_wayland_session();
