@@ -2050,7 +2050,12 @@ async fn session_loop(
                     }
                     if let (Some(stats), Some(screen)) = (stats, local.screen.as_ref()) {
                         let profile = screen_profile(screen.mode);
-                        if let Some((next, sample)) = screen_adaptation.update(tiers.screen, profile, stats) {
+                        if let Some((next, sample)) = screen_adaptation.update_unless_idle(
+                            tiers.screen,
+                            profile,
+                            stats,
+                            screen.send_pace.fresh_frames(),
+                        ) {
                             tracing::info!(
                                 mode = ?screen.mode,
                                 target_kbps = sample.target_kbps,
