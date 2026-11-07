@@ -616,6 +616,7 @@ mod linux {
     const PULSE_MIX_MAX_DELAY: Duration = Duration::from_millis(60);
     const PULSE_STREAM_IDLE: Duration = Duration::from_millis(200);
 
+    const PA_INVALID_INDEX: u32 = u32::MAX;
     const PA_CHANNELS_MAX: usize = 32;
     const PA_SAMPLE_S16LE: c_int = 3;
     const PA_CONTEXT_NOAUTOSPAWN: u32 = 0x1;
@@ -946,12 +947,22 @@ mod linux {
         SinkInput {
             index: u32,
             sink: u32,
+            owner_module: u32,
             pid: Option<String>,
             binary: Option<String>,
         },
-        Monitor { sink: u32, source: u32 },
-        StreamState { index: u32, serial: u64 },
-        Samples { index: u32, samples: Vec<i16> },
+        Monitor {
+            sink: u32,
+            source: u32,
+        },
+        StreamState {
+            index: u32,
+            serial: u64,
+        },
+        Samples {
+            index: u32,
+            samples: Vec<i16>,
+        },
     }
 
     type PulseEvents = RefCell<VecDeque<PulseEvent>>;
@@ -969,7 +980,11 @@ mod linux {
         if value.is_null() {
             return None;
         }
-        Some(unsafe { CStr::from_ptr(value) }.to_string_lossy().into_owned())
+        Some(
+            unsafe { CStr::from_ptr(value) }
+                .to_string_lossy()
+                .into_owned(),
+        )
     }
 
     fn proplist_value(api: &PulseApi, proplist: *const PaProplist, key: &CStr) -> Option<String> {
@@ -1023,6 +1038,7 @@ mod linux {
             PulseEvent::SinkInput {
                 index: info.index,
                 sink: info.sink,
+                owner_module: info.owner_module,
                 pid: proplist_value(api, info.proplist, c"application.process.id"),
                 binary: proplist_value(api, info.proplist, c"application.process.binary"),
             },
@@ -1070,9 +1086,9 @@ mod linux {
     }
 
     extern "C" fn on_stream_read(stream: *mut PaStream, _bytes: usize, userdata: *mut c_void) {
-        let (Some(api), Some(reader)) =
-            (pulse_api(), unsafe { userdata.cast::<PulseReader>().as_ref() })
-        else {
+        let (Some(api), Some(reader)) = (pulse_api(), unsafe {
+            userdata.cast::<PulseReader>().as_ref()
+        }) else {
             return;
         };
         let samples = drain_pulse_stream(api, stream);
@@ -1388,10 +1404,12 @@ mod linux {
                     PulseEvent::SinkInput {
                         index,
                         sink,
+                        owner_module,
                         pid,
                         binary,
                     } => {
-                        if self.is_own(pid.as_deref(), binary.as_deref()) {
+                        let relayed_by_module = owner_module != PA_INVALID_INDEX;
+                        if relayed_by_module || self.is_own(pid.as_deref(), binary.as_deref()) {
                             self.stop_capture(index);
                         } else {
                             self.follow_sink_input(index, sink);
