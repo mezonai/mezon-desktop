@@ -1658,8 +1658,9 @@ impl MessagesStore {
                 store.clear_topic(&topic_key, cx);
             });
         }
+        let parent_hint = self.active_topic_parent;
         ChannelList::global(cx).update(cx, |cl, cx| {
-            cl.apply_topic_read(topic_id, cx);
+            cl.apply_topic_read_in(clan_id, topic_id, parent_hint, cx);
         });
         if !should_write_last_seen(
             self.known_last_seen_id(topic_id, cx),

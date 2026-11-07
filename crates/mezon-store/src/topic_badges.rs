@@ -155,6 +155,18 @@ impl TopicBadgeStore {
             .unwrap_or(0)
     }
 
+    pub fn parent_of(&self, topic_id: &str) -> Option<ChannelId> {
+        self.topic_parent_map
+            .get(topic_id)
+            .map(|entry| entry.parent_channel_id.as_str())
+            .or_else(|| {
+                self.checked_unread
+                    .get(topic_id)
+                    .map(|topic| topic.parent_channel_id.as_str())
+            })
+            .and_then(|parent| parent.parse().ok())
+    }
+
     pub fn unread_parent_ids(&self, clan_id: ClanId) -> HashSet<ChannelId> {
         let clan_key = clan_id.to_string();
         self.topic_parent_map
@@ -264,6 +276,26 @@ impl TopicBadgeStore {
             || self.topic_parent_map.values().any(|entry| {
                 entry.unread && entry.clan_id == clan_key && entry.parent_channel_id == channel_key
             })
+    }
+
+    pub fn channel_has_other_unread_topic(
+        &self,
+        clan_id: ClanId,
+        channel_id: ChannelId,
+        except_topic_id: &str,
+    ) -> bool {
+        let clan_key = clan_id.to_string();
+        let channel_key = channel_id.to_string();
+        self.checked_unread.iter().any(|(id, topic)| {
+            id != except_topic_id
+                && topic.clan_id == clan_key
+                && topic.parent_channel_id == channel_key
+        }) || self.topic_parent_map.iter().any(|(id, entry)| {
+            id != except_topic_id
+                && entry.unread
+                && entry.clan_id == clan_key
+                && entry.parent_channel_id == channel_key
+        })
     }
 
     pub fn begin_topic_listing(&mut self) -> TopicListing {
@@ -763,6 +795,32 @@ mod tests {
                 store.clear_topic("91", cx);
                 assert!(store.unread_parent_ids(ClanId(10)).is_empty());
                 assert!(!store.clan_has_unread_topic(ClanId(10)));
+            });
+        });
+    }
+
+    #[gpui::test]
+    fn other_unread_topics_under_the_same_parent_are_detected(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            let store = init_store(cx);
+            store.update(cx, |store, _| {
+                store
+                    .topic_parent_map
+                    .insert("91".into(), entry("10", "5", true));
+                store
+                    .topic_parent_map
+                    .insert("92".into(), entry("10", "5", true));
+                store
+                    .topic_parent_map
+                    .insert("93".into(), entry("10", "6", true));
+                store
+                    .topic_parent_map
+                    .insert("94".into(), entry("10", "7", false));
+
+                assert!(store.channel_has_other_unread_topic(ClanId(10), ChannelId(5), "91"));
+                assert!(!store.channel_has_other_unread_topic(ClanId(10), ChannelId(6), "93"));
+                assert!(!store.channel_has_other_unread_topic(ClanId(10), ChannelId(7), "95"));
+                assert!(!store.channel_has_other_unread_topic(ClanId(11), ChannelId(5), "91"));
             });
         });
     }
