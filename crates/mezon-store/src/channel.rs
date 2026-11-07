@@ -5508,6 +5508,7 @@ impl ChannelList {
         cx: &mut Context<Self>,
     ) {
         let voice_room = self.seed_voice_occupancy(&mut channel);
+        let app_channel = channel.channel_type == ChannelType::App;
         let inserted = if let Some(cats) = self.cache.get_mut(&clan_id) {
             insert_channel(cats, channel)
         } else {
@@ -5515,7 +5516,7 @@ impl ChannelList {
         };
         if inserted {
             self.invalidate_channel_index(clan_id);
-            if voice_room {
+            if voice_room || app_channel {
                 self.refresh_extras(clan_id, cx);
             }
             cx.notify();
@@ -11720,6 +11721,53 @@ mod tests {
                 assert!(
                     channels.extras_loading.is_empty(),
                     "once loaded, re-entering must not re-issue them"
+                );
+            });
+        });
+    }
+
+    #[gpui::test]
+    fn realtime_app_channel_creation_refreshes_clan_extras(cx: &mut gpui::TestAppContext) {
+        let created = |channel_id: i64, channel_type: ChannelType| {
+            RealtimeEvent::ChannelCreated(mezon_proto::realtime::ChannelCreatedEvent {
+                clan_id: 1,
+                channel_id,
+                category_id: 1,
+                parent_id: 0,
+                channel_type: channel_type.as_raw() as i32,
+                channel_label: "created".into(),
+                channel_private: 0,
+                creator_id: 99,
+                status: 1,
+                ..Default::default()
+            })
+        };
+
+        cx.update(|cx| {
+            let channels = init_channel_list(cx);
+            channels.update(cx, |channels, cx| {
+                channels.load_for_clan(ClanId(1), cx);
+                channels.apply_clan_structure(
+                    ClanId(1),
+                    structure_with_two_channels(),
+                    favor_ids(&[]),
+                    cx,
+                );
+                channels.finish_extras(ClanId(1), complete_extras(), cx);
+                channels.extras_loading.clear();
+
+                channels.handle_event(&created(20, ChannelType::Text), cx);
+                assert!(channels.channel_in_clan(ClanId(1), ChannelId(20)));
+                assert!(
+                    channels.extras_loading.is_empty(),
+                    "a text channel must not refetch clan extras"
+                );
+
+                channels.handle_event(&created(21, ChannelType::App), cx);
+                assert!(channels.channel_in_clan(ClanId(1), ChannelId(21)));
+                assert!(
+                    channels.extras_loading.contains(&ClanId(1)),
+                    "an app channel must refetch clan extras"
                 );
             });
         });
