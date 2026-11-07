@@ -2741,9 +2741,10 @@ impl LinuxClient for X11Client {
                 clipboard::WaitConfig::None,
             )
         };
+        // mezon vendor edit: a dropped copy must show up in the release log.
         result
             .context("X11: Failed to write to clipboard (clipboard)")
-            .log_with_level(log::Level::Debug);
+            .log_with_level(log::Level::Warn);
         state.clipboard_item.replace(item);
     }
 

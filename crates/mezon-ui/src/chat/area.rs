@@ -1642,7 +1642,7 @@ fn open_latest_topic(topic: TopicDiscussion, cx: &mut App) {
         store.clear_topic(&topic.id, cx);
     });
     ChannelList::global(cx).update(cx, |store, cx| {
-        store.apply_topic_read(ChannelId(topic_id), cx);
+        store.apply_topic_read_in(clan_id, ChannelId(topic_id), Some(channel_id), cx);
     });
     TopicsStore::global(cx).update(cx, |store, cx| {
         store.begin_inbox_topic_jump_to_origin(channel_id, topic_id, message_id, message_id, cx);

@@ -180,6 +180,7 @@ pub struct MessageSearchPanel {
     rows_cache_fp: Option<(u64, u64, i32)>,
     observed_store_fp: Option<(u64, u64, i32)>,
     _subs: [Subscription; 1],
+    _members_sub: Option<Subscription>,
     _cdn_access_sub: Option<Subscription>,
 }
 
@@ -211,6 +212,19 @@ impl MessageSearchPanel {
                 cx.notify();
             }),
         ];
+        let members_sub = (!is_direct)
+            .then(|| mezon_store::ClanMembersStore::try_global(cx))
+            .flatten()
+            .map(|store| {
+                cx.subscribe(
+                    &store,
+                    |this, _, event: &mezon_store::ClanMembersEvent, cx| {
+                        if event.clan_id() == this.clan_id {
+                            cx.notify();
+                        }
+                    },
+                )
+            });
         Self {
             focus_handle: cx.focus_handle(),
             layout,
@@ -245,6 +259,7 @@ impl MessageSearchPanel {
             }),
             ogp_image_cache: crate::image_cache::ogp_aux_cache("message-search-ogp", cx),
             _subs: subs,
+            _members_sub: members_sub,
             _cdn_access_sub: crate::chat::message::parts::observe_cdn_access(cx),
         }
     }
@@ -317,6 +332,7 @@ impl Render for MessageSearchPanel {
         let channel_id = self.channel_id;
         let show_channel_label = !self.is_direct;
         let is_direct = self.is_direct;
+        let clan_id = self.clan_id;
         let state = MessageSearchStore::global(cx).read(cx).state(channel_id);
         let entity = cx.weak_entity();
         let page_count = search_page_count(state.total);
@@ -483,6 +499,7 @@ impl Render for MessageSearchPanel {
                                         row.show_group_header,
                                         now,
                                         &highlight_terms,
+                                        clan_id,
                                         is_direct,
                                         avatar_cache.clone(),
                                         attachment_cache.clone(),
@@ -738,6 +755,7 @@ fn render_search_row(
     show_group_header: bool,
     now: chrono::DateTime<Local>,
     highlight_terms: &[String],
+    clan_id: ClanId,
     is_direct: bool,
     avatar_image_cache: Entity<LruImageCache>,
     attachment_image_cache: Entity<LruImageCache>,
@@ -787,7 +805,8 @@ fn render_search_row(
             .any(|span| !matches!(span, MessageSpan::CodeBlock { .. }));
     let sender_color = resolve_search_sender_color(hit, is_direct, cx);
     let resolved_channel_label = resolve_search_channel_label(hit, channel_label, cx);
-    let leading = if hit.avatar_proxied.is_empty() {
+    let (sender_name, avatar_proxied) = resolve_search_sender_identity(hit, clan_id, is_direct, cx);
+    let leading = if avatar_proxied.is_empty() {
         div()
             .size(px(40.))
             .rounded_full()
@@ -798,7 +817,7 @@ fn render_search_row(
         div()
             .image_cache(avatar_image_cache)
             .child(
-                img(hit.avatar_proxied.clone())
+                img(avatar_proxied)
                     .size(px(40.))
                     .rounded_full()
                     .flex_shrink_0(),
@@ -920,7 +939,7 @@ fn render_search_row(
                                 .child(div().w_full().min_w_0().pr(head_right_padding).child(
                                     render_message_head(
                                         theme,
-                                        &hit.sender_name,
+                                        &sender_name,
                                         &time_label,
                                         sender_color,
                                     ),
@@ -988,6 +1007,65 @@ fn resolve_search_channel_label(
 fn resolve_search_sender_color(hit: &SearchHit, is_direct: bool, cx: &App) -> gpui::Hsla {
     let clan_id = (!is_direct).then_some(hit.clan_id);
     message_sender_color(clan_id, hit.sender_id, cx)
+}
+
+fn prefer_clan_search_identity<'a>(
+    member_name: Option<&'a str>,
+    member_avatar: Option<&'a str>,
+    doc_name: &'a str,
+    doc_avatar: &'a str,
+) -> (&'a str, &'a str) {
+    let name = member_name
+        .filter(|name| !name.is_empty())
+        .unwrap_or(doc_name);
+    let avatar = member_avatar
+        .filter(|avatar| !avatar.is_empty())
+        .unwrap_or(doc_avatar);
+    (name, avatar)
+}
+
+fn resolve_search_sender_identity(
+    hit: &SearchHit,
+    clan_id: ClanId,
+    is_direct: bool,
+    cx: &App,
+) -> (SharedString, SharedString) {
+    if is_direct || clan_id.is_zero() {
+        return (hit.sender_name.clone(), hit.avatar_proxied.clone());
+    }
+    if hit
+        .sender_id
+        .is_some_and(|user_id| mezon_store::is_anonymous_user_id(user_id, cx))
+    {
+        return (hit.sender_name.clone(), hit.avatar_proxied.clone());
+    }
+    let member = hit.sender_id.and_then(|user_id| {
+        mezon_store::ClanMembersStore::try_global(cx).and_then(|store| {
+            store
+                .read(cx)
+                .member(clan_id, user_id)
+                .map(|member| (member.name().to_string(), member.avatar().to_string()))
+        })
+    });
+    let (name, avatar) = prefer_clan_search_identity(
+        member.as_ref().map(|(name, _)| name.as_str()),
+        member.as_ref().map(|(_, avatar)| avatar.as_str()),
+        hit.sender_name.as_ref(),
+        hit.avatar_url.as_ref(),
+    );
+    let sender_name = if name == hit.sender_name.as_ref() {
+        hit.sender_name.clone()
+    } else {
+        SharedString::from(name.to_string())
+    };
+    let avatar_proxied = if avatar.is_empty() {
+        SharedString::default()
+    } else if avatar == hit.avatar_url.as_ref() {
+        hit.avatar_proxied.clone()
+    } else {
+        SharedString::from(crate::util::imgproxy::avatar_url(cx, avatar))
+    };
+    (sender_name, avatar_proxied)
 }
 
 fn render_search_message_content(
@@ -2493,5 +2571,37 @@ mod header_search_bar_tests {
             Modifiers::none(),
         );
         assert!(pressed_behind.get());
+    }
+
+    #[test]
+    fn clan_search_sender_prefers_the_member_name_and_avatar() {
+        let (name, avatar) = super::prefer_clan_search_identity(
+            Some("gia.chuvan"),
+            Some("https://cdn/clan.png"),
+            "Chu Gia",
+            "https://cdn/account.png",
+        );
+        assert_eq!(name, "gia.chuvan");
+        assert_eq!(avatar, "https://cdn/clan.png");
+    }
+
+    #[test]
+    fn clan_search_sender_keeps_the_document_when_the_member_is_missing() {
+        let (name, avatar) =
+            super::prefer_clan_search_identity(None, None, "Chu Gia", "https://cdn/account.png");
+        assert_eq!(name, "Chu Gia");
+        assert_eq!(avatar, "https://cdn/account.png");
+    }
+
+    #[test]
+    fn clan_search_sender_keeps_each_document_field_the_member_leaves_empty() {
+        let (name, avatar) = super::prefer_clan_search_identity(
+            Some(""),
+            Some(""),
+            "Chu Gia",
+            "https://cdn/account.png",
+        );
+        assert_eq!(name, "Chu Gia");
+        assert_eq!(avatar, "https://cdn/account.png");
     }
 }
