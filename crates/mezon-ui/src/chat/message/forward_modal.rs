@@ -18,6 +18,7 @@ use mezon_store::{
 
 use crate::app::shell::Shell;
 use crate::command_palette::SEARCH_CTRLK_DEBOUNCE_MS;
+use crate::components::compositions::channel_row::{ChannelIcon, render_channel_icon};
 use crate::components::primitives::{
     Avatar, Button, ButtonVariants, Checkbox, Icon, IconName, Input, InputEvent, InputState,
     Sizable, Size, Spinner,
@@ -1385,17 +1386,14 @@ fn render_option_row(
         };
         Some(
             div()
-                .relative()
                 .size(px(20.))
                 .flex_shrink_0()
-                .child(Icon::new(icon).size(px(20.)).text_color(glyph_color))
-                .children(lock.map(|lock| {
-                    div()
-                        .absolute()
-                        .top_0()
-                        .left_0()
-                        .child(Icon::new(lock).size(px(20.)).text_color(style.icon_active))
-                }))
+                .child(render_channel_icon(
+                    ChannelIcon { base: icon, lock },
+                    px(20.),
+                    glyph_color.into(),
+                    style.icon_active.into(),
+                ))
                 .into_any_element(),
         )
     } else {

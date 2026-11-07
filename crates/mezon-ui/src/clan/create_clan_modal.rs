@@ -432,15 +432,7 @@ impl CreateClanModal {
                 .items_center()
                 .justify_center()
                 .cursor_pointer()
-                .relative()
                 .on_click(cx.listener(|this, _, window, cx| this.pick_logo(window, cx)))
-                .child(
-                    div()
-                        .absolute()
-                        .top(px(-3.))
-                        .right(px(0.))
-                        .child(Icon::new(IconName::AddIcon).size(px(16.))),
-                )
                 .child(
                     Icon::new(IconName::UploadImage)
                         .size(px(24.))

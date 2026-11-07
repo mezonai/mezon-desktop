@@ -213,24 +213,10 @@ impl ClanGuidePage {
                             .child(clan_name),
                     )
                     .child(
-                        div()
-                            .relative()
+                        Icon::new(IconName::ClanGuideSeal)
                             .size(px(24.))
                             .flex_none()
-                            .child(
-                                Icon::new(IconName::ClanGuideSeal)
-                                    .absolute()
-                                    .size(px(24.))
-                                    .text_color(theme.tokens.text_theme_primary),
-                            )
-                            .child(
-                                Icon::new(IconName::ClanGuideHouse)
-                                    .absolute()
-                                    .top(px(4.))
-                                    .right(px(4.))
-                                    .size(px(16.))
-                                    .text_color(theme.tokens.text_secondary),
-                            ),
+                            .text_color(theme.tokens.text_theme_primary),
                     )
                     .child(
                         div().flex_1().flex().justify_end().child(

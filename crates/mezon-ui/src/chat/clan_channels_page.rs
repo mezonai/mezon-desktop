@@ -469,35 +469,15 @@ impl ClanChannelsPage {
             locale,
             chrono::Local::now(),
         );
-        let channel_icon = if matches!(channel_type, ChannelType::Thread) && row.private {
-            div()
-                .relative()
-                .flex_shrink_0()
-                .size(px(if is_thread { 20. } else { 22. }))
-                .child(
-                    Icon::new(IconName::ThreadIcon)
-                        .size(px(if is_thread { 20. } else { 22. }))
-                        .text_color(cx.theme().text_secondary),
-                )
-                .child(
-                    div().absolute().inset_0().child(
-                        Icon::new(IconName::HashtagLock)
-                            .size(px(if is_thread { 22. } else { 24. }))
-                            .text_color(cx.theme().text_primary),
-                    ),
-                )
-                .into_any_element()
-        } else {
-            let age_restricted = ChannelList::global(cx)
-                .read(cx)
-                .channel(self.clan_id, row.id)
-                .map(|channel| channel.age_restricted)
-                .unwrap_or(0);
-            Icon::new(channel_type_icon(channel_type, row.private, age_restricted))
-                .size(px(if is_thread { 20. } else { 22. }))
-                .text_color(cx.theme().text_secondary)
-                .into_any_element()
-        };
+        let age_restricted = ChannelList::global(cx)
+            .read(cx)
+            .channel(self.clan_id, row.id)
+            .map(|channel| channel.age_restricted)
+            .unwrap_or(0);
+        let channel_icon = Icon::new(channel_type_icon(channel_type, row.private, age_restricted))
+            .size(px(if is_thread { 20. } else { 22. }))
+            .text_color(cx.theme().text_secondary)
+            .into_any_element();
         div()
             .id(format!("channel-setting-row-{}", row.id.get()))
             .w_full()

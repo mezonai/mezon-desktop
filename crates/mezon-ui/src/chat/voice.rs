@@ -25,6 +25,7 @@ use crate::chat::media_permission_prompt::{
 };
 use crate::chat::screen_annotation::{desktop_annotation_supported, toggle_desktop_annotation};
 use crate::chat::screen_draw::{render_draw_toolbox, render_screen_draw_overlay};
+use crate::components::compositions::channel_row::channel_type_icon;
 use crate::components::primitives::{
     Avatar, ContextMenu, Icon, IconName, Sizable, Size, Slider, SliderEvent, SliderState, Spinner,
     context_menu_at, h_flex, v_flex,
@@ -62,6 +63,7 @@ struct VoiceRoom<'a> {
     name: &'a str,
     voice_members: &'a [VoiceMember],
     external: bool,
+    header_icon: IconName,
 }
 
 impl<'a> VoiceRoom<'a> {
@@ -71,6 +73,11 @@ impl<'a> VoiceRoom<'a> {
             name: &channel.name,
             voice_members: &channel.voice_members,
             external: false,
+            header_icon: channel_type_icon(
+                channel.channel_type,
+                channel.private,
+                channel.age_restricted,
+            ),
         }
     }
 
@@ -80,6 +87,7 @@ impl<'a> VoiceRoom<'a> {
             name,
             voice_members: &[],
             external: true,
+            header_icon: IconName::Speaker,
         }
     }
 
@@ -454,6 +462,7 @@ fn render_meeting_pre_join(
             theme,
             locale,
             label,
+            IconName::Speaker,
             None,
             false,
             0,
@@ -893,6 +902,7 @@ fn voice_header<H: CallLayoutHost>(
     theme: &Theme,
     locale: &str,
     name: &str,
+    icon: IconName,
     voice: Option<&Entity<VoiceStore>>,
     show_chat: bool,
     chat_unread: usize,
@@ -992,11 +1002,7 @@ fn voice_header<H: CallLayoutHost>(
                 .flex_row()
                 .items_center()
                 .gap_2()
-                .child(
-                    Icon::new(IconName::Speaker)
-                        .size(px(20.0))
-                        .text_color(theme.text_muted),
-                )
+                .child(Icon::new(icon).size(px(20.0)).text_color(theme.text_muted))
                 .child(
                     div()
                         .text_sm()
@@ -1312,6 +1318,11 @@ fn render_pre_join(
             theme,
             locale,
             &channel.name,
+            channel_type_icon(
+                channel.channel_type,
+                channel.private,
+                channel.age_restricted,
+            ),
             None,
             show_chat,
             0,
@@ -2204,6 +2215,7 @@ fn render_in_call<H: CallLayoutHost>(
             theme,
             locale,
             room.name,
+            room.header_icon,
             Some(voice),
             show_chat,
             chat_unread,
