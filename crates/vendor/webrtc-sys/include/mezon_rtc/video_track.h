@@ -87,6 +87,7 @@ class VideoTrackSource {
     VideoResolution video_resolution() const;
     bool on_captured_frame(const webrtc::VideoFrame& frame,
                            const FrameMetadata& frame_metadata);
+    void RequestRefreshFrame() override;
 
     void set_packet_trailer_handler(
         std::shared_ptr<PacketTrailerHandler> handler);
@@ -111,6 +112,16 @@ class VideoTrackSource {
     std::shared_ptr<mezon_rtc::EncodedRateControlState> rate_control_state_ =
         std::make_shared<mezon_rtc::EncodedRateControlState>();
     bool is_screencast_;
+    struct HeldFrame {
+      webrtc::scoped_refptr<webrtc::VideoFrameBuffer> buffer;
+      webrtc::VideoRotation rotation = webrtc::kVideoRotation_0;
+      int64_t capture_us = 0;
+      int64_t arrival_us = 0;
+    };
+    // Last screen frame handed to the encoder (already scaled).
+    HeldFrame refresh_;
+    // Newest screen frame the adapter dropped since then (not scaled).
+    HeldFrame discarded_;
   };
 
  public:
@@ -142,6 +153,7 @@ class VideoTrackSource {
   // pass-through encoder (PLI/FIR or post-reconfigure). Poll from the
   // capture loop.
   bool take_keyframe_request() const;
+  void process_constraints(VideoTrackSourceConstraints constraints) const;
   EncodedRateControlRequest take_rate_control_request() const;
 
   void set_packet_trailer_handler(

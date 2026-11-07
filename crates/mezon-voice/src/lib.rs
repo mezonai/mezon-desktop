@@ -1533,6 +1533,8 @@ async fn start_screen_track(
         ?mode,
         "starting screen share (share system audio: {share_audio})"
     );
+    let polls = screen_picker::pick_polls_at_capture_fps(&pick);
+    let fixed_capture_fps = screen_picker::pick_uses_portal(&pick).then(|| mode.capture_fps());
     let (stopper, source_rx) = screen::start_screen(
         identity.to_string(),
         frame_store,
@@ -1546,12 +1548,15 @@ async fn start_screen_track(
         .await
         .map_err(|_| anyhow::anyhow!("screen thread exited"))?
         .map_err(|e| anyhow::anyhow!(e))?;
+    let repeat = (!polls && !screen_mode::PACES_TEXT_FRAMES)
+        .then(|| sfu::ScreenRepeat::new(source.clone(), fixed_capture_fps));
     let screen_track = factory.create_video_track("screen", source);
     apply_screen_content_hint(&screen_track, mode);
     let track = sfu::ScreenTrack {
         track: screen_track,
         width,
         mode,
+        repeat,
         send_pace: stopper.send_pace(),
     };
 

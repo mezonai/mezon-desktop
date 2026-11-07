@@ -120,6 +120,10 @@ pub mod ffi {
             frame_metadata: &FrameMetadata,
         ) -> bool;
         fn take_keyframe_request(self: &VideoTrackSource) -> bool;
+        fn process_constraints(
+            self: &VideoTrackSource,
+            constraints: VideoTrackSourceConstraints,
+        );
         fn take_rate_control_request(self: &VideoTrackSource) -> EncodedRateControlRequest;
         fn set_packet_trailer_handler(
             self: &VideoTrackSource,
