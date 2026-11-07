@@ -1558,7 +1558,7 @@ mod tests {
         drop(view);
         cx.run_until_parked();
         let (_, cleanup) = cx.add_window_view(|_, _| gpui::Empty);
-        cleanup.update(|window, cx| crate::image_cache::flush_atlas_drops(window, cx));
+        cleanup.update(crate::image_cache::flush_atlas_drops);
         assert_eq!(Arc::strong_count(&last), 1);
     }
 
