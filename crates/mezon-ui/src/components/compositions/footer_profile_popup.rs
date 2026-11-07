@@ -9,7 +9,9 @@ use mezon_store::{
     UserPresence, WalletStore, current_user_status,
 };
 
-use crate::chat::friends_page::{open_created_dm_if_route_unchanged, toast_send_failed};
+use crate::chat::friends_page::{
+    dm_open_failure_message, open_created_dm_if_route_unchanged, toast_send_failed,
+};
 use crate::chat::message::{CustomStatusModal, SendTokenModal, TransactionHistoryModal};
 use crate::components::compositions::CustomStatusBubble;
 use crate::components::primitives::{Avatar, Icon, IconName, Input, InputEvent, InputState};
@@ -307,7 +309,7 @@ impl FooterProfilePopup {
                     cx.notify();
                 });
                 cx.update(|cx| {
-                    toast_send_failed(error_message, cx);
+                    toast_send_failed(dm_open_failure_message(&err, error_message, cx), cx);
                 });
             }
         })

@@ -583,6 +583,21 @@ pub const QUICK_MENU_TYPE_FLASH: i32 = 1;
 pub const QUICK_MENU_TYPE_QUICK: i32 = 2;
 const CHANNEL_TYPE_MEZON_VOICE: i32 = 10;
 
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct PresignMarkers {
+    pub finish: Vec<String>,
+    pub ingest: Vec<String>,
+}
+
+impl PresignMarkers {
+    pub fn finished(finish: Vec<String>) -> Self {
+        Self {
+            finish,
+            ingest: Vec::new(),
+        }
+    }
+}
+
 #[derive(Clone, Copy, Default)]
 pub struct OutgoingMessageFlags {
     pub anonymous_message: bool,
@@ -2912,6 +2927,8 @@ pub struct ApiMessageContent {
     pub lky: Vec<ContentToken>,
     #[serde(default, skip_serializing)]
     pub presign_finish: Option<Vec<String>>,
+    #[serde(default, skip_serializing)]
+    pub presign_ingest: Option<Vec<String>>,
 }
 
 /// A reply/reference attached to a message (mezon `MessageRef`).
@@ -3163,6 +3180,8 @@ pub fn forward_content_json(content_raw: &str, text: &str) -> String {
     if !text.is_empty() && !obj.contains_key("t") {
         obj.insert("t".into(), text.into());
     }
+    obj.remove("presign_finish");
+    obj.remove("presign_ingest");
     obj.insert("fwd".into(), serde_json::Value::Bool(true));
     serde_json::Value::Object(obj).to_string()
 }
@@ -3927,23 +3946,31 @@ fn build_presign_finish_content(
     mentions: &[OutgoingMention],
     hashtags: &OutgoingHashtags,
     emojis: &[OutgoingEmoji],
-    presign_finish: &[String],
+    presign: &PresignMarkers,
     create_time_seconds: u32,
 ) -> (String, Vec<OutgoingMention>) {
     let sent = build_send_content(content, mentions, hashtags, emojis);
-    let content_json = with_presign_finish(sent.json, presign_finish);
+    let content_json = with_presign_markers(sent.json, presign);
     let content_json = with_create_time_seconds(content_json, create_time_seconds);
     (content_json, sent.mentions)
 }
 
-fn with_presign_finish(content_json: String, keys: &[String]) -> String {
+fn with_presign_markers(content_json: String, presign: &PresignMarkers) -> String {
+    let content_json = with_key_list(content_json, "presign_finish", &presign.finish);
+    if presign.ingest.is_empty() {
+        return content_json;
+    }
+    with_key_list(content_json, "presign_ingest", &presign.ingest)
+}
+
+fn with_key_list(content_json: String, field: &str, keys: &[String]) -> String {
     let mut value: serde_json::Value =
         serde_json::from_str(&content_json).unwrap_or_else(|_| serde_json::json!({}));
     let Some(obj) = value.as_object_mut() else {
         return content_json;
     };
     obj.insert(
-        "presign_finish".into(),
+        field.into(),
         serde_json::Value::Array(
             keys.iter()
                 .map(|k| serde_json::Value::String(k.clone()))
@@ -5164,6 +5191,8 @@ impl MezonTransport {
             "SfuBreakoutMerge" => 216,
             "SetOverrideEveryoneChannel" => 217,
             "GetOverrideEveryoneChannel" => 218,
+            "GetDMSetting" => 219,
+            "UpdateDMSetting" => 220,
             _ => {
                 tracing::warn!("unknown API name: {api_name}");
                 return None;
@@ -5893,7 +5922,7 @@ impl MezonTransport {
         mentions: Vec<OutgoingMention>,
         hashtags: OutgoingHashtags,
         emojis: Vec<OutgoingEmoji>,
-        presign_finish: Option<Vec<String>>,
+        presign: Option<PresignMarkers>,
         reply: Option<OutgoingReply>,
         flags: OutgoingMessageFlags,
     ) -> Result<ApiMessage> {
@@ -5923,7 +5952,7 @@ impl MezonTransport {
             mentions,
             hashtags,
             emojis,
-            presign_finish,
+            presign,
             false,
             topic_id,
             None,
@@ -5945,7 +5974,7 @@ impl MezonTransport {
         mentions: Vec<OutgoingMention>,
         hashtags: OutgoingHashtags,
         emojis: Vec<OutgoingEmoji>,
-        presign_finish: Option<Vec<String>>,
+        presign: Option<PresignMarkers>,
         flags: OutgoingMessageFlags,
     ) -> Result<ApiMessage> {
         let references = reply
@@ -5974,7 +6003,7 @@ impl MezonTransport {
             mentions,
             hashtags,
             emojis,
-            presign_finish,
+            presign,
             false,
             0,
             None,
@@ -6108,7 +6137,7 @@ impl MezonTransport {
         mentions: Vec<OutgoingMention>,
         hashtags: OutgoingHashtags,
         emojis: Vec<OutgoingEmoji>,
-        presign_finish: Option<Vec<String>>,
+        presign: Option<PresignMarkers>,
         content_is_json: bool,
         topic_id: i64,
         ogp: Option<OutgoingOgp>,
@@ -6139,8 +6168,8 @@ impl MezonTransport {
             build_send_content_with_code(content, &mentions, &hashtags, &emojis, flags.message_code)
         };
         let content_json = sent.json.clone();
-        let content_json = match &presign_finish {
-            Some(keys) => with_presign_finish(content_json, keys),
+        let content_json = match &presign {
+            Some(presign) => with_presign_markers(content_json, presign),
             None => content_json,
         };
         let content_json = match &ogp {
@@ -6192,7 +6221,11 @@ impl MezonTransport {
                     .map(OutgoingEmoji::to_content_token)
                     .collect(),
                 mk: markdown_content_tokens(&sent.markdowns),
-                presign_finish: presign_finish.clone(),
+                presign_finish: presign.as_ref().map(|p| p.finish.clone()),
+                presign_ingest: presign
+                    .as_ref()
+                    .filter(|p| !p.ingest.is_empty())
+                    .map(|p| p.ingest.clone()),
                 ..Default::default()
             }
         };
@@ -7104,7 +7137,7 @@ impl MezonTransport {
         mentions: Vec<OutgoingMention>,
         hashtags: OutgoingHashtags,
         emojis: Vec<OutgoingEmoji>,
-        presign_finish: Vec<String>,
+        presign: PresignMarkers,
         create_time_seconds: u32,
         mode: i32,
         is_public: bool,
@@ -7117,7 +7150,7 @@ impl MezonTransport {
             &mentions,
             &hashtags,
             &emojis,
-            &presign_finish,
+            &presign,
             create_time_seconds,
         );
         let proto_mentions: Vec<api::MessageMention> = mentions
@@ -7836,11 +7869,33 @@ impl MezonTransport {
             .await?;
 
         if code != 0 {
-            return Err(anyhow::anyhow!("API error: code={}", code));
+            return Err(api_status_error(code));
         }
 
         let channel = api::ChannelDescription::decode(response.as_slice())?;
         Ok(Self::channel_desc_from_proto(channel))
+    }
+
+    pub async fn get_dm_setting(&self) -> Result<bool> {
+        let cid = self.generate_cid();
+        let body = api::NoParams::default().encode_to_vec();
+        let (code, response) = self.send_api_request(cid, "GetDMSetting", body).await?;
+        if code != 0 {
+            return Err(api_status_error(code));
+        }
+        let setting = api::DmSetting::decode(response.as_slice())?;
+        Ok(setting.only_friends_dm)
+    }
+
+    pub async fn update_dm_setting(&self, only_friends_dm: bool) -> Result<bool> {
+        let cid = self.generate_cid();
+        let body = api::UpdateDmSettingRequest { only_friends_dm }.encode_to_vec();
+        let (code, response) = self.send_api_request(cid, "UpdateDMSetting", body).await?;
+        if code != 0 {
+            return Err(api_status_error(code));
+        }
+        let setting = api::DmSetting::decode(response.as_slice())?;
+        Ok(setting.only_friends_dm)
     }
 
     /// Delete a channel or thread.
@@ -8742,8 +8797,7 @@ impl MezonTransport {
         height: i32,
         channel_id: i64,
     ) -> Result<api::UploadAttachment> {
-        let cid = self.generate_cid();
-        let body = api::UploadAttachmentRequest {
+        self.upload_attachment(api::UploadAttachmentRequest {
             filename: filename.to_string(),
             filetype: filetype.to_string(),
             size,
@@ -8752,8 +8806,16 @@ impl MezonTransport {
             part_count: 0,
             channel_id,
             transcode_hls: crate::video_source::wants_hls_transcode(filename, size),
-        }
-        .encode_to_vec();
+        })
+        .await
+    }
+
+    pub async fn upload_attachment(
+        &self,
+        request: api::UploadAttachmentRequest,
+    ) -> Result<api::UploadAttachment> {
+        let cid = self.generate_cid();
+        let body = request.encode_to_vec();
         let (code, response) = self
             .send_api_request(cid, "UploadAttachmentFile", body)
             .await?;
@@ -11654,6 +11716,18 @@ mod tests {
     }
 
     #[test]
+    fn forward_content_json_drops_the_presign_markers() {
+        let raw = r#"{"t":"clip","presign_finish":["k1"],"presign_ingest":["k1"]}"#;
+
+        let json = forward_content_json(raw, "clip");
+        let value: serde_json::Value = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(value["t"], "clip");
+        assert!(value.get("presign_finish").is_none());
+        assert!(value.get("presign_ingest").is_none());
+    }
+
+    #[test]
     fn forward_content_json_falls_back_to_plain_text() {
         let json = forward_content_json("", "hello");
         let value: serde_json::Value = serde_json::from_str(&json).unwrap();
@@ -13207,6 +13281,8 @@ mod tests {
         assert_eq!(t.get_api_index("SfuBreakoutMerge"), Some(216));
         assert_eq!(t.get_api_index("SetOverrideEveryoneChannel"), Some(217));
         assert_eq!(t.get_api_index("GetOverrideEveryoneChannel"), Some(218));
+        assert_eq!(t.get_api_index("GetDMSetting"), Some(219));
+        assert_eq!(t.get_api_index("UpdateDMSetting"), Some(220));
         assert_eq!(t.get_api_index("DefinitelyNotAnApi"), None);
     }
 
@@ -13511,6 +13587,29 @@ mod tests {
     }
 
     #[test]
+    fn presign_patch_keeps_the_ingest_marker() {
+        let content = |presign: &PresignMarkers| {
+            let (json, _) = build_presign_finish_content(
+                "clip",
+                &[],
+                &OutgoingHashtags::default(),
+                &[],
+                presign,
+                0,
+            );
+            serde_json::from_str::<serde_json::Value>(&json).expect("json")
+        };
+        let marked = content(&PresignMarkers {
+            finish: vec!["a".into()],
+            ingest: vec!["a".into(), "b".into()],
+        });
+        assert_eq!(marked["presign_finish"], serde_json::json!(["a"]));
+        assert_eq!(marked["presign_ingest"], serde_json::json!(["a", "b"]));
+        let plain = content(&PresignMarkers::finished(vec!["a".into()]));
+        assert!(plain.get("presign_ingest").is_none());
+    }
+
+    #[test]
     fn presign_finish_patch_keeps_emoji_and_hashtag_entities() {
         let emojis = vec![OutgoingEmoji {
             emoji_id: "1750123".to_string(),
@@ -13535,7 +13634,7 @@ mod tests {
             &mentions,
             &OutgoingHashtags::from(hashtags),
             &emojis,
-            &["key-1".to_string()],
+            &PresignMarkers::finished(vec!["key-1".to_string()]),
             1700,
         );
         let value: serde_json::Value = serde_json::from_str(&json).expect("json");

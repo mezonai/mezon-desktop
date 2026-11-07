@@ -905,6 +905,7 @@ async fn upload_timeline_file(
             duration: 0,
             thumbnail: None,
             channel_id,
+            stream_while_uploading: false,
         })
         .await
         .map_err(|e| e.to_string())?;

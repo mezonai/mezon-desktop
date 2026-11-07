@@ -674,12 +674,22 @@ fn active_channel_context(cx: &App) -> Option<ChannelContext> {
         return None;
     }
     let channel_id = channel_id.filter(|_| use_filter);
-    let filter_ids = channel_id.map(|cid| ChannelMembersStore::global(cx).read(cx).member_ids(cid));
+    let filter_ids = channel_id.map(|cid| {
+        without_anonymous(
+            ChannelMembersStore::global(cx).read(cx).member_ids(cid),
+            |id| mezon_store::is_anonymous_user_id(id, cx),
+        )
+    });
     Some(ChannelContext {
         clan_id,
         channel_id,
         filter_ids,
     })
+}
+
+fn without_anonymous(mut ids: Vec<UserId>, is_anonymous: impl Fn(UserId) -> bool) -> Vec<UserId> {
+    ids.retain(|id| !is_anonymous(*id));
+    ids
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -2284,7 +2294,7 @@ mod fallback_tests {
 
     use mezon_store::{ChannelUserProfile, UserId};
 
-    use super::{FallbackMember, fallback_channel_members};
+    use super::{FallbackMember, fallback_channel_members, without_anonymous};
 
     fn profile(username: &str, display_name: &str, avatar: &str) -> ChannelUserProfile {
         ChannelUserProfile {
@@ -2358,6 +2368,13 @@ mod fallback_tests {
         let profiles: HashMap<UserId, ChannelUserProfile> = HashMap::new();
         let rows = fallback_channel_members(&[UserId(5)], |_| false, |id| profiles.get(&id));
         assert!(rows.is_empty());
+    }
+
+    #[test]
+    fn anonymous_account_is_not_a_channel_member() {
+        let anonymous = UserId(1767478432163172999);
+        let ids = without_anonymous(vec![UserId(7), anonymous, UserId(8)], |id| id == anonymous);
+        assert_eq!(ids, vec![UserId(7), UserId(8)]);
     }
 
     #[test]

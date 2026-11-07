@@ -5,6 +5,7 @@ use mezon_store::{
 };
 
 use crate::app::shell::Shell;
+use crate::chat::friends_page::dm_open_failure_message;
 use crate::router::{Route, Router, navigate};
 
 pub(crate) struct CallTarget {
@@ -91,7 +92,8 @@ pub(crate) fn call_user(
         Err(err) => {
             tracing::warn!("create DM before call failed: {err}");
             cx.update(|cx| {
-                Shell::global(cx).update(cx, move |shell, cx| shell.error(error_message, cx));
+                let message = dm_open_failure_message(&err, error_message, cx);
+                Shell::global(cx).update(cx, move |shell, cx| shell.error(message, cx));
             });
         }
     })

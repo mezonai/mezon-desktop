@@ -268,6 +268,7 @@ pub struct UploadFile {
     pub duration: i32,
     pub thumbnail: Option<UploadThumbnail>,
     pub channel_id: i64,
+    pub stream_while_uploading: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -282,6 +283,19 @@ pub struct PresignedAttachment {
 }
 
 impl PresignedAttachment {
+    pub fn streams_while_uploading(&self) -> bool {
+        matches!(self.plan, UploadPlan::Ingest { .. })
+    }
+
+    pub fn ingest_keys(presigned: &[Self], keys: &[String]) -> Vec<String> {
+        presigned
+            .iter()
+            .zip(keys)
+            .filter(|(item, _)| item.streams_while_uploading())
+            .map(|(_, key)| key.clone())
+            .collect()
+    }
+
     pub fn resumable(&self) -> ResumableUpload {
         ResumableUpload {
             plan: self.plan.clone(),
@@ -297,13 +311,21 @@ pub struct ResumableUpload {
 impl ResumableUpload {
     pub fn local_path(&self) -> &Path {
         match &self.plan {
-            UploadPlan::Single { path, .. } | UploadPlan::Multipart { path, .. } => path,
+            UploadPlan::Single { path, .. }
+            | UploadPlan::Multipart { path, .. }
+            | UploadPlan::Ingest { path, .. } => path,
         }
+    }
+
+    pub fn streams_while_uploading(&self) -> bool {
+        matches!(self.plan, UploadPlan::Ingest { .. })
     }
 
     pub fn has_urls(&self) -> bool {
         match &self.plan {
-            UploadPlan::Single { put_url, .. } => !put_url.is_empty(),
+            UploadPlan::Single { put_url, .. } | UploadPlan::Ingest { put_url, .. } => {
+                !put_url.is_empty()
+            }
             UploadPlan::Multipart {
                 upload_id,
                 part_urls,
@@ -316,6 +338,14 @@ impl ResumableUpload {
         let mut plan = self.plan.clone();
         match &mut plan {
             UploadPlan::Single { put_url, .. } => put_url.clear(),
+            UploadPlan::Ingest {
+                put_url,
+                ingest_url,
+                ..
+            } => {
+                put_url.clear();
+                ingest_url.clear();
+            }
             UploadPlan::Multipart {
                 upload_id,
                 part_urls,
@@ -334,6 +364,7 @@ impl std::fmt::Debug for ResumableUpload {
         let kind = match self.plan {
             UploadPlan::Single { .. } => "single",
             UploadPlan::Multipart { .. } => "multipart",
+            UploadPlan::Ingest { .. } => "ingest",
         };
         f.debug_struct("ResumableUpload")
             .field("plan", &kind)
@@ -365,6 +396,13 @@ enum UploadPlan {
         content_type: String,
         filename: String,
     },
+    Ingest {
+        put_url: String,
+        ingest_url: String,
+        path: PathBuf,
+        content_type: String,
+        size: u64,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -378,6 +416,7 @@ pub struct UrlAttachment {
 
 #[derive(Debug, Clone)]
 pub enum AttachmentUploadOutcome {
+    Storing(String),
     Uploaded(String),
     Failed(String),
 }
@@ -2089,6 +2128,14 @@ impl AppApi {
         self.transport.create_direct_channel(user_ids).await
     }
 
+    pub async fn get_dm_setting(&self) -> Result<bool> {
+        self.transport.get_dm_setting().await
+    }
+
+    pub async fn update_dm_setting(&self, only_friends_dm: bool) -> Result<bool> {
+        self.transport.update_dm_setting(only_friends_dm).await
+    }
+
     /// List the current user's friends, with relationship state preserved.
     pub async fn list_friends(&self) -> Result<Vec<ApiFriend>> {
         self.transport.list_friends().await
@@ -2222,65 +2269,44 @@ impl AppApi {
             duration,
             thumbnail,
             channel_id,
+            stream_while_uploading,
         } = file;
         let upload_name = sanitize_upload_filename(&filename);
         let upload_type = upload_attachment_type(&filetype);
         let raw_size = crate::transport_runtime::file_len(path.clone()).await?;
+        let ingest = stream_while_uploading
+            && crate::file_ingest::is_ingest_candidate(&upload_name, &filetype, raw_size);
         let size = i32::try_from(raw_size)
             .map_err(|_| anyhow::anyhow!("attachment too large to upload: {raw_size} bytes"))?;
         let thumbnail_url = match thumbnail {
             Some(thumb) => self.upload_thumbnail(thumb, channel_id).await,
             None => String::new(),
         };
-        let (url, plan) = if size as u64 >= MULTIPART_MIN_FILE_SIZE {
-            let ranges = multipart_part_ranges(size as u64);
-            let started = self
+        let (url, plan) = if !ingest && size as u64 >= MULTIPART_MIN_FILE_SIZE {
+            self.presign_multipart(
+                &upload_name,
+                upload_type,
+                size,
+                (width, height),
+                channel_id,
+                path,
+                filetype,
+            )
+            .await?
+        } else {
+            let upload = self
                 .transport
-                .multipart_upload_attachment_file_start(mezon_proto::api::UploadAttachmentRequest {
+                .upload_attachment(mezon_proto::api::UploadAttachmentRequest {
                     filename: upload_name.clone(),
                     filetype: upload_type.to_string(),
                     size,
                     width,
                     height,
-                    part_count: ranges.len() as i32,
+                    part_count: 0,
                     channel_id,
-                    transcode_hls: crate::video_source::wants_hls_transcode(&upload_name, size),
+                    transcode_hls: !ingest
+                        && crate::video_source::wants_hls_transcode(&upload_name, size),
                 })
-                .await?;
-            if started.urls.len() != ranges.len() {
-                anyhow::bail!(
-                    "multipart start returned {} urls, expected {}",
-                    started.urls.len(),
-                    ranges.len()
-                );
-            }
-            tracing::debug!(
-                type_cdn = started.type_cdn,
-                filename = %started.filename,
-                part_count = started.urls.len(),
-                push_host = ?started.urls.first().and_then(|u| upload_push_host(u)),
-                "MultipartUploadAttachmentFileStart presign response"
-            );
-            let url = attachment_cdn_url_for_upload(
-                started.type_cdn,
-                &self.base_img_url,
-                &started.filename,
-            )?;
-            (
-                url,
-                UploadPlan::Multipart {
-                    upload_id: started.upload_id,
-                    part_urls: started.urls,
-                    ranges,
-                    path,
-                    content_type: filetype,
-                    filename: started.filename,
-                },
-            )
-        } else {
-            let upload = self
-                .transport
-                .upload_attachment_file(&upload_name, upload_type, size, width, height, channel_id)
                 .await?;
             tracing::debug!(
                 type_cdn = upload.type_cdn,
@@ -2293,14 +2319,47 @@ impl AppApi {
                 &self.base_img_url,
                 &upload.filename,
             )?;
-            (
-                url,
-                UploadPlan::Single {
-                    put_url: upload.url,
-                    path,
-                    content_type: filetype,
-                },
-            )
+            let ingest_url = ingest
+                .then(|| {
+                    crate::file_ingest::ingest_url(&upload.url, &upload_name, &filetype, raw_size)
+                })
+                .flatten();
+            match ingest_url {
+                Some(ingest_url) => (
+                    url,
+                    UploadPlan::Ingest {
+                        put_url: upload.url,
+                        ingest_url,
+                        path,
+                        content_type: filetype,
+                        size: raw_size,
+                    },
+                ),
+                None if ingest && raw_size >= MULTIPART_MIN_FILE_SIZE => {
+                    tracing::info!(
+                        push_host = ?upload_push_host(&upload.url),
+                        "presigned host is not on the file ingest; uploading in parts instead"
+                    );
+                    self.presign_multipart(
+                        &upload_name,
+                        upload_type,
+                        size,
+                        (width, height),
+                        channel_id,
+                        path,
+                        filetype,
+                    )
+                    .await?
+                }
+                None => (
+                    url,
+                    UploadPlan::Single {
+                        put_url: upload.url,
+                        path,
+                        content_type: filetype,
+                    },
+                ),
+            }
         };
         Ok(PresignedAttachment {
             attachment: mezon_proto::api::MessageAttachment {
@@ -2317,6 +2376,60 @@ impl AppApi {
         })
     }
 
+    #[allow(clippy::too_many_arguments)]
+    async fn presign_multipart(
+        &self,
+        upload_name: &str,
+        upload_type: &str,
+        size: i32,
+        (width, height): (i32, i32),
+        channel_id: i64,
+        path: PathBuf,
+        content_type: String,
+    ) -> Result<(String, UploadPlan)> {
+        let ranges = multipart_part_ranges(size as u64);
+        let started = self
+            .transport
+            .multipart_upload_attachment_file_start(mezon_proto::api::UploadAttachmentRequest {
+                filename: upload_name.to_string(),
+                filetype: upload_type.to_string(),
+                size,
+                width,
+                height,
+                part_count: ranges.len() as i32,
+                channel_id,
+                transcode_hls: crate::video_source::wants_hls_transcode(upload_name, size),
+            })
+            .await?;
+        if started.urls.len() != ranges.len() {
+            anyhow::bail!(
+                "multipart start returned {} urls, expected {}",
+                started.urls.len(),
+                ranges.len()
+            );
+        }
+        tracing::debug!(
+            type_cdn = started.type_cdn,
+            filename = %started.filename,
+            part_count = started.urls.len(),
+            push_host = ?started.urls.first().and_then(|u| upload_push_host(u)),
+            "MultipartUploadAttachmentFileStart presign response"
+        );
+        let url =
+            attachment_cdn_url_for_upload(started.type_cdn, &self.base_img_url, &started.filename)?;
+        Ok((
+            url,
+            UploadPlan::Multipart {
+                upload_id: started.upload_id,
+                part_urls: started.urls,
+                ranges,
+                path,
+                content_type,
+                filename: started.filename,
+            },
+        ))
+    }
+
     pub async fn upload_presigned_all(&self, presigned: Vec<PresignedAttachment>) -> Result<()> {
         use futures::StreamExt as _;
         futures::stream::iter(presigned.into_iter().map(|item| self.execute_upload(item)))
@@ -2329,7 +2442,39 @@ impl AppApi {
     }
 
     pub async fn execute_upload(&self, presigned: PresignedAttachment) -> Result<()> {
+        self.execute_upload_reporting(presigned, || {}).await
+    }
+
+    async fn execute_upload_reporting(
+        &self,
+        presigned: PresignedAttachment,
+        on_sent: impl Fn(),
+    ) -> Result<()> {
         match presigned.plan {
+            UploadPlan::Ingest {
+                put_url,
+                ingest_url,
+                path,
+                content_type,
+                size,
+            } => {
+                tracing::debug!(
+                    push_host = ?upload_push_host(&put_url),
+                    bytes = size,
+                    "attachment upload through the file ingest"
+                );
+                crate::file_ingest::upload(
+                    &crate::file_ingest::IngestUpload {
+                        ingest_url,
+                        presigned_url: put_url,
+                        path,
+                        size,
+                        content_type,
+                    },
+                    on_sent,
+                )
+                .await
+            }
             UploadPlan::Single {
                 put_url,
                 path,
@@ -2418,7 +2563,7 @@ impl AppApi {
         mentions: Vec<crate::transport::OutgoingMention>,
         hashtags: crate::transport::OutgoingHashtags,
         emojis: Vec<crate::transport::OutgoingEmoji>,
-        presign_finish: Option<Vec<String>>,
+        presign: Option<crate::transport::PresignMarkers>,
         flags: crate::transport::OutgoingMessageFlags,
     ) -> Result<ApiMessage> {
         let echo: Vec<crate::transport::ApiAttachment> = attachments
@@ -2447,7 +2592,7 @@ impl AppApi {
                 mentions,
                 hashtags,
                 emojis,
-                presign_finish,
+                presign,
                 flags,
             )
             .await?;
@@ -2468,7 +2613,7 @@ impl AppApi {
         mentions: Vec<crate::transport::OutgoingMention>,
         hashtags: crate::transport::OutgoingHashtags,
         emojis: Vec<crate::transport::OutgoingEmoji>,
-        presign_finish: Option<Vec<String>>,
+        presign: Option<crate::transport::PresignMarkers>,
         reply: Option<crate::transport::OutgoingReply>,
         flags: crate::transport::OutgoingMessageFlags,
     ) -> Result<ApiMessage> {
@@ -2498,7 +2643,7 @@ impl AppApi {
                 mentions,
                 hashtags,
                 emojis,
-                presign_finish,
+                presign,
                 reply,
                 flags,
             )
@@ -2517,7 +2662,7 @@ impl AppApi {
         mentions: Vec<crate::transport::OutgoingMention>,
         hashtags: crate::transport::OutgoingHashtags,
         emojis: Vec<crate::transport::OutgoingEmoji>,
-        presign_finish: Vec<String>,
+        presign: crate::transport::PresignMarkers,
         create_time_seconds: u32,
         mode: i32,
         is_public: bool,
@@ -2533,7 +2678,7 @@ impl AppApi {
                 mentions,
                 hashtags,
                 emojis,
-                presign_finish,
+                presign,
                 create_time_seconds,
                 mode,
                 is_public,
@@ -2574,13 +2719,32 @@ impl AppApi {
         on_complete: tokio::sync::mpsc::UnboundedSender<AttachmentUploadOutcome>,
     ) -> bool {
         use futures::StreamExt as _;
-        let mut stream = futures::stream::iter(
-            presigned
-                .into_iter()
-                .zip(keys)
-                .map(|(item, key)| async move { (key, self.execute_upload(item).await) }),
-        )
-        .buffer_unordered(ATTACHMENT_UPLOAD_CONCURRENCY);
+        let ingest = PresignedAttachment::ingest_keys(&presigned, &keys);
+        let slots = std::sync::Arc::new(tokio::sync::Semaphore::new(ATTACHMENT_UPLOAD_CONCURRENCY));
+        let mut stream: futures::stream::FuturesUnordered<_> = presigned
+            .into_iter()
+            .zip(keys)
+            .map(|(item, key)| {
+                let slots = slots.clone();
+                let on_complete = on_complete.clone();
+                async move {
+                    let slot = std::sync::Mutex::new(slots.acquire_owned().await.ok());
+                    let result = self
+                        .execute_upload_reporting(item, || {
+                            let released = slot
+                                .lock()
+                                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                                .take();
+                            if released.is_some() {
+                                let _ =
+                                    on_complete.send(AttachmentUploadOutcome::Storing(key.clone()));
+                            }
+                        })
+                        .await;
+                    (key, result)
+                }
+            })
+            .collect();
         let mut finished = already_finished;
         let mut synced = 0usize;
         if !finished.is_empty()
@@ -2594,6 +2758,7 @@ impl AppApi {
                     &hashtags,
                     &emojis,
                     finished.clone(),
+                    &ingest,
                     create_time_seconds,
                     mode,
                     is_public,
@@ -2626,6 +2791,7 @@ impl AppApi {
                         &hashtags,
                         &emojis,
                         finished.clone(),
+                        &ingest,
                         create_time_seconds,
                         mode,
                         is_public,
@@ -2648,6 +2814,7 @@ impl AppApi {
                     &hashtags,
                     &emojis,
                     finished.clone(),
+                    &ingest,
                     create_time_seconds,
                     mode,
                     is_public,
@@ -2676,6 +2843,7 @@ impl AppApi {
         hashtags: &crate::transport::OutgoingHashtags,
         emojis: &[crate::transport::OutgoingEmoji],
         finished: Vec<String>,
+        ingest: &[String],
         create_time_seconds: u32,
         mode: i32,
         is_public: bool,
@@ -2692,7 +2860,10 @@ impl AppApi {
                     mentions.to_vec(),
                     hashtags.clone(),
                     emojis.to_vec(),
-                    finished.clone(),
+                    crate::transport::PresignMarkers {
+                        finish: finished.clone(),
+                        ingest: ingest.to_vec(),
+                    },
                     create_time_seconds,
                     mode,
                     is_public,

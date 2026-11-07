@@ -26,6 +26,10 @@ impl RecordTaps {
         *self.slot.write() = tap;
     }
 
+    pub fn is_active(&self) -> bool {
+        self.slot.try_read().is_some_and(|guard| guard.is_some())
+    }
+
     pub fn push(&self, source: AudioSource, samples: &[i16], rate: u32, channels: u32) {
         let Some(guard) = self.slot.try_read() else {
             return;

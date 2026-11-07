@@ -41,6 +41,7 @@ env:
   NX_PROFILE_IMG_URL: https://profile.mezon.ai
   NX_IMGPROXY_BASE_URL: ${{ secrets.NX_IMGPROXY_BASE_URL || 'https://imgproxy.komu.vn' }}
   NX_IMGPROXY_KEY: ${{ secrets.NX_IMGPROXY_KEY }}
+  NX_CHAT_APP_FILE_INGEST: ${{ secrets.NX_CHAT_APP_FILE_INGEST || 'cdn-api.mezon.ai=https://streaming.mezon.vn' }}
   NX_CHAT_APP_API_KLIPY_KEY: ${{ secrets.NX_CHAT_APP_API_KLIPY_KEY }}
   NX_CHAT_APP_API_KLIPY_URL: ${{ secrets.NX_CHAT_APP_API_KLIPY_URL || 'https://api.klipy.com/api/v1' }}
   NX_CHAT_APP_MEZON_TREASURY_URL: https://withdraw-api.nccsoft.vn

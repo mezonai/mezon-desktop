@@ -376,6 +376,16 @@ pub fn avatar_element(msg: &Message, ctx: &RowCtx, cx: &App) -> AnyElement {
     let mut avatar = Avatar::new()
         .with_size(Size::Small)
         .image_cache(ctx.avatar_cache.clone());
+    if let Some(ProfileContext::Clan(clan_id)) = ctx.profile_context
+        && let Some(user_id) = msg.sender_user_id.filter(|id| !id.is_zero())
+        && ClanMembersStore::global(cx)
+            .read(cx)
+            .is_known_non_member(clan_id, user_id)
+        && !msg.is_sending()
+        && !mezon_store::is_anonymous_sender_id(&msg.sender_id, cx)
+    {
+        return avatar.anonymous(true).into_any_element();
+    }
     let (raw_url, proxied) = if mezon_store::is_anonymous_sender_id(&msg.sender_id, cx) {
         avatar = avatar.pending(msg.is_sending());
         if msg.avatar_url.is_empty() {
@@ -1044,6 +1054,22 @@ fn attachment_sending_overlay(
     box_width: f32,
     box_height: f32,
 ) -> impl IntoElement {
+    attachment_progress_overlay(
+        theme,
+        locale,
+        "message.attachment.uploading",
+        box_width,
+        box_height,
+    )
+}
+
+fn attachment_progress_overlay(
+    theme: &Theme,
+    locale: &str,
+    label_key: &'static str,
+    box_width: f32,
+    box_height: f32,
+) -> impl IntoElement {
     div()
         .absolute()
         .inset_0()
@@ -1065,7 +1091,7 @@ fn attachment_sending_overlay(
                     div()
                         .text_size(px(12.))
                         .text_color(theme.text_secondary)
-                        .child(mezon_i18n::t(locale, "message.attachment.uploading")),
+                        .child(mezon_i18n::t(locale, label_key)),
                 )
             },
         )
@@ -1485,6 +1511,7 @@ fn render_photo(
             .relative()
             .w(px(att.display_width))
             .h(px(att.display_height))
+            .max_w_full()
             .rounded_md()
             .overflow_hidden();
         el = el.when(
@@ -1549,6 +1576,7 @@ fn render_photo(
             .relative()
             .w(px(att.display_width))
             .h(px(att.display_height))
+            .max_w_full()
             .rounded_md()
             .overflow_hidden()
             .flex()
@@ -1707,6 +1735,7 @@ fn render_video_poster(
     };
     let width = att.display_width;
     let height = att.display_height;
+    let ingest = att.presign_ingest;
     let host = ctx.video_host.clone();
     let locale = SharedString::from(ctx.locale.to_string());
     let selection = ctx.selection.clone();
@@ -1739,11 +1768,17 @@ fn render_video_poster(
             ))
             .into_any_element();
     }
-    if sending || att.presign_pending {
+    if sending || (att.presign_pending && !att.stream_ready) {
+        let label_key = if att.upload_storing {
+            "message.attachment.finishing"
+        } else {
+            "message.attachment.uploading"
+        };
         return container
-            .child(attachment_sending_overlay(
+            .child(attachment_progress_overlay(
                 theme,
                 ctx.locale,
+                label_key,
                 att.display_width,
                 att.display_height,
             ))
@@ -1797,6 +1832,7 @@ fn render_video_poster(
                 fullscreen_mode: VideoFullscreenMode::default(),
                 layout: VideoLayout::default(),
                 decode_max_size: None,
+                ingest,
                 locale: locale.clone(),
             };
             let _ = host.update(cx, |host, cx| {

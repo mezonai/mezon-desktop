@@ -13,7 +13,9 @@ use mezon_store::{
 use ui::{Clickable, PopoverMenu, Toggleable};
 
 use crate::app::shell::{FriendRemovalKind, Shell};
-use crate::chat::friends_page::{open_created_dm_if_route_unchanged, toast_send_failed};
+use crate::chat::friends_page::{
+    dm_open_failure_message, open_created_dm_if_route_unchanged, toast_send_failed,
+};
 use crate::chat::message::{SendTokenModal, ShareContactModal, share_contact_subject};
 use crate::components::primitives::{Avatar, Icon, IconName, Input, InputEvent, InputState};
 use crate::image_cache::LruImageCache;
@@ -644,7 +646,7 @@ impl UserProfilePopover {
                     cx.notify();
                 });
                 cx.update(|cx| {
-                    toast_send_failed(error_message, cx);
+                    toast_send_failed(dm_open_failure_message(&err, error_message, cx), cx);
                 });
             }
         })
@@ -727,6 +729,12 @@ impl Render for UserProfilePopover {
         };
         let mut avatar = Avatar::new()
             .size_px(px(AVATAR_SIZE))
+            .anonymous(match self.context {
+                ProfileContext::Clan(clan_id) => ClanMembersStore::global(cx)
+                    .read(cx)
+                    .is_known_non_member(clan_id, self.user_id),
+                ProfileContext::Direct(_) => false,
+            })
             .image_cache(self.avatar_image_cache.clone());
         if !avatar_proxied.is_empty() {
             avatar = avatar

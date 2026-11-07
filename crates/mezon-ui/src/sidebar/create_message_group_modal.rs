@@ -235,6 +235,8 @@ impl CreateMessageGroupModal {
         self.creating = true;
         cx.notify();
 
+        let single_dm = members.len() == 1;
+        let locale = self.locale.clone();
         let task = if members.len() == 1 {
             let (id, label, avatar, username) = members.remove(0);
             store.update(cx, |store, cx| {
@@ -272,6 +274,15 @@ impl CreateMessageGroupModal {
             }
             Err(err) => {
                 tracing::warn!("create dm/group failed: {err}");
+                if single_dm {
+                    cx.update(|cx| {
+                        let fallback =
+                            mezon_i18n::t(&locale, "common.somethingWentWrong").to_string();
+                        let message =
+                            crate::chat::friends_page::dm_open_failure_message(&err, fallback, cx);
+                        Shell::global(cx).update(cx, |shell, cx| shell.error(message, cx));
+                    });
+                }
                 let _ = this.update(cx, |this, cx| {
                     this.creating = false;
                     cx.notify();

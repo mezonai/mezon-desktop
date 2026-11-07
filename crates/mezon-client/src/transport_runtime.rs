@@ -351,6 +351,104 @@ pub async fn read_file_range(path: std::path::PathBuf, offset: u64, len: usize) 
         .map_err(Into::into)
 }
 
+pub(crate) async fn put_range(
+    url: &str,
+    data: Vec<u8>,
+    (first, last): (u64, u64),
+    size: u64,
+) -> Result<(u16, Vec<u8>)> {
+    let request = http::Request::builder()
+        .method(http::Method::PUT)
+        .uri(url)
+        .header("Content-Range", format!("bytes {first}-{last}/{size}"))
+        .header(http::header::CONTENT_LENGTH, data.len())
+        .body(AsyncBody::from(data))?;
+    send_for_body(request).await
+}
+
+pub(crate) async fn get_body(url: &str) -> Result<(u16, Vec<u8>)> {
+    let request = http::Request::builder()
+        .method(http::Method::GET)
+        .uri(url)
+        .header(http::header::CACHE_CONTROL, "no-store")
+        .body(AsyncBody::empty())?;
+    send_for_body(request).await
+}
+
+async fn send_for_body(request: http::Request<AsyncBody>) -> Result<(u16, Vec<u8>)> {
+    runtime()
+        .spawn(async move {
+            let exchange = async move {
+                let mut response = http_client().send(request).await?;
+                let status = response.status().as_u16();
+                let mut body = Vec::new();
+                response
+                    .body_mut()
+                    .take(MAX_STATUS_BODY_BYTES)
+                    .read_to_end(&mut body)
+                    .await?;
+                anyhow::Ok((status, body))
+            };
+            match tokio::time::timeout(HTTP_TRANSFER_TIMEOUT, exchange).await {
+                Ok(result) => result,
+                Err(_) => anyhow::bail!(
+                    "HTTP request timed out after {}s",
+                    HTTP_TRANSFER_TIMEOUT.as_secs()
+                ),
+            }
+        })
+        .await
+        .map_err(|e| anyhow::anyhow!("HTTP task failed: {e}"))?
+}
+
+pub(crate) async fn put_file(
+    url: &str,
+    path: std::path::PathBuf,
+    size: u64,
+    content_type: &str,
+) -> Result<()> {
+    const PIECE: u64 = 1024 * 1024;
+    const SLOWEST_BYTES_PER_SEC: u64 = 128 * 1024;
+    let pieces = futures::stream::try_unfold(0u64, move |offset| {
+        let path = path.clone();
+        async move {
+            if offset >= size {
+                return Ok(None);
+            }
+            let len = PIECE.min(size - offset);
+            let data = read_file_range(path, offset, len as usize)
+                .await
+                .map_err(std::io::Error::other)?;
+            Ok::<_, std::io::Error>(Some((data, offset + len)))
+        }
+    });
+    let body = AsyncBody::from_reader(futures::TryStreamExt::into_async_read(Box::pin(pieces)));
+    let request = http::Request::builder()
+        .method(http::Method::PUT)
+        .uri(url)
+        .header("Content-Type", content_type)
+        .header(http::header::CONTENT_LENGTH, size)
+        .body(body)?;
+    let limit =
+        HTTP_TRANSFER_TIMEOUT.max(std::time::Duration::from_secs(size / SLOWEST_BYTES_PER_SEC));
+    runtime()
+        .spawn(async move {
+            let response = match tokio::time::timeout(limit, http_client().send(request)).await {
+                Ok(result) => result?,
+                Err(_) => anyhow::bail!("HTTP PUT timed out after {}s", limit.as_secs()),
+            };
+            let status = response.status();
+            if !status.is_success() {
+                anyhow::bail!("HTTP PUT failed with status {status}");
+            }
+            Ok(())
+        })
+        .await
+        .map_err(|e| anyhow::anyhow!("upload task failed: {e}"))?
+}
+
+const MAX_STATUS_BODY_BYTES: u64 = 64 * 1024;
+
 pub async fn put_bytes_return_etag(url: &str, data: Vec<u8>, content_type: &str) -> Result<String> {
     let url = url.to_string();
     let content_type = content_type.to_string();
@@ -3019,7 +3117,7 @@ impl TransportClient {
         mentions: Vec<crate::transport::OutgoingMention>,
         hashtags: crate::transport::OutgoingHashtags,
         emojis: Vec<crate::transport::OutgoingEmoji>,
-        presign_finish: Option<Vec<String>>,
+        presign: Option<crate::transport::PresignMarkers>,
         reply: Option<crate::transport::OutgoingReply>,
         flags: crate::transport::OutgoingMessageFlags,
     ) -> Result<crate::transport::ApiMessage> {
@@ -3040,7 +3138,7 @@ impl TransportClient {
                         mentions,
                         hashtags,
                         emojis,
-                        presign_finish,
+                        presign,
                         reply,
                         flags,
                     )
@@ -3093,7 +3191,7 @@ impl TransportClient {
         mentions: Vec<crate::transport::OutgoingMention>,
         hashtags: crate::transport::OutgoingHashtags,
         emojis: Vec<crate::transport::OutgoingEmoji>,
-        presign_finish: Option<Vec<String>>,
+        presign: Option<crate::transport::PresignMarkers>,
         flags: crate::transport::OutgoingMessageFlags,
     ) -> Result<crate::transport::ApiMessage> {
         let transport = self.inner.clone();
@@ -3113,7 +3211,7 @@ impl TransportClient {
                         mentions,
                         hashtags,
                         emojis,
-                        presign_finish,
+                        presign,
                         flags,
                     )
                     .await
@@ -3132,7 +3230,7 @@ impl TransportClient {
         mentions: Vec<crate::transport::OutgoingMention>,
         hashtags: crate::transport::OutgoingHashtags,
         emojis: Vec<crate::transport::OutgoingEmoji>,
-        presign_finish: Vec<String>,
+        presign: crate::transport::PresignMarkers,
         create_time_seconds: u32,
         mode: i32,
         is_public: bool,
@@ -3153,7 +3251,7 @@ impl TransportClient {
                         mentions,
                         hashtags,
                         emojis,
-                        presign_finish,
+                        presign,
                         create_time_seconds,
                         mode,
                         is_public,
@@ -3204,6 +3302,22 @@ impl TransportClient {
 
         runtime()
             .spawn(async move { transport.create_direct_channel(&user_ids).await })
+            .await
+            .map_err(|e| anyhow::anyhow!("transport task failed: {e}"))?
+    }
+
+    pub async fn get_dm_setting(&self) -> Result<bool> {
+        let transport = self.inner.clone();
+        runtime()
+            .spawn(async move { transport.get_dm_setting().await })
+            .await
+            .map_err(|e| anyhow::anyhow!("transport task failed: {e}"))?
+    }
+
+    pub async fn update_dm_setting(&self, only_friends_dm: bool) -> Result<bool> {
+        let transport = self.inner.clone();
+        runtime()
+            .spawn(async move { transport.update_dm_setting(only_friends_dm).await })
             .await
             .map_err(|e| anyhow::anyhow!("transport task failed: {e}"))?
     }
@@ -3605,6 +3719,17 @@ impl TransportClient {
                     .upload_attachment_file(&filename, &filetype, size, width, height, channel_id)
                     .await
             })
+            .await
+            .map_err(|e| anyhow::anyhow!("transport task failed: {e}"))?
+    }
+
+    pub async fn upload_attachment(
+        &self,
+        request: mezon_proto::api::UploadAttachmentRequest,
+    ) -> Result<mezon_proto::api::UploadAttachment> {
+        let transport = self.inner.clone();
+        runtime()
+            .spawn(async move { transport.upload_attachment(request).await })
             .await
             .map_err(|e| anyhow::anyhow!("transport task failed: {e}"))?
     }

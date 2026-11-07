@@ -23,6 +23,13 @@ impl ScreenShareMode {
         }
     }
 
+    pub(crate) fn paced_send_fps(self, encode_fps: f64) -> u32 {
+        match self {
+            Self::Text if cfg!(target_os = "windows") => self.capture_fps().min(encode_fps as u32),
+            Self::Text | Self::Video => 0,
+        }
+    }
+
     pub fn max_bitrate_bps(self) -> u64 {
         3_500_000
     }
