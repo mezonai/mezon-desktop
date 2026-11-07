@@ -15,12 +15,12 @@ use crate::chat::media_channel::media_image::render_media_image_rounded_top;
 use crate::clan::invite_people_modal::open_external_event_invite_modal;
 use crate::components::primitives::{Avatar, Button, ButtonVariants, Icon, IconName};
 use crate::components::primitives::{ContextMenu, context_menu_at};
-use crate::image_cache::LruImageCache;
+use crate::image_cache::{LruImageCache, SHARED_ENTRY_MAX_BYTES, SHARED_IMAGE_CACHE_BYTES};
 use crate::theme::ActiveTheme;
 
 const EVENT_IMAGE_CACHE_CAPACITY: usize = 8;
-const EVENT_IMAGE_CACHE_BYTES: u64 = 8 * 1024 * 1024;
-const EVENT_IMAGE_CACHE_ENTRY_BYTES: u64 = 2 * 1024 * 1024;
+const EVENT_IMAGE_CACHE_BYTES: u64 = SHARED_IMAGE_CACHE_BYTES;
+const EVENT_IMAGE_CACHE_ENTRY_BYTES: u64 = SHARED_ENTRY_MAX_BYTES;
 
 pub struct ClanEventsModal {
     clan_id: ClanId,
@@ -68,7 +68,7 @@ impl ClanEventsModal {
         ClanMembersStore::global(cx).update(cx, |store, cx| store.ensure_loaded(clan_id, cx));
         ChannelList::global(cx).update(cx, |store, cx| store.load_for_clan(clan_id, cx));
         let image_cache = cx.new(|cx| {
-            LruImageCache::gallery_preview(
+            LruImageCache::labeled(
                 "clan-events-modal",
                 EVENT_IMAGE_CACHE_CAPACITY,
                 EVENT_IMAGE_CACHE_BYTES,
@@ -321,6 +321,7 @@ impl ClanEventsModal {
             let logo = crate::util::imgproxy::proxied(cx, &event.logo, 400, 220, "fit");
             details = details.child(
                 img(logo)
+                    .id(("event-cover", event.id as usize))
                     .w(px(200.))
                     .h(px(110.))
                     .rounded(px(3.))
@@ -1072,14 +1073,17 @@ impl ClanEventsModal {
                         .h(px(176.))
                         .rounded_t(px(8.))
                         .overflow_hidden()
-                        .child(render_media_image_rounded_top(
-                            theme.bg_tertiary,
-                            theme.text_muted,
-                            banner.into(),
-                            px(600.),
-                            px(176.),
-                            px(8.),
-                        )),
+                        .child(
+                            render_media_image_rounded_top(
+                                theme.bg_tertiary,
+                                theme.text_muted,
+                                banner.into(),
+                                px(600.),
+                                px(176.),
+                                px(8.),
+                            )
+                            .id(("event-detail-cover", event.id as usize)),
+                        ),
                 )
             })
             .child(

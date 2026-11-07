@@ -702,6 +702,7 @@ impl OverviewSettingPage {
             .when(has_logo, |el| {
                 el.child(
                     img(logo_preview)
+                        .id("clan-logo-preview-image")
                         .size_full()
                         .rounded_full()
                         .object_fit(gpui::ObjectFit::Cover),
@@ -816,10 +817,12 @@ impl OverviewSettingPage {
             .overflow_hidden()
             .when(has_banner, |el| {
                 el.child(
-                    div()
-                        .absolute()
-                        .inset_0()
-                        .child(img(banner).size_full().object_fit(gpui::ObjectFit::Cover)),
+                    div().absolute().inset_0().child(
+                        img(banner)
+                            .id("clan-banner-preview-image")
+                            .size_full()
+                            .object_fit(gpui::ObjectFit::Cover),
+                    ),
                 )
             })
             .when(!has_banner, |el| {
