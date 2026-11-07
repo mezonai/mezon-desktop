@@ -1548,7 +1548,8 @@ async fn start_screen_track(
         .await
         .map_err(|_| anyhow::anyhow!("screen thread exited"))?
         .map_err(|e| anyhow::anyhow!(e))?;
-    let repeat = (!polls).then(|| sfu::ScreenRepeat::new(source.clone(), fixed_capture_fps));
+    let repeat = (!polls && !screen_mode::PACES_TEXT_FRAMES)
+        .then(|| sfu::ScreenRepeat::new(source.clone(), fixed_capture_fps));
     let screen_track = factory.create_video_track("screen", source);
     apply_screen_content_hint(&screen_track, mode);
     let track = sfu::ScreenTrack {
