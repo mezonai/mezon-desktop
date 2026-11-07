@@ -533,9 +533,7 @@ impl Render for ClanWebhookTab {
                                                 }
                                             });
                                             pick_btn.child(
-                                                Icon::new(IconName::SelectFileIcon)
-                                                    .size(px(12.0))
-                                                    .text_color(theme.text_secondary),
+                                                Icon::new(IconName::IMAGE_ADD_16).selected(false),
                                             )
                                         })
                                     })
@@ -568,11 +566,7 @@ impl Render for ClanWebhookTab {
                                         h_flex()
                                             .gap_1()
                                             .items_center()
-                                            .child(
-                                                Icon::new(IconName::ClockIcon)
-                                                    .size(px(14.0))
-                                                    .text_color(theme.text_muted),
-                                            )
+                                            .child(Icon::new(IconName::CLOCK_16).selected(false))
                                             .child(
                                                 div()
                                                     .text_xs()
@@ -583,13 +577,9 @@ impl Render for ClanWebhookTab {
                             )
                             .when(can_manage, |row| {
                                 row.child(if expanded {
-                                    Icon::new(IconName::ChevronDown)
-                                        .size(px(20.0))
-                                        .text_color(theme.text_secondary)
+                                    Icon::new(IconName::CHEVRON_DOWN_20).selected(false)
                                 } else {
-                                    Icon::new(IconName::ChevronRight)
-                                        .size(px(20.0))
-                                        .text_color(theme.text_secondary)
+                                    Icon::new(IconName::CHEVRON_RIGHT_20).selected(false)
                                 })
                             })
                     })

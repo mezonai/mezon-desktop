@@ -620,9 +620,7 @@ fn render_pagination_nav_button(
     } else {
         theme.tokens.text_theme_primary
     };
-    let mut icon = Icon::new(IconName::ArrowRight)
-        .size(px(20.))
-        .text_color(icon_color);
+    let mut icon = Icon::new(IconName::CHEVRON_RIGHT_20).text_color(icon_color);
     if previous {
         icon = icon.with_transformation(Transformation::rotate(radians(std::f32::consts::PI)));
     }
@@ -1657,8 +1655,7 @@ pub fn render_header_search_bar(
                         .h(px(24.))
                         .when(!has_query, |el| {
                             el.child(
-                                Icon::new(IconName::Search)
-                                    .size(px(16.))
+                                Icon::new(IconName::SEARCH_16)
                                     .mt(px(1.))
                                     .text_color(theme.tokens.text_theme_primary),
                             )
@@ -1680,8 +1677,7 @@ pub fn render_header_search_bar(
                                     }
                                 })
                                 .child(
-                                    Icon::new(IconName::Close)
-                                        .size(px(16.))
+                                    Icon::new(IconName::CLOSE_16)
                                         .text_color(theme.tokens.text_theme_primary),
                                 )
                         }),

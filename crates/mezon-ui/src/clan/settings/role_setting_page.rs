@@ -717,11 +717,7 @@ impl RoleSettingPage {
                                         ),
                                     )),
                             )
-                            .child(
-                                Icon::new(IconName::ChevronRight)
-                                    .size(px(18.0))
-                                    .text_color(theme.text_secondary),
-                            ),
+                            .child(Icon::new(IconName::CHEVRON_RIGHT_20).selected(false)),
                     )
                     .on_click(cx.listener(|this, _, _, cx| {
                         this.open_everyone_role(cx);
@@ -976,11 +972,7 @@ impl RoleSettingPage {
                                 .bg(theme.danger_text)
                                 .opacity(0.)
                                 .group_hover(row_group.clone(), |s| s.opacity(1.))
-                                .child(
-                                    Icon::new(IconName::PenEdit)
-                                        .size(px(20.))
-                                        .text_color(theme.text_primary),
-                                )
+                                .child(Icon::new(IconName::EDIT_20).text_color(theme.text_primary))
                                 .on_click(move |_, _, cx| {
                                     page.update(cx, |this, cx| {
                                         this.enter_edit_mode(role_id, cx);
@@ -1010,8 +1002,7 @@ impl RoleSettingPage {
                                         .cursor_pointer()
                                         .bg(theme.danger_text)
                                         .child(
-                                            Icon::new(IconName::DeleteMessageRightClick)
-                                                .size(px(20.))
+                                            Icon::new(IconName::TRASH_20)
                                                 .text_color(theme.text_primary),
                                         )
                                         .on_click({

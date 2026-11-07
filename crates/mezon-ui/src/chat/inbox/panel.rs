@@ -592,11 +592,7 @@ fn render_header(theme: &Theme, locale: &SharedString) -> impl IntoElement {
         .items_center()
         .gap_2()
         .pb_2()
-        .child(
-            Icon::new(IconName::Inbox)
-                .size(px(20.))
-                .text_color(theme.text_muted),
-        )
+        .child(Icon::new(IconName::INBOX_20).selected(false))
         .child(
             div()
                 .text_base()
@@ -1055,11 +1051,7 @@ fn render_notification_item(
                         .cursor_pointer()
                         .bg(theme.bg_hover)
                         .hover(|s| s.bg(theme.bg_primary))
-                        .child(
-                            Icon::new(IconName::Close)
-                                .size(px(12.))
-                                .text_color(theme.text_muted),
-                        )
+                        .child(Icon::new(IconName::CLOSE_16).selected(false))
                         .on_mouse_down(MouseButton::Left, {
                             let id = id.clone();
                             move |_, _, cx| {
@@ -1089,11 +1081,7 @@ fn render_notification_item(
                             .opacity(0.)
                             .group_hover("inbox-item", |s| s.opacity(1.))
                             .hover(|s| s.bg(theme.bg_primary))
-                            .child(
-                                Icon::new(IconName::CopyIcon)
-                                    .size(px(12.))
-                                    .text_color(theme.text_muted),
-                            )
+                            .child(Icon::new(IconName::COPY_16).selected(false))
                             .on_mouse_down(MouseButton::Left, {
                                 let copy_text = copy_text.clone();
                                 move |_, _, cx| {

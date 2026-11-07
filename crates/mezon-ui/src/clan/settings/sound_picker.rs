@@ -1025,8 +1025,7 @@ impl Render for SoundPicker {
                             .cursor_pointer()
                             .hover(|s| s.bg(theme.bg_hover))
                             .child(
-                                Icon::new(IconName::Close)
-                                    .size(px(16.))
+                                Icon::new(IconName::CLOSE_16)
                                     .text_color(theme.tokens.text_theme_primary),
                             )
                             .on_click(cx.listener(|this, _, _, cx| this.close(cx))),
@@ -1151,8 +1150,7 @@ impl Render for SoundPicker {
                                 .items_center()
                                 .justify_center()
                                 .child(
-                                    Icon::new(IconName::UploadSoundIcon)
-                                        .size(px(48.0))
+                                    Icon::new(IconName::FILE_AUDIO_48)
                                         .text_color(theme.tokens.text_theme_primary),
                                 ),
                         )

@@ -33,11 +33,7 @@ fn gallery_thumb_placeholder(bg: gpui::Rgba, muted: gpui::Rgba) -> gpui::AnyElem
         .items_center()
         .justify_center()
         .bg(bg)
-        .child(
-            Icon::new(IconName::ImageThumbnail)
-                .size(px(20.))
-                .text_color(muted),
-        )
+        .child(Icon::new(IconName::FILE_IMAGE_20).text_color(muted))
         .into_any()
 }
 
@@ -540,9 +536,7 @@ impl GalleryModal {
                                         .rounded_full()
                                         .bg(gpui::hsla(0., 0., 0., 0.6))
                                         .child(
-                                            Icon::new(IconName::PlayButton)
-                                                .size(px(20.))
-                                                .text_color(gpui::white()),
+                                            Icon::new(IconName::PLAY_20).text_color(gpui::white()),
                                         ),
                                 ),
                         )
@@ -779,11 +773,7 @@ fn render_modal_header(
                 .flex_row()
                 .items_center()
                 .gap_4()
-                .child(
-                    Icon::new(IconName::ImageThumbnail)
-                        .size(px(20.))
-                        .text_color(theme.text_primary),
-                )
+                .child(Icon::new(IconName::FILE_IMAGE_20).text_color(theme.text_primary))
                 .child(
                     div()
                         .text_size(px(16.))
@@ -802,11 +792,7 @@ fn render_modal_header(
                 .rounded(px(6.))
                 .cursor_pointer()
                 .hover(|el| el.bg(theme.bg_hover))
-                .child(
-                    Icon::new(IconName::Close)
-                        .size(px(16.))
-                        .text_color(theme.text_secondary),
-                )
+                .child(Icon::new(IconName::CLOSE_16).selected(false))
                 .on_mouse_down(MouseButton::Left, move |_: &MouseDownEvent, window, cx| {
                     entity.update(cx, |this, cx| this.dismiss(window, cx));
                 }),
@@ -822,9 +808,7 @@ fn render_filter_tabs(
     entity: &Entity<GalleryModal>,
 ) -> impl IntoElement {
     let entity_toggle = entity.clone();
-    let mut chevron = Icon::new(IconName::ChevronDown)
-        .size(px(12.))
-        .text_color(theme.text_primary);
+    let mut chevron = Icon::new(IconName::CHEVRON_DOWN_16).text_color(theme.text_primary);
     if date_filter_open {
         chevron = chevron.with_transformation(gpui::Transformation::rotate(gpui::radians(
             std::f32::consts::PI,

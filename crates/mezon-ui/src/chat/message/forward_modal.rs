@@ -1055,8 +1055,7 @@ impl Render for ForwardMessageModal {
                     theme.tokens.theme_border_input
                 })
                 .child(
-                    Icon::new(IconName::Search)
-                        .size_4()
+                    Icon::new(IconName::SEARCH_16)
                         .flex_shrink_0()
                         .text_color(theme.tokens.text_theme_primary),
                 )
@@ -1304,11 +1303,7 @@ fn render_shared_content(
                     .flex()
                     .items_center()
                     .justify_center()
-                    .child(
-                        Icon::new(IconName::PlayButton)
-                            .size_4()
-                            .text_color(theme.tokens.text_secondary),
-                    ),
+                    .child(Icon::new(IconName::PLAY_16).selected(false)),
             );
         }
         if shared.extra > 0 {

@@ -1,3 +1,5 @@
+use crate::components::primitives::{Icon, IconName};
+
 use gpui::{
     App, FontWeight, MouseDownEvent, SharedString, WeakEntity, Window, deferred, div, prelude::*,
     px,
@@ -5,7 +7,6 @@ use gpui::{
 use mezon_store::PlatformStore;
 use ui::Tooltip;
 
-use crate::components::primitives::{Icon, IconName};
 use crate::sidebar::channel_sidebar::ChannelSidebar;
 use crate::sidebar::channel_sidebar::items::AppChannelSlot;
 use crate::theme::ActiveTheme;
@@ -52,9 +53,7 @@ pub fn app_list_popover_overlay(
                 .aspect_square()
                 .into_any_element()
         } else {
-            Icon::new(IconName::ChannelAppFallback)
-                .w(px(28.))
-                .h(px(28.))
+            Icon::new(IconName::CHANNEL_APP_32)
                 .text_color(theme.text_primary)
                 .into_any_element()
         };
@@ -173,8 +172,7 @@ pub fn app_list_popover_overlay(
                                     .bg(theme.bg_primary)
                                     .group_hover("app-list-find", |s| s.bg(theme.bg_tertiary))
                                     .child(
-                                        Icon::new(IconName::Search)
-                                            .size(px(20.))
+                                        Icon::new(IconName::SEARCH_20)
                                             .text_color(theme.text_primary),
                                     ),
                             )
@@ -196,11 +194,7 @@ pub fn app_list_popover_overlay(
                                             .child(find_subtitle),
                                     ),
                             )
-                            .child(
-                                Icon::new(IconName::ArrowRight)
-                                    .size(px(20.))
-                                    .text_color(theme.text_secondary),
-                            ),
+                            .child(Icon::new(IconName::CHEVRON_RIGHT_20).selected(false)),
                     ),
             ),
     )

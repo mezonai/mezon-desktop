@@ -4912,5 +4912,7 @@
   "chat.activityStrip.messageFrom": "{{name}}からのメッセージ: {{message}}",
   "chat.activityStrip.hideAction": "ピンとトピックのバーを非表示",
   "chat.activityStrip.hideConfirm.title": "ピンとトピックのバーを非表示",
-  "chat.activityStrip.hideConfirm.description": "このチャンネルのピンとトピックのバーを非表示にしますか？新しいピンまたはトピックがあると自動的に再表示されます。"
+  "chat.activityStrip.hideConfirm.description": "このチャンネルのピンとトピックのバーを非表示にしますか？新しいピンまたはトピックがあると自動的に再表示されます。",
+  "setting.appearance.iconAnimations": "アイコンのアニメーション",
+  "setting.appearance.iconAnimationsDescription": "ボタンや行にポインターを合わせたときにアイコンをアニメーション表示します。"
 }

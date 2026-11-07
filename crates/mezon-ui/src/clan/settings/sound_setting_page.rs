@@ -352,8 +352,7 @@ impl SoundSettingPage {
             .border_color(theme.border)
             .bg(theme.tokens.theme_setting_nav)
             .child(
-                Icon::new(IconName::Speaker)
-                    .size(px(40.0))
+                Icon::new(IconName::SPEAKER_40)
                     .text_color(theme.tokens.text_theme_primary)
                     .mb(px(8.0)),
             )
@@ -413,9 +412,7 @@ impl SoundSettingPage {
                     .items_center()
                     .gap(px(8.0))
                     .child(
-                        Icon::new(IconName::Speaker)
-                            .size(px(20.0))
-                            .text_color(theme.tokens.text_theme_primary),
+                        Icon::new(IconName::SPEAKER_20).text_color(theme.tokens.text_theme_primary),
                     )
                     .child(
                         div()
@@ -517,11 +514,7 @@ fn render_playbar(
                 .justify_center()
                 .cursor_pointer()
                 .hover(|s| s.opacity(0.8))
-                .child(
-                    Icon::new(IconName::Download)
-                        .size(px(16.0))
-                        .text_color(theme.tokens.text_theme_primary),
-                )
+                .child(Icon::new(IconName::DOWNLOAD_16).text_color(theme.tokens.text_theme_primary))
                 .on_click(move |_, _, cx| {
                     save_with_progress_toast(url.clone(), download_name.clone(), cx);
                 })
@@ -591,11 +584,7 @@ fn render_sound_card(
                             .items_center()
                             .justify_center()
                             .cursor_pointer()
-                            .child(
-                                Icon::new(IconName::Close)
-                                    .size(px(12.0))
-                                    .text_color(theme.danger_text),
-                            )
+                            .child(Icon::new(IconName::CLOSE_16).text_color(theme.danger_text))
                             .on_click(move |_, window, cx| {
                                 delete_entity.update(cx, |this, cx| {
                                     this.confirm_delete_sound(
@@ -770,8 +759,7 @@ impl Render for SoundSettingPage {
                                         .items_center()
                                         .gap(px(8.0))
                                         .child(
-                                            Icon::new(IconName::Speaker)
-                                                .size(px(20.0))
+                                            Icon::new(IconName::SPEAKER_20)
                                                 .text_color(theme.tokens.text_theme_primary),
                                         )
                                         .child(

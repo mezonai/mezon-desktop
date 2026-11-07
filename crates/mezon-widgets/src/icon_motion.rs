@@ -15,7 +15,8 @@ impl Global for IconMotionPreferences {}
 
 impl IconMotionPreferences {
     pub(crate) fn enabled(cx: &App) -> bool {
-        !cx.try_global::<Self>().is_some_and(|p| p.reduced_motion)
+        mezon_store::Settings::try_global(cx).is_none_or(|s| s.read(cx).icon_motion)
+            && !cx.try_global::<Self>().is_some_and(|p| p.reduced_motion)
     }
 }
 
@@ -127,6 +128,7 @@ enum MotionKind {
     Zoom,
 }
 
+#[derive(Clone, Copy)]
 pub(crate) struct MotionSpec {
     anim: MotionKind,
     duration_ms: u64,
@@ -134,6 +136,25 @@ pub(crate) struct MotionSpec {
 }
 
 impl MotionSpec {
+    pub(crate) fn for_mz(icon: crate::MzIcon) -> Option<Self> {
+        use crate::MzAnim;
+        let (anim, duration_ms, turn_deg) = match icon.anim {
+            MzAnim::None => return None,
+            MzAnim::Hop => (MotionKind::Hop, 350, None),
+            MzAnim::Ring => (MotionKind::Ring, 450, None),
+            MzAnim::Swing => (MotionKind::Swing, 500, None),
+            MzAnim::Spin { turn_deg } => (MotionKind::Spin, 400, Some(f32::from(turn_deg))),
+            MzAnim::Zoom => (MotionKind::Zoom, 300, None),
+            MzAnim::Typing => (MotionKind::Typing, 900, None),
+            MzAnim::Live => (MotionKind::Live, 1600, None),
+        };
+        Some(Self {
+            anim,
+            duration_ms,
+            turn_deg,
+        })
+    }
+
     pub(crate) fn translates_only(&self) -> bool {
         matches!(
             self.anim,
@@ -315,10 +336,128 @@ fn cubic_bezier(progress: f32, x1: f32, y1: f32, x2: f32, y2: f32) -> f32 {
     sample((low + high) * 0.5, y1, y2)
 }
 
+#[derive(Default)]
+pub(crate) struct ColorPlayback {
+    from: Option<gpui::Rgba>,
+    target: Option<gpui::Rgba>,
+    started: Option<Instant>,
+}
+
+impl ColorPlayback {
+    pub(crate) fn frame(&mut self, target: gpui::Hsla, now: Instant) -> (gpui::Hsla, bool) {
+        let target = gpui::Rgba::from(target);
+        if self.target != Some(target) {
+            self.from = Some(self.sample(now));
+            if self.target.is_none() {
+                self.from = Some(target);
+            }
+            self.target = Some(target);
+            self.started = Some(now);
+        }
+        let running = self
+            .started
+            .is_some_and(|start| now.duration_since(start).as_millis() < 200)
+            && self.from != self.target;
+        (self.sample(now).into(), running)
+    }
+
+    fn sample(&self, now: Instant) -> gpui::Rgba {
+        let to = self.target.unwrap_or_else(|| gpui::rgb(0));
+        let from = self.from.unwrap_or(to);
+        let t = self.started.map_or(1., |start| {
+            cubic_bezier(
+                (now.duration_since(start).as_secs_f32() / 0.2).min(1.),
+                0.2,
+                0.,
+                0.,
+                1.,
+            )
+        });
+        gpui::Rgba {
+            r: from.r + (to.r - from.r) * t,
+            g: from.g + (to.g - from.g) * t,
+            b: from.b + (to.b - from.b) * t,
+            a: from.a + (to.a - from.a) * t,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct MzTransform {
+    pub translate_y_pct: f32,
+    pub rotate_deg: f32,
+    pub scale: f32,
+    pub opacity: f32,
+}
+
+pub fn sample_keyframe(anim: crate::MzAnim, t: f32) -> MzTransform {
+    use crate::MzAnim;
+    let t = t.clamp(0., 1.);
+    let mut transform = MzTransform {
+        translate_y_pct: 0.,
+        rotate_deg: 0.,
+        scale: 1.,
+        opacity: 1.,
+    };
+    match anim {
+        MzAnim::Hop | MzAnim::Typing | MzAnim::Live => {
+            transform.translate_y_pct = -8.33 * keyframe(HOP_KEYFRAMES, t);
+        }
+        MzAnim::Ring => transform.rotate_deg = keyframe(RING_KEYFRAMES, t),
+        MzAnim::Swing => transform.rotate_deg = keyframe(SWING_KEYFRAMES, t),
+        MzAnim::Spin { turn_deg } => {
+            transform.rotate_deg = f32::from(turn_deg) * cubic_bezier(t, 0.2, 0., 0., 1.)
+        }
+        MzAnim::Zoom => transform.scale = keyframe(ZOOM_KEYFRAMES, t),
+        MzAnim::None => {}
+    }
+    transform
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::time::Duration;
+
+    #[test]
+    fn color_transition_finishes_and_can_reverse_mid_flight() {
+        let now = Instant::now();
+        let black = gpui::rgb(0).into();
+        let white = gpui::rgb(0xffffff).into();
+        let mut playback = ColorPlayback::default();
+        assert!(!playback.frame(black, now).1);
+        assert!(playback.frame(white, now).1);
+        let middle = playback.frame(white, now + Duration::from_millis(80));
+        assert!(middle.1);
+        assert!(gpui::Rgba::from(middle.0).r > 0.);
+        let reversed = playback.frame(black, now + Duration::from_millis(80));
+        assert!((gpui::Rgba::from(middle.0).r - gpui::Rgba::from(reversed.0).r).abs() < 0.001);
+        let finished = playback.frame(black, now + Duration::from_millis(300));
+        assert!(!finished.1);
+        assert!(gpui::Rgba::from(finished.0).r < 0.001);
+    }
+
+    #[test]
+    fn keyframes_end_at_identity_and_spin_uses_package_turn() {
+        use crate::MzAnim;
+        for anim in [
+            MzAnim::None,
+            MzAnim::Hop,
+            MzAnim::Ring,
+            MzAnim::Swing,
+            MzAnim::Zoom,
+            MzAnim::Typing,
+            MzAnim::Live,
+        ] {
+            let frame = sample_keyframe(anim, 1.);
+            assert!(frame.translate_y_pct.abs() < 0.001);
+            assert!(frame.rotate_deg.abs() < 0.001);
+            assert!((frame.scale - 1.).abs() < 0.001);
+            assert_eq!(frame.opacity, 1.);
+        }
+        assert!((sample_keyframe(MzAnim::Hop, 0.35).translate_y_pct + 8.33).abs() < 0.001);
+        assert!((sample_keyframe(crate::mz::SETTINGS_20.anim, 1.).rotate_deg - 45.).abs() < 0.001);
+    }
 
     #[test]
     fn hover_hops_once_and_restarts_only_after_leaving() {

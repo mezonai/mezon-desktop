@@ -911,11 +911,7 @@ fn render_header(theme: &Theme, locale: &str) -> impl IntoElement {
         .border_b_1()
         .border_color(tokens.border_primary)
         .bg(tokens.theme_setting_nav)
-        .child(
-            Icon::new(IconName::PinRight)
-                .size_4()
-                .text_color(tokens.bg_icon_theme),
-        )
+        .child(Icon::new(IconName::PIN_16).text_color(tokens.bg_icon_theme))
         .child(
             div()
                 .text_base()
@@ -2289,8 +2285,7 @@ fn render_pin_file_attachment(
                             );
                         })
                         .child(
-                            Icon::new(IconName::Download)
-                                .size(px(16.))
+                            Icon::new(IconName::DOWNLOAD_16)
                                 .text_color(theme.tokens.text_theme_primary),
                         ),
                 ),

@@ -236,8 +236,7 @@ impl Render for DevicePage {
                                             .bg(theme.text_muted)
                                             .hover(move |style| style.bg(theme.danger))
                                             .child(
-                                                Icon::new(IconName::Close)
-                                                    .size_4()
+                                                Icon::new(IconName::CLOSE_16)
                                                     .text_color(theme.bg_primary),
                                             )
                                             .on_click(cx.listener(

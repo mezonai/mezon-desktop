@@ -4910,5 +4910,7 @@
   "chat.activityStrip.messageFrom": "Nachricht von {{name}}: {{message}}",
   "chat.activityStrip.hideAction": "Anheftungs- und Themenleiste ausblenden",
   "chat.activityStrip.hideConfirm.title": "Anheftungs- und Themenleiste ausblenden",
-  "chat.activityStrip.hideConfirm.description": "Die Leiste mit Anheftungen und Themen für diesen Kanal ausblenden? Sie wird bei einer neuen Anheftung oder einem neuen Thema automatisch wieder angezeigt."
+  "chat.activityStrip.hideConfirm.description": "Die Leiste mit Anheftungen und Themen für diesen Kanal ausblenden? Sie wird bei einer neuen Anheftung oder einem neuen Thema automatisch wieder angezeigt.",
+  "setting.appearance.iconAnimations": "Symbolanimationen",
+  "setting.appearance.iconAnimationsDescription": "Symbole animieren, wenn der Mauszeiger über Schaltflächen und Zeilen bewegt wird."
 }

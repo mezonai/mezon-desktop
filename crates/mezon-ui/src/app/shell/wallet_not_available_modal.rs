@@ -100,12 +100,7 @@ impl Render for WalletNotAvailableModal {
                             .size(px(64.))
                             .rounded_full()
                             .bg(rgba(ICON_CIRCLE_BG))
-                            .child(
-                                Icon::new(IconName::IconClockChannel)
-                                    .text_color(theme.tokens.text_secondary)
-                                    .size(px(40.))
-                                    .flex_none(),
-                            ),
+                            .child(Icon::new(IconName::LOCK_40).selected(false).flex_none()),
                     )
                     .child(
                         v_flex()

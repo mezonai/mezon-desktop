@@ -1,3 +1,5 @@
+use crate::components::primitives::{Icon, IconName};
+
 use gpui::{AnyElement, Entity, ObjectFit, SharedString, div, hsla, img, prelude::*, px, rgb};
 use mezon_store::{ChannelId, Message, MessageId, MessagesStore, OgpPreview};
 
@@ -5,7 +7,6 @@ use crate::image_cache::LruImageCache;
 
 use super::content::SelectableSectionCursor;
 use super::context::RowCtx;
-use crate::components::primitives::{Icon, IconName};
 use crate::theme::Theme;
 
 const OGP_TITLE_COLOR: u32 = 0x3b82f6;
@@ -180,11 +181,7 @@ fn ogp_remove_button(bucket: ChannelId, message_id: MessageId, theme: &Theme) ->
         .occlude()
         .bg(theme.tokens.theme_setting_primary)
         .hover(|s| s.bg(theme.bg_hover))
-        .child(
-            Icon::new(IconName::Close)
-                .size(px(12.))
-                .text_color(theme.text_muted),
-        )
+        .child(Icon::new(IconName::CLOSE_16).selected(false))
         .on_click(move |_, _, cx| {
             MessagesStore::global(cx).update(cx, |store, cx| {
                 store.remove_message_ogp(bucket, message_id, cx);
@@ -222,11 +219,7 @@ fn ogp_image_fallback(fallback_fg: gpui::Rgba) -> AnyElement {
         .items_center()
         .justify_center()
         .opacity(0.3)
-        .child(
-            Icon::new(IconName::ImageThumbnail)
-                .size(px(32.))
-                .text_color(fallback_fg),
-        )
+        .child(Icon::new(IconName::FILE_IMAGE_32).text_color(fallback_fg))
         .into_any_element()
 }
 

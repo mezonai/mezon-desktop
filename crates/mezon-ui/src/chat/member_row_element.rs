@@ -16,7 +16,7 @@ const AVATAR_SIZE: Pixels = px(32.);
 const GAP: Pixels = px(9.);
 const NAME_FONT_SIZE: Pixels = px(16.);
 const STATUS_FONT_SIZE: Pixels = px(12.);
-const OWNER_ICON_SIZE: Pixels = px(14.);
+const OWNER_ICON_SIZE: Pixels = px(16.);
 const OWNER_GAP: Pixels = px(4.);
 const DOT_SIZE: Pixels = px(12.);
 const DOT_BORDER: Pixels = px(2.);
@@ -402,7 +402,7 @@ impl MemberRowElement {
             };
             let _ = window.paint_svg(
                 owner_bounds,
-                IconName::OwnerIcon.path().into(),
+                IconName::OwnerIcon.path_for_size(16).into(),
                 None,
                 TransformationMatrix::default(),
                 color,

@@ -716,11 +716,7 @@ pub(crate) fn audio_pill(
                         .justify_center()
                         .cursor_pointer()
                         .on_click(on_download)
-                        .child(
-                            Icon::new(IconName::Download)
-                                .size(px(20.))
-                                .text_color(gpui::white()),
-                        ),
+                        .child(Icon::new(IconName::DOWNLOAD_20).text_color(gpui::white())),
                 ),
         )
         .into_any_element()
@@ -801,11 +797,7 @@ pub(crate) fn audio_failed_pill(duration: f64) -> gpui::AnyElement {
                         .size(px(24.))
                         .rounded_full()
                         .bg(gpui::white())
-                        .child(
-                            Icon::new(IconName::TriangleAlert)
-                                .size(px(16.))
-                                .text_color(PILL_BG),
-                        ),
+                        .child(Icon::new(IconName::WARNING_16).text_color(PILL_BG)),
                 )
                 .child(
                     div()

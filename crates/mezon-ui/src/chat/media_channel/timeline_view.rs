@@ -68,9 +68,8 @@ pub fn render_timeline_header(
                     )))
                     .on_click(move |_, window, cx| handler(window, cx))
                     .child(
-                        Icon::new(IconName::BulletListIcon)
-                            .text_color(theme.tokens.text_secondary)
-                            .size(px(20.))
+                        Icon::new(IconName::LIST_BULLET_20)
+                            .selected(false)
                             .flex_none(),
                     ),
             )

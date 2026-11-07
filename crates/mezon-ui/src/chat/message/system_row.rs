@@ -686,9 +686,7 @@ pub fn render_onboard_welcome(ctx: &RowCtx) -> AnyElement {
             card_bg,
             hover_bg,
             title_color,
-            Icon::new(IconName::AddPerson)
-                .size_5()
-                .text_color(title_color),
+            Icon::new(IconName::USER_PLUS_20).text_color(title_color),
             mezon_i18n::t(locale, "chatWelcome.onboard.inviteFriends"),
             onboarding.members_invited,
             move |_, window, cx| {
@@ -716,7 +714,7 @@ pub fn render_onboard_welcome(ctx: &RowCtx) -> AnyElement {
             card_bg,
             hover_bg,
             title_color,
-            Icon::new(IconName::Sent).size_5().text_color(title_color),
+            Icon::new(IconName::CHECK_20).text_color(title_color),
             mezon_i18n::t(locale, "chatWelcome.onboard.sendFirstMessage"),
             onboarding.sent_message,
             |_, _, _| {},
@@ -725,9 +723,7 @@ pub fn render_onboard_welcome(ctx: &RowCtx) -> AnyElement {
             card_bg,
             hover_bg,
             title_color,
-            Icon::new(IconName::Download)
-                .size_5()
-                .text_color(title_color),
+            Icon::new(IconName::DOWNLOAD_20).text_color(title_color),
             mezon_i18n::t(locale, "chatWelcome.onboard.downloadApp"),
             onboarding.downloaded_app,
             |_, _, _| {},
@@ -736,9 +732,7 @@ pub fn render_onboard_welcome(ctx: &RowCtx) -> AnyElement {
             card_bg,
             hover_bg,
             title_color,
-            Icon::new(IconName::Hashtag)
-                .size_5()
-                .text_color(title_color),
+            Icon::new(IconName::CHANNEL_20).text_color(title_color),
             mezon_i18n::t(locale, "chatWelcome.onboard.createChannel"),
             onboarding.created_channel,
             move |_, window, cx| {
@@ -811,15 +805,10 @@ fn onboard_item(
                 .flex()
                 .items_center()
                 .justify_center()
-                .child(
-                    Icon::new(IconName::Tick)
-                        .size(px(14.))
-                        .text_color(gpui::rgb(0xff_ff_ff)),
-                )
+                .child(Icon::new(IconName::CHECK_16).text_color(gpui::rgb(0xff_ff_ff)))
                 .into_any_element()
         } else {
-            Icon::new(IconName::ArrowRight)
-                .size_5()
+            Icon::new(IconName::CHEVRON_RIGHT_20)
                 .text_color(title_color)
                 .into_any_element()
         })
@@ -905,17 +894,13 @@ pub fn render_welcome(_msg: &Message, ctx: &RowCtx) -> AnyElement {
             col = col
                 .child(welcome_icon_circle(
                     if is_stream {
-                        Icon::new(IconName::Stream).size_10().text_color(icon_fill)
+                        Icon::new(IconName::LIVE_40).text_color(icon_fill)
                     } else if mezon_store::is_age_restricted(age_restricted) {
-                        Icon::new(IconName::HashtagWarning)
-                            .size_10()
-                            .text_color(icon_fill)
+                        Icon::new(IconName::CHANNEL_WARNING_40).text_color(icon_fill)
                     } else if private {
-                        Icon::new(IconName::HashtagLocked)
-                            .size_10()
-                            .text_color(icon_fill)
+                        Icon::new(IconName::CHANNEL_PRIVATE_40).text_color(icon_fill)
                     } else {
-                        Icon::new(IconName::Hashtag).size_10().text_color(icon_fill)
+                        Icon::new(IconName::CHANNEL_40).text_color(icon_fill)
                     },
                     if is_stream {
                         None

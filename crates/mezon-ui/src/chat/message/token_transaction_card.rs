@@ -1,9 +1,10 @@
+use crate::components::primitives::{Icon, IconName};
+
 use gpui::{AnyElement, FontWeight, SharedString, div, prelude::*, px, rgb};
 use mezon_store::Message;
 
 use super::content::{SelectableSectionCursor, SelectableTextContext};
 use super::context::RowCtx;
-use crate::components::primitives::{Icon, IconName};
 
 const GREEN_600: u32 = 0x16_a3_4a;
 const BLUE_500: u32 = 0x3b_82_f6;
@@ -32,8 +33,8 @@ pub fn render_token_transaction_card(
         .w_full()
         .child(
             div().w(px(50.)).child(
-                Icon::new(IconName::Transaction)
-                    .size(px(50.))
+                Icon::new(IconName::TRANSACTION_48)
+                    .size(px(50.0))
                     .text_color(rgb(GREEN_600)),
             ),
         )

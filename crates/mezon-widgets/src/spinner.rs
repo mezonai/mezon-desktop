@@ -2,7 +2,7 @@ use std::time::Duration;
 
 use gpui::{
     Animation, AnimationExt as _, App, Hsla, Pixels, Transformation, Window, div, ease_in_out,
-    percentage, prelude::*, px, svg,
+    percentage, prelude::*, px,
 };
 
 use super::sizing::{Sizable, Size};
@@ -43,10 +43,10 @@ impl Sizable for Spinner {
 
 fn diameter(size: Size) -> Pixels {
     match size {
-        Size::XSmall => px(12.),
+        Size::XSmall => px(16.),
         Size::Small => px(16.),
         Size::Medium => px(20.),
-        Size::Large => px(28.),
+        Size::Large => px(32.),
     }
 }
 
@@ -54,9 +54,9 @@ impl RenderOnce for Spinner {
     fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
         let color = self
             .color
-            .unwrap_or_else(|| cx.theme().text_secondary.into());
-        let icon = svg()
-            .path("icons/loading-spinner.svg")
+            .unwrap_or_else(|| cx.theme().tokens.icon_normal().into());
+        let icon = crate::Icon::new(crate::IconName::LoadingSpinner)
+            .motion_enabled(false)
             .size(diameter(self.size))
             .flex_none()
             .text_color(color);

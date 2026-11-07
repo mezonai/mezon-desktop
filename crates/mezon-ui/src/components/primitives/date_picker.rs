@@ -313,12 +313,7 @@ impl Render for DatePicker {
                             .text_color(theme.text_primary)
                             .child(display),
                     )
-                    .child(
-                        Icon::new(IconName::DatePickerIndicator)
-                            .size(px(16.))
-                            .flex_none()
-                            .text_color(theme.text_secondary),
-                    ),
+                    .child(Icon::new(IconName::CALENDAR_16).flex_none().selected(false)),
             )
             .when(self.open, |el| match self.popup_mode {
                 DatePickerPopupMode::DeferredOverlay => el.child(deferred(
@@ -425,11 +420,7 @@ fn render_calendar(
                     .font_weight(FontWeight::SEMIBOLD)
                     .text_color(theme.text_primary)
                     .child(header_label)
-                    .child(
-                        Icon::new(IconName::ArrowDown)
-                            .size(px(10.))
-                            .text_color(theme.text_secondary),
-                    )
+                    .child(Icon::new(IconName::ARROW_DOWN_16).selected(false))
                     .on_mouse_down(MouseButton::Left, {
                         let entity = entity.clone();
                         move |_: &MouseDownEvent, _window, cx: &mut App| {

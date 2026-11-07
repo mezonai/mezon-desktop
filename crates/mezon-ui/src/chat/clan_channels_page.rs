@@ -354,8 +354,7 @@ impl ClanChannelsPage {
             })
             .child(label)
             .child(
-                Icon::new(IconName::ArrowDown)
-                    .size(px(13.))
+                Icon::new(IconName::ARROW_DOWN_16)
                     .text_color(if active {
                         cx.theme().text_primary
                     } else {
@@ -548,10 +547,9 @@ impl ClanChannelsPage {
                                 cx,
                             )
                         } else {
-                            Icon::new(IconName::AvatarUser)
+                            Icon::new(IconName::USER_CIRCLE_24)
                                 .motion_enabled(false)
                                 .text_color(cx.theme().tokens.text_secondary)
-                                .size(px(24.))
                                 .flex_none()
                                 .into_any_element()
                         })
@@ -677,8 +675,7 @@ impl ClanChannelsPage {
                 .hover(|style| style.bg(cx.theme().bg_hover))
                 .child(self.page_size.to_string())
                 .child(
-                    Icon::new(IconName::ChevronDown)
-                        .size(px(14.))
+                    Icon::new(IconName::CHEVRON_DOWN_16)
                         .text_color(cx.theme().text_secondary)
                         .with_transformation(gpui::Transformation::rotate(gpui::radians(
                             chevron_angle,
@@ -896,11 +893,7 @@ impl Render for ClanChannelsPage {
                     .bottom_0()
                     .flex()
                     .items_center()
-                    .child(
-                        Icon::new(IconName::Search)
-                            .size(px(18.))
-                            .text_color(cx.theme().text_secondary),
-                    ),
+                    .child(Icon::new(IconName::SEARCH_20).text_color(cx.theme().text_secondary)),
             )
             .on_mouse_down_out(|_, window, _| window.blur());
         let footer = div()

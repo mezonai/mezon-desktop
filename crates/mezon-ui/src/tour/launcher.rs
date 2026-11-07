@@ -160,11 +160,7 @@ impl Render for TourLauncher {
                             ),
                     )
                     .when(seen, |el| {
-                        el.child(
-                            Icon::new(IconName::Check)
-                                .size_4()
-                                .text_color(theme.status_online),
-                        )
+                        el.child(Icon::new(IconName::CHECK_16).text_color(theme.status_online))
                     })
             }))
             .child(

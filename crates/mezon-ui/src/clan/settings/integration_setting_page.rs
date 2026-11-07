@@ -92,11 +92,7 @@ pub fn render_webhook_url_field(
                 .rounded_md()
                 .cursor_pointer()
                 .hover(|s| s.bg(theme.bg_hover))
-                .child(
-                    Icon::new(IconName::CopyIcon)
-                        .size(px(16.0))
-                        .text_color(theme.text_secondary),
-                )
+                .child(Icon::new(IconName::COPY_16).selected(false))
                 .on_click(move |_, _, cx| {
                     cx.write_to_clipboard(ClipboardItem::new_string(url.clone()));
                     Shell::global(cx).update(cx, |shell, cx| {
@@ -157,9 +153,7 @@ fn render_webhook_dashed_box(
                     .items_center()
                     .gap_1()
                     .child(
-                        Icon::new(IconName::WebhooksIcon)
-                            .size(px(20.0))
-                            .text_color(theme.tokens.text_theme_primary),
+                        Icon::new(IconName::WEBHOOK_20).text_color(theme.tokens.text_theme_primary),
                     )
                     .child(
                         div()

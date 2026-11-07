@@ -4910,5 +4910,7 @@
   "chat.activityStrip.messageFrom": "Messaggio da {{name}}: {{message}}",
   "chat.activityStrip.hideAction": "Nascondi barra dei pin e topic",
   "chat.activityStrip.hideConfirm.title": "Nascondi barra dei pin e topic",
-  "chat.activityStrip.hideConfirm.description": "Nascondere la barra dei pin e topic per questo canale? Riapparirà automaticamente quando ci sarà un nuovo pin o topic."
+  "chat.activityStrip.hideConfirm.description": "Nascondere la barra dei pin e topic per questo canale? Riapparirà automaticamente quando ci sarà un nuovo pin o topic.",
+  "setting.appearance.iconAnimations": "Animazioni delle icone",
+  "setting.appearance.iconAnimationsDescription": "Anima le icone quando passi il puntatore su pulsanti e righe."
 }

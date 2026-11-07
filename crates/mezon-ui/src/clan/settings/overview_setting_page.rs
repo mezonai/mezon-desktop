@@ -708,11 +708,7 @@ impl OverviewSettingPage {
                 )
             })
             .when(!has_logo, |el| {
-                el.child(
-                    Icon::new(IconName::UploadImage)
-                        .size(px(32.0))
-                        .text_color(theme.text_secondary),
-                )
+                el.child(Icon::new(IconName::CAMERA_32).selected(false))
             })
             .child(
                 div()
@@ -823,11 +819,10 @@ impl OverviewSettingPage {
                 )
             })
             .when(!has_banner, |el| {
-                el.flex().items_center().justify_center().child(
-                    Icon::new(IconName::UploadImage)
-                        .size(px(32.0))
-                        .text_color(theme.text_secondary),
-                )
+                el.flex()
+                    .items_center()
+                    .justify_center()
+                    .child(Icon::new(IconName::CAMERA_32).selected(false))
             })
             .child(
                 div()
@@ -873,10 +868,9 @@ impl OverviewSettingPage {
             .gap_1()
             .overflow_hidden()
             .child(
-                Icon::new(IconName::Hashtag)
-                    .size(px(16.0))
+                Icon::new(IconName::CHANNEL_16)
                     .flex_shrink_0()
-                    .text_color(theme.text_secondary),
+                    .selected(false),
             )
             .child(
                 div()
@@ -930,10 +924,9 @@ impl OverviewSettingPage {
                     }),
             )
             .child(
-                Icon::new(IconName::ArrowDownFill)
-                    .size(px(16.0))
+                Icon::new(IconName::CARET_DOWN_16)
                     .flex_shrink_0()
-                    .text_color(theme.text_muted),
+                    .selected(false),
             );
         trigger
             .interactivity()

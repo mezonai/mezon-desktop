@@ -282,9 +282,7 @@ impl Render for CreatePollModal {
                     .hover(|s| s.bg(theme.tokens.bg_item_hover))
                     .on_click(|_: &ClickEvent, _window, cx| Self::close(cx))
                     .child(
-                        Icon::new(IconName::Close)
-                            .size(px(20.))
-                            .text_color(theme.tokens.text_theme_primary),
+                        Icon::new(IconName::CLOSE_20).text_color(theme.tokens.text_theme_primary),
                     ),
             );
 
@@ -340,8 +338,7 @@ impl Render for CreatePollModal {
                 .aspect_square()
                 .flex_none()
                 .into_any_element(),
-                None => Icon::new(IconName::Smile)
-                    .size(px(20.))
+                None => Icon::new(IconName::EMOJI_20)
                     .flex_none()
                     .text_color(theme.tokens.text_theme_primary)
                     .hover(|s| s.text_color(theme.tokens.text_secondary))
@@ -409,8 +406,7 @@ impl Render for CreatePollModal {
                             this.remove_answer(index, cx);
                         }))
                         .child(
-                            Icon::new(IconName::TrashIcon)
-                                .size(px(18.))
+                            Icon::new(IconName::TRASH_20)
                                 .text_color(theme.tokens.text_theme_primary),
                         ),
                 );
@@ -447,8 +443,7 @@ impl Render for CreatePollModal {
                         this.add_answer(window, cx);
                     }))
                     .child(
-                        Icon::new(IconName::AddIcon)
-                            .size(px(16.))
+                        Icon::new(IconName::PLUS_CIRCLE_16)
                             .flex_none()
                             .text_color(theme.tokens.text_theme_primary)
                             .hover(|s| s.text_color(theme.tokens.text_secondary)),
@@ -486,8 +481,7 @@ impl Render for CreatePollModal {
                     }))
                     .child(t(self.duration_label()))
                     .child(
-                        Icon::new(IconName::ArrowDown)
-                            .size(px(18.))
+                        Icon::new(IconName::ARROW_DOWN_20)
                             .text_color(theme.tokens.text_theme_primary),
                     ),
             );
@@ -583,11 +577,7 @@ impl Render for CreatePollModal {
                             .border_color(theme.tokens.bg_button_primary)
                     })
                     .when(allow_multiple, |d| {
-                        d.child(
-                            Icon::new(IconName::Check)
-                                .size(px(14.))
-                                .text_color(theme.tokens.text_secondary),
-                        )
+                        d.child(Icon::new(IconName::CHECK_16).selected(false))
                     }),
             )
             .child(

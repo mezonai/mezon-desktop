@@ -698,8 +698,7 @@ impl Render for MediaImageModal {
                                             this.select(this.index.saturating_sub(1), window, cx);
                                         }))
                                         .child(
-                                            Icon::new(IconName::ArrowLeft)
-                                                .size(px(20.))
+                                            Icon::new(IconName::CHEVRON_LEFT_20)
                                                 .text_color(modal_fg),
                                         ),
                                 )
@@ -719,8 +718,7 @@ impl Render for MediaImageModal {
                                             this.select(this.index + 1, window, cx);
                                         }))
                                         .child(
-                                            Icon::new(IconName::ArrowRight)
-                                                .size(px(20.))
+                                            Icon::new(IconName::CHEVRON_RIGHT_20)
                                                 .text_color(modal_fg),
                                         ),
                                 )

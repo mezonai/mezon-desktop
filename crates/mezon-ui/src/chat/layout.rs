@@ -1800,11 +1800,7 @@ impl Render for ChatLayout {
                     .cursor_pointer()
                     .hover(|s| s.bg(update_banner_bg(true)))
                     .on_click(|_, _, cx| mezon_store::update_restart_clicked(cx))
-                    .child(
-                        Icon::new(IconName::ReloadIcon)
-                            .size(px(16.0))
-                            .text_color(gpui::white()),
-                    )
+                    .child(Icon::new(IconName::REFRESH_16).text_color(gpui::white()))
                     .child(
                         div()
                             .text_sm()
@@ -1836,11 +1832,7 @@ impl Render for ChatLayout {
                     .cursor_pointer()
                     .hover(|s| s.bg(update_banner_bg(true)))
                     .on_click(|_, _, cx| mezon_store::update_available_clicked(cx))
-                    .child(
-                        Icon::new(IconName::Download)
-                            .size(px(16.0))
-                            .text_color(gpui::white()),
-                    )
+                    .child(Icon::new(IconName::DOWNLOAD_16).text_color(gpui::white()))
                     .child(
                         div()
                             .text_sm()
@@ -1879,11 +1871,7 @@ impl Render for ChatLayout {
                         mezon_store::update_manual_install_clicked(cx);
                         crate::router::navigate(cx, Route::SettingsAccount);
                     })
-                    .child(
-                        Icon::new(IconName::Download)
-                            .size(px(16.0))
-                            .text_color(gpui::white()),
-                    )
+                    .child(Icon::new(IconName::DOWNLOAD_16).text_color(gpui::white()))
                     .child(
                         div()
                             .text_sm()
@@ -2649,13 +2637,9 @@ impl ChatLayout {
         let enabled = store.noise_suppression_enabled();
         let loading = store.noise_suppression_loading();
         let icon = if enabled {
-            Icon::new(IconName::NoiseSupressionIcon)
-                .size(px(20.))
-                .text_color(theme.text_primary)
+            Icon::new(IconName::NOISE_SUPPRESSION_20).text_color(theme.text_primary)
         } else {
-            Icon::new(IconName::NoiseSupressionDisabledIcon)
-                .size(px(20.))
-                .text_color(theme.danger_text)
+            Icon::new(IconName::NOISE_SUPPRESSION_OFF_20).text_color(theme.danger_text)
         };
         let button = div()
             .id("voice-ns-btn")

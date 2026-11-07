@@ -4909,5 +4909,7 @@
   "chat.activityStrip.messageFrom": "Bericht van {{name}}: {{message}}",
   "chat.activityStrip.hideAction": "Balk met vastgezette berichten en onderwerpen verbergen",
   "chat.activityStrip.hideConfirm.title": "Balk met vastgezette berichten en onderwerpen verbergen",
-  "chat.activityStrip.hideConfirm.description": "De balk met vastgezette berichten en onderwerpen voor dit kanaal verbergen? Deze verschijnt automatisch opnieuw bij een nieuwe pin of een nieuw onderwerp."
+  "chat.activityStrip.hideConfirm.description": "De balk met vastgezette berichten en onderwerpen voor dit kanaal verbergen? Deze verschijnt automatisch opnieuw bij een nieuwe pin of een nieuw onderwerp.",
+  "setting.appearance.iconAnimations": "Pictogramanimaties",
+  "setting.appearance.iconAnimationsDescription": "Animeer pictogrammen wanneer de aanwijzer boven knoppen en rijen staat."
 }

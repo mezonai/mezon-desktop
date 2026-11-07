@@ -275,11 +275,7 @@ impl Render for TopicPanel {
                 h_flex()
                     .items_center()
                     .gap_2()
-                    .child(
-                        Icon::new(IconName::TopicIcon)
-                            .size(px(20.))
-                            .text_color(tokens.text_theme_primary),
-                    )
+                    .child(Icon::new(IconName::TOPIC_20).text_color(tokens.text_theme_primary))
                     .child(
                         div()
                             .text_base()
@@ -293,9 +289,7 @@ impl Render for TopicPanel {
                     .id("topic-panel-close")
                     .cursor_pointer()
                     .child(
-                        Icon::new(IconName::Close)
-                            .size(px(20.))
-                            .text_color(tokens.text_theme_primary_hover),
+                        Icon::new(IconName::CLOSE_20).text_color(tokens.text_theme_primary_hover),
                     )
                     .on_click(cx.listener(|_this, _: &ClickEvent, _window, cx| {
                         TopicsStore::global(cx).update(cx, |store, cx| store.close_panel(cx));

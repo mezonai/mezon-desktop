@@ -1,9 +1,10 @@
+use crate::components::primitives::{Icon, IconName};
+
 use gpui::{
     Context, Entity, FontWeight, Render, SharedString, Subscription, Window, div, prelude::*, px,
 };
 use mezon_store::{ChannelId, ChannelTypingState, PresenceEvent, PresenceStore, Settings};
 
-use crate::components::primitives::{Icon, IconName};
 use crate::theme::ActiveTheme;
 
 pub struct ChannelTyping {
@@ -107,9 +108,7 @@ impl Render for ChannelTyping {
         match self.content(cx) {
             Some(TypingContent::One { name, suffix }) => bar
                 .child(
-                    Icon::new(IconName::TypingIndicator)
-                        .w(px(20.))
-                        .h(px(10.))
+                    Icon::new(IconName::TYPING_16)
                         .flex_none()
                         .text_color(primary),
                 )

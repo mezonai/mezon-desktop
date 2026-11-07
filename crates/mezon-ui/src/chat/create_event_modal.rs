@@ -1481,8 +1481,7 @@ impl CreateEventModal {
                                         .min_w_0()
                                         .max_w_full()
                                         .child(
-                                            Icon::new(IconName::SpeakerLocked)
-                                                .size(px(14.))
+                                            Icon::new(IconName::SPEAKER_LOCK_16)
                                                 .text_color(theme.brand),
                                         )
                                         .child(
@@ -1741,11 +1740,7 @@ impl CreateEventModal {
                                     .flex()
                                     .items_center()
                                     .gap_2()
-                                    .child(
-                                        Icon::new(IconName::IconEvents)
-                                            .size(px(24.))
-                                            .text_color(theme.text_secondary),
-                                    )
+                                    .child(Icon::new(IconName::EVENT_24).selected(false))
                                     .child(div().font_weight(FontWeight::SEMIBOLD).child(start))
                                     .child(
                                         div()
@@ -1796,14 +1791,12 @@ impl CreateEventModal {
                             .items_center()
                             .gap_2()
                             .child(if self.location_kind == Some(LocationKind::Somewhere) {
-                                Icon::new(IconName::Location)
-                                    .text_color(theme.tokens.text_secondary)
-                                    .size(px(21.))
+                                Icon::new(IconName::LOCATION_20)
+                                    .selected(false)
                                     .into_any_element()
                             } else {
-                                Icon::new(IconName::Speaker)
-                                    .size(px(21.))
-                                    .text_color(theme.tokens.text_secondary)
+                                Icon::new(IconName::SPEAKER_20)
+                                    .selected(false)
                                     .into_any_element()
                             })
                             .child(div().font_weight(FontWeight::SEMIBOLD).child(location)),

@@ -5,6 +5,7 @@ use crate::chat::quick_replies::{
 };
 use crate::chat::{MentionInput, ReplyTarget};
 use crate::components::primitives::{Icon, IconName};
+
 use crate::image_cache::LruImageCache;
 use crate::theme::{ActiveTheme, Theme};
 use gpui::{
@@ -246,9 +247,7 @@ impl InputBar {
                         }
                     })
                     .child(
-                        Icon::new(IconName::Close)
-                            .size_4()
-                            .text_color(theme.tokens.text_theme_primary),
+                        Icon::new(IconName::CLOSE_16).text_color(theme.tokens.text_theme_primary),
                     ),
             )
     }
@@ -386,11 +385,7 @@ impl InputBar {
                     .rounded(px(4.))
                     .cursor_pointer()
                     .hover(|s| s.bg(theme.bg_hover))
-                    .child(
-                        Icon::new(IconName::Close)
-                            .size(px(14.))
-                            .text_color(theme.text_muted),
-                    )
+                    .child(Icon::new(IconName::CLOSE_16).selected(false))
                     .on_click(cx.listener(|this, _event, _window, cx| {
                         this.mention_input
                             .update(cx, |input, cx| input.clear_ogp_preview(cx));
@@ -477,8 +472,7 @@ impl InputBar {
                     .when(anonymous, |composer| {
                         composer.child(
                             div().absolute().top(px(-12.)).right(px(-12.)).child(
-                                Icon::new(IconName::HatIcon)
-                                    .size(px(28.))
+                                Icon::new(IconName::ANONYMOUS_32)
                                     .text_color(theme.tokens.text_theme_primary)
                                     .with_transformation(gpui::Transformation::rotate(radians(
                                         std::f32::consts::FRAC_PI_4,
