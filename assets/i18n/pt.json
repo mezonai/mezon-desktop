@@ -4910,5 +4910,11 @@
   "chat.activityStrip.messageFrom": "Mensagem de {{name}}: {{message}}",
   "chat.activityStrip.hideAction": "Ocultar barra de fixados e tópicos",
   "chat.activityStrip.hideConfirm.title": "Ocultar barra de fixados e tópicos",
-  "chat.activityStrip.hideConfirm.description": "Ocultar a barra de fixados e tópicos deste canal? Ela reaparecerá automaticamente quando houver um novo item fixado ou tópico."
+  "chat.activityStrip.hideConfirm.description": "Ocultar a barra de fixados e tópicos deste canal? Ela reaparecerá automaticamente quando houver um novo item fixado ou tópico.",
+  "setting.profile.cover": "CAPA DO PERFIL",
+  "setting.profile.changeCover": "Alterar capa",
+  "setting.profile.uploadingCover": "Enviando capa…",
+  "setting.profile.chooseCover": "Escolher capa",
+  "setting.profile.coverUploadFailed": "Não foi possível enviar a capa. Use JPEG, PNG, GIF ou WebP de até 10 MB.",
+  "setting.profile.removeCover": "Remover capa"
 }

@@ -3102,9 +3102,17 @@ impl AppApi {
         about_me: Option<&str>,
         logo: Option<&str>,
         dob_seconds: Option<u32>,
+        banner: Option<&str>,
     ) -> Result<()> {
         self.transport
-            .update_account(display_name, avatar_url, about_me, logo, dob_seconds)
+            .update_account(
+                display_name,
+                avatar_url,
+                about_me,
+                logo,
+                dob_seconds,
+                banner,
+            )
             .await
     }
 

@@ -22,6 +22,7 @@ pub(crate) struct ProfileUpdate {
     display_name: String,
     avatar: String,
     about_me: String,
+    banner: String,
 }
 
 impl From<&mezon_proto::realtime::UserProfileUpdatedEvent> for ProfileUpdate {
@@ -30,6 +31,7 @@ impl From<&mezon_proto::realtime::UserProfileUpdatedEvent> for ProfileUpdate {
             display_name: event.display_name.clone(),
             avatar: event.avatar.clone(),
             about_me: event.about_me.clone(),
+            banner: event.banner.clone(),
         }
     }
 }
@@ -690,6 +692,10 @@ impl UsersByUserStore {
                 id: UserId(redis.user_id),
                 username: redis.username.clone(),
                 display_name: redis.display_name.clone(),
+                banner: self
+                    .by_id
+                    .get(&UserId(redis.user_id))
+                    .and_then(|user| user.banner.clone()),
                 avatar_url: redis.avatar.clone(),
                 about_me: String::new(),
                 create_time_seconds: redis.create_time_second,
@@ -1202,6 +1208,7 @@ mod tests {
                     UserId(7),
                     User {
                         id: UserId(7),
+                        banner: None,
                         username: "old-name".into(),
                         display_name: "Old".into(),
                         avatar_url: "old.png".into(),

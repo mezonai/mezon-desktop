@@ -51,18 +51,32 @@ pub fn spawn_banner_color_task<T: 'static>(
     cx: &mut Context<T>,
     apply: impl Fn(&mut T, Rgba, &mut Context<T>) + 'static,
 ) -> Option<Task<()>> {
-    if avatar_url.is_empty() {
+    spawn_banner_color_task_with_fallback(avatar_image_cache, avatar_url, String::new(), cx, apply)
+}
+
+pub fn spawn_banner_color_task_with_fallback<T: 'static>(
+    avatar_image_cache: Entity<LruImageCache>,
+    avatar_url: String,
+    fallback_url: String,
+    cx: &mut Context<T>,
+    apply: impl Fn(&mut T, Rgba, &mut Context<T>) + 'static,
+) -> Option<Task<()>> {
+    if avatar_url.is_empty() && fallback_url.is_empty() {
         return None;
     }
-    let resource = gpui::Resource::Uri(avatar_url.into());
+    let resources: Vec<_> = [avatar_url, fallback_url]
+        .into_iter()
+        .filter(|url| !url.is_empty())
+        .map(|url| gpui::Resource::Uri(url.into()))
+        .collect();
     Some(cx.spawn(async move |this, cx| {
         for attempt in 0..60 {
-            let image =
-                avatar_image_cache.read_with(cx, |cache, _| cache.cached_render_image(&resource));
-            if let Some(image) = image
-                && let Some(bytes) = image.as_bytes(0)
-                && let Some(color) = average_bgra_color(bytes)
-            {
+            let color = resources.iter().find_map(|resource| {
+                let image = avatar_image_cache
+                    .read_with(cx, |cache, _| cache.cached_render_image(resource));
+                image.and_then(|image| image.as_bytes(0).and_then(average_bgra_color))
+            });
+            if let Some(color) = color {
                 let _ = this.update(cx, |this, cx| apply(this, color, cx));
                 break;
             }

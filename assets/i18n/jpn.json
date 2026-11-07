@@ -4912,5 +4912,11 @@
   "chat.activityStrip.messageFrom": "{{name}}からのメッセージ: {{message}}",
   "chat.activityStrip.hideAction": "ピンとトピックのバーを非表示",
   "chat.activityStrip.hideConfirm.title": "ピンとトピックのバーを非表示",
-  "chat.activityStrip.hideConfirm.description": "このチャンネルのピンとトピックのバーを非表示にしますか？新しいピンまたはトピックがあると自動的に再表示されます。"
+  "chat.activityStrip.hideConfirm.description": "このチャンネルのピンとトピックのバーを非表示にしますか？新しいピンまたはトピックがあると自動的に再表示されます。",
+  "setting.profile.cover": "プロフィールカバー",
+  "setting.profile.changeCover": "カバーを変更",
+  "setting.profile.uploadingCover": "アップロード中…",
+  "setting.profile.chooseCover": "カバー画像を選択",
+  "setting.profile.coverUploadFailed": "アップロードできませんでした。10 MB以下のJPEG、PNG、GIF、WebPを使用してください。",
+  "setting.profile.removeCover": "カバーを削除"
 }
