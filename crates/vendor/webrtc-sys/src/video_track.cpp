@@ -186,6 +186,8 @@ bool VideoTrackSource::InternalSource::on_captured_frame(
                                             : 0,
           frame_metadata.has_packet_trailer ? frame_metadata.frame_id : 0);
     }
+    refresh_ = {};
+    discarded_ = {};
     OnFrame(webrtc::VideoFrame::Builder()
                 .set_video_frame_buffer(buffer)
                 .set_rotation(frame.rotation())
@@ -198,6 +200,13 @@ bool VideoTrackSource::InternalSource::on_captured_frame(
   if (!AdaptFrame(buffer->width(), buffer->height(), aligned_timestamp_us,
                   &adapted_width, &adapted_height, &crop_width, &crop_height,
                   &crop_x, &crop_y)) {
+    // Zero-hertz asks for a refresh a few frame periods after a drop so the
+    // newest picture still reaches viewers once the screen goes still.
+    if (is_screencast_ &&
+        buffer->type() != webrtc::VideoFrameBuffer::Type::kNative) {
+      discarded_ = {buffer, frame.rotation(), frame.timestamp_us(),
+                    webrtc::TimeMicros()};
+    }
     return false;
   }
 
@@ -220,6 +229,14 @@ bool VideoTrackSource::InternalSource::on_captured_frame(
         frame_metadata.has_packet_trailer ? frame_metadata.frame_id : 0);
   }
 
+  if (is_screencast_) {
+    refresh_ = {buffer->type() == webrtc::VideoFrameBuffer::Type::kNative
+                    ? nullptr
+                    : buffer,
+                rotation, frame.timestamp_us(), webrtc::TimeMicros()};
+    discarded_ = {};
+  }
+
   OnFrame(webrtc::VideoFrame::Builder()
               .set_video_frame_buffer(buffer)
               .set_rotation(rotation)
@@ -227,6 +244,51 @@ bool VideoTrackSource::InternalSource::on_captured_frame(
               .build());
 
   return true;
+}
+
+void VideoTrackSource::InternalSource::RequestRefreshFrame() {
+  webrtc::MutexLock lock(&mutex_);
+  int64_t now_us = webrtc::TimeMicros();
+  if (discarded_.buffer) {
+    int64_t capture_us =
+        discarded_.capture_us + (now_us - discarded_.arrival_us);
+    int64_t aligned_us =
+        timestamp_aligner_.TranslateTimestamp(capture_us, now_us);
+    webrtc::scoped_refptr<webrtc::VideoFrameBuffer> buffer = discarded_.buffer;
+    int adapted_width, adapted_height, crop_width, crop_height, crop_x, crop_y;
+    if (!AdaptFrame(buffer->width(), buffer->height(), aligned_us,
+                    &adapted_width, &adapted_height, &crop_width, &crop_height,
+                    &crop_x, &crop_y)) {
+      return;
+    }
+    if (adapted_width != buffer->width() ||
+        adapted_height != buffer->height()) {
+      buffer = buffer->CropAndScale(crop_x, crop_y, crop_width, crop_height,
+                                    adapted_width, adapted_height);
+    }
+    webrtc::VideoRotation rotation = discarded_.rotation;
+    if (apply_rotation() && rotation != webrtc::kVideoRotation_0) {
+      buffer = buffer->ToI420();
+    }
+    refresh_ = {buffer, rotation, capture_us, now_us};
+    discarded_ = {};
+    OnFrame(webrtc::VideoFrame::Builder()
+                .set_video_frame_buffer(buffer)
+                .set_rotation(rotation)
+                .set_timestamp_us(aligned_us)
+                .build());
+    return;
+  }
+  if (!refresh_.buffer) {
+    return;
+  }
+  int64_t capture_us = refresh_.capture_us + (now_us - refresh_.arrival_us);
+  OnFrame(webrtc::VideoFrame::Builder()
+              .set_video_frame_buffer(refresh_.buffer)
+              .set_rotation(refresh_.rotation)
+              .set_timestamp_us(
+                  timestamp_aligner_.TranslateTimestamp(capture_us, now_us))
+              .build());
 }
 
 void VideoTrackSource::InternalSource::set_packet_trailer_handler(
@@ -298,6 +360,19 @@ bool VideoTrackSource::capture_encoded_frame(
                    .build();
 
   return source_->on_captured_frame(frame, frame_metadata);
+}
+
+void VideoTrackSource::process_constraints(
+    VideoTrackSourceConstraints constraints) const {
+  webrtc::VideoTrackSourceConstraints source_constraints;
+  if (constraints.has_min_fps) {
+    source_constraints.min_fps = constraints.min_fps;
+  }
+  if (constraints.has_max_fps) {
+    source_constraints.max_fps = constraints.max_fps;
+  }
+  static_cast<webrtc::VideoTrackSourceInterface*>(source_.get())
+      ->ProcessConstraints(source_constraints);
 }
 
 bool VideoTrackSource::take_keyframe_request() const {

@@ -6,5 +6,6 @@ mod screen_adaptation;
 pub mod sdp;
 
 pub use engine::{
-    MediaRefusal, RemovalCause, ScreenTrack, SfuConfig, SfuEngine, SfuEvent, SfuPeer, SfuRole,
+    MediaRefusal, RemovalCause, ScreenRepeat, ScreenTrack, SfuConfig, SfuEngine, SfuEvent, SfuPeer,
+    SfuRole,
 };
