@@ -28,6 +28,7 @@ pub mod ctrlk_search;
 pub mod desktop_draw;
 pub mod dialog;
 pub mod direct;
+pub mod dm_setting;
 pub mod emoji;
 pub mod events;
 pub mod files;
@@ -153,6 +154,7 @@ pub use direct::{
     DirectChannel, DirectEvent, DirectKind, DirectMessageBody, DirectMessageStore,
     dm_counts_toward_unread_badge,
 };
+pub use dm_setting::{DmSettingStore, is_new_dm_denied};
 pub use emoji::{
     EMOJI_SHORTNAME_MAX, EMOJI_UPLOAD_MAX_PX, EMOTICON_ALLOWED_EXTENSIONS, EMOTICON_SHORTNAME_MAX,
     EMOTICON_SHORTNAME_MIN, Emoji, EmojiEvent, EmojiStore, EmoticonError, EmoticonErrorKind,

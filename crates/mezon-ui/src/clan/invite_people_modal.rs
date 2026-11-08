@@ -410,12 +410,14 @@ impl InvitePeopleModal {
             }
             Err(err) => {
                 tracing::warn!("send clan invite failed: {err}");
-                let message = format!("{}: {err}", tr(&locale, "inviteToChannel.share.error"));
+                let fallback = format!("{}: {err}", tr(&locale, "inviteToChannel.share.error"));
                 let _ = this.update(cx, |this, cx| {
                     this.sending.remove(&key);
                     cx.notify();
                 });
                 cx.update(|cx| {
+                    let message =
+                        crate::chat::friends_page::dm_open_failure_message(&err, fallback, cx);
                     Shell::global(cx).update(cx, |shell, cx| shell.error(message, cx));
                 });
             }

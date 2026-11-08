@@ -34,13 +34,13 @@ use std::{
 use parking_lot::{Condvar, Mutex, MutexGuard, RwLock};
 use x11rb::{
     COPY_DEPTH_FROM_PARENT, COPY_FROM_PARENT, NONE,
-    connection::Connection,
+    connection::{Connection, RequestConnection as _},
     protocol::{
         Event,
         xproto::{
-            Atom, AtomEnum, ConnectionExt as _, CreateWindowAux, EventMask, PropMode, Property,
-            PropertyNotifyEvent, SELECTION_NOTIFY_EVENT, SelectionNotifyEvent,
-            SelectionRequestEvent, Time, WindowClass,
+            Atom, AtomEnum, ChangeWindowAttributesAux, ConnectionExt as _, CreateWindowAux,
+            EventMask, PropMode, Property, PropertyNotifyEvent, SELECTION_NOTIFY_EVENT,
+            SelectionNotifyEvent, SelectionRequestEvent, Time, Window, WindowClass,
         },
     },
     rust_connection::RustConnection,
@@ -108,6 +108,20 @@ thread_local! {
 const LONG_TIMEOUT_DUR: Duration = Duration::from_millis(4000);
 const SHORT_TIMEOUT_DUR: Duration = Duration::from_millis(10);
 
+// mezon vendor edit: data larger than one X request (a copied photo as PNG easily passes the
+// server's ~16 MiB limit) goes out in INCR chunks (ICCCM 2.7.2) instead of failing the request.
+const INCR_CHUNK_BYTES: usize = 256 * 1024;
+const INCR_TRANSFER_TIMEOUT: Duration = Duration::from_secs(30);
+
+struct IncrTransfer {
+    requestor: Window,
+    property: Atom,
+    target: Atom,
+    bytes: Vec<u8>,
+    sent: usize,
+    started: Instant,
+}
+
 #[derive(Debug, PartialEq, Eq)]
 enum ManagerHandoverState {
     Idle,
@@ -139,6 +153,8 @@ struct Inner {
 
     handover_state: Mutex<ManagerHandoverState>,
     handover_cv: Condvar,
+
+    incr_transfers: Mutex<Vec<IncrTransfer>>,
 
     serve_stopped: AtomicBool,
 }
@@ -227,6 +243,7 @@ impl Inner {
             secondary: Selection::default(),
             handover_state: Mutex::new(ManagerHandoverState::Idle),
             handover_cv: Condvar::new(),
+            incr_transfers: Mutex::new(Vec::new()),
             serve_stopped: AtomicBool::new(false),
         })
     }
@@ -720,6 +737,15 @@ impl Inner {
             let data = self.selection_of(selection).data.read();
             if let Some(data_list) = &*data {
                 success = match data_list.iter().find(|d| d.format == event.target) {
+                    // Only data above the non-BIG-REQUESTS limit asks for the server maximum,
+                    // so a normal copy takes exactly the old path.
+                    Some(data)
+                        if data.bytes.len() > INCR_CHUNK_BYTES
+                            && data.bytes.len() > self.max_property_bytes() =>
+                    {
+                        self.start_incr_transfer(&event, data.bytes.clone())?;
+                        true
+                    }
                     Some(data) => {
                         self.server
                             .conn
@@ -750,6 +776,10 @@ impl Inner {
             AtomEnum::NONE.into()
         };
         // tell the requestor that we finished sending data
+        self.send_selection_notify(&event, property)
+    }
+
+    fn send_selection_notify(&self, event: &SelectionRequestEvent, property: Atom) -> Result<()> {
         self.server
             .conn
             .send_event(
@@ -769,6 +799,119 @@ impl Inner {
             .map_err(into_unknown)?;
 
         self.server.conn.flush().map_err(into_unknown)
+    }
+
+    /// Largest property one `ChangeProperty` request can carry on this server.
+    fn max_property_bytes(&self) -> usize {
+        self.server
+            .conn
+            .maximum_request_bytes()
+            .saturating_sub(1024)
+    }
+
+    /// Announces `bytes` with an `INCR` property; the requestor then deletes the property
+    /// once per chunk and `continue_incr_transfer` writes the next one.
+    fn start_incr_transfer(&self, event: &SelectionRequestEvent, bytes: Vec<u8>) -> Result<()> {
+        let conn = &self.server.conn;
+        conn.change_window_attributes(
+            event.requestor,
+            &ChangeWindowAttributesAux::new().event_mask(EventMask::PROPERTY_CHANGE),
+        )
+        .map_err(into_unknown)?;
+        conn.change_property32(
+            PropMode::REPLACE,
+            event.requestor,
+            event.property,
+            self.atoms.INCR,
+            &[u32::try_from(bytes.len()).unwrap_or(u32::MAX)],
+        )
+        .map_err(into_unknown)?;
+        let mut transfers = self.incr_transfers.lock();
+        transfers.retain(|transfer| {
+            !(transfer.requestor == event.requestor && transfer.property == event.property)
+        });
+        transfers.push(IncrTransfer {
+            requestor: event.requestor,
+            property: event.property,
+            target: event.target,
+            bytes,
+            sent: 0,
+            started: Instant::now(),
+        });
+        Ok(())
+    }
+
+    fn continue_incr_transfer(&self, event: PropertyNotifyEvent) -> Result<()> {
+        if event.state != Property::DELETE {
+            return Ok(());
+        }
+        let mut transfers = self.incr_transfers.lock();
+        let Some(index) = transfers.iter().position(|transfer| {
+            transfer.requestor == event.window && transfer.property == event.atom
+        }) else {
+            return Ok(());
+        };
+        let chunk_bytes = INCR_CHUNK_BYTES.min(self.max_property_bytes());
+        let transfer = &mut transfers[index];
+        let end = (transfer.sent + chunk_bytes).min(transfer.bytes.len());
+        // A zero-length chunk tells the requestor that the transfer is complete.
+        let finished = transfer.sent == transfer.bytes.len();
+        let result = self
+            .server
+            .conn
+            .change_property8(
+                PropMode::REPLACE,
+                transfer.requestor,
+                transfer.property,
+                transfer.target,
+                &transfer.bytes[transfer.sent..end],
+            )
+            .map_err(into_unknown)
+            .and_then(|_| self.server.conn.flush().map_err(into_unknown));
+        transfer.sent = end;
+        if finished || result.is_err() {
+            let requestor = transfers.swap_remove(index).requestor;
+            self.stop_watching_requestor(&transfers, requestor);
+        }
+        result
+    }
+
+    /// Drops transfers whose requestor stopped asking (it crashed or gave up), so their copy
+    /// of the data is not kept until the next large paste.
+    fn prune_stale_incr_transfers(&self) {
+        let mut transfers = self.incr_transfers.lock();
+        if transfers.is_empty() {
+            return;
+        }
+        let mut stale = Vec::new();
+        transfers.retain(|transfer| {
+            let keep = transfer.started.elapsed() < INCR_TRANSFER_TIMEOUT;
+            if !keep {
+                stale.push(transfer.requestor);
+            }
+            keep
+        });
+        for requestor in stale {
+            self.stop_watching_requestor(&transfers, requestor);
+        }
+    }
+
+    fn stop_watching_requestor(&self, transfers: &[IncrTransfer], requestor: Window) {
+        if requestor == self.server.win_id
+            || transfers
+                .iter()
+                .any(|transfer| transfer.requestor == requestor)
+        {
+            return;
+        }
+        self.server
+            .conn
+            .change_window_attributes(
+                requestor,
+                &ChangeWindowAttributesAux::new().event_mask(EventMask::NO_EVENT),
+            )
+            .ok();
+        self.server.conn.flush().ok();
     }
 
     fn ask_clipboard_manager_to_request_our_data(&self) -> Result<()> {
@@ -888,10 +1031,17 @@ fn serve_requests(context: Arc<Inner>) -> Result<(), Box<dyn std::error::Error>>
                     context.atom_name(event.selection),
                     context.atom_name(event.target),
                 );
+                context.prune_stale_incr_transfers();
                 // Someone is requesting the clipboard content from us.
-                context
-                    .handle_selection_request(event)
-                    .map_err(into_unknown)?;
+                // mezon vendor edit: a failed request used to end this thread for good, after
+                // which every copy was silently dropped until restart; refuse just this one.
+                if let Err(error) = context.handle_selection_request(event) {
+                    log::error!("Failed to handle selection request: {error}");
+                    context
+                        .send_selection_notify(&event, AtomEnum::NONE.into())
+                        .ok();
+                    continue;
+                }
 
                 // if we are in the progress of saving to the clipboard manager
                 // make sure we save that we have finished writing
@@ -939,6 +1089,11 @@ fn serve_requests(context: Arc<Inner>) -> Result<(), Box<dyn std::error::Error>>
                     if written {
                         handover_finished(&context, handover_state);
                     }
+                }
+            }
+            Event::PropertyNotify(event) => {
+                if let Err(error) = context.continue_incr_transfer(event) {
+                    log::warn!("Failed to send an INCR clipboard chunk: {error}");
                 }
             }
             _event => {

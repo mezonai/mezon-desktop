@@ -177,7 +177,15 @@ impl AddFriendPage {
             }
             Err(error) => {
                 tracing::warn!("open dm from invite failed: {error}");
-                cx.update(|cx| navigate(cx, Route::Friends));
+                cx.update(|cx| {
+                    let locale = Settings::try_global(cx)
+                        .map(|settings| settings.read(cx).language.clone())
+                        .unwrap_or_else(|| "en".to_string());
+                    let fallback = mezon_i18n::t(&locale, "common.somethingWentWrong").to_string();
+                    let message =
+                        crate::chat::friends_page::dm_open_failure_message(&error, fallback, cx);
+                    Shell::global(cx).update(cx, |shell, cx| shell.error(message, cx));
+                });
             }
         })
         .detach();
