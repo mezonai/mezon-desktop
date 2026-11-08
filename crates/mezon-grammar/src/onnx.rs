@@ -246,6 +246,10 @@ pub fn apply_neural_accent_onnx(text: &str) -> String {
     crate::accent::add_accents(text, &accent_logits)
 }
 
+pub fn restore_sentence_onnx(text: &str, capitalize: bool, resolve_teencode: bool) -> String {
+    crate::accent::restore_sentence(text, capitalize, resolve_teencode, &accent_logits)
+}
+
 fn accent_logits(text: &str) -> Option<Vec<f32>> {
     if text.is_empty() || ensure_accent_session().is_none() {
         return None;
