@@ -949,7 +949,7 @@ fn schedule_topic_jump(
         store.clear_topic(&topic.id, cx);
     });
     ChannelList::global(cx).update(cx, |store, cx| {
-        store.apply_topic_read(ChannelId(topic_id), cx);
+        store.apply_topic_read_in(clan, ChannelId(topic_id), Some(channel), cx);
     });
     TopicsStore::global(cx).update(cx, |store, cx| {
         store.begin_inbox_topic_jump_to_origin(

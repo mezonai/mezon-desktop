@@ -445,7 +445,21 @@ impl SendTokenModal {
                                     cx,
                                 )
                             });
-                            card.detach();
+                            let fallback =
+                                mezon_i18n::t(&this.locale, "message.toast.sendFailed").to_string();
+                            cx.spawn(async move |_, cx| {
+                                if let Err(err) = card.await {
+                                    tracing::warn!("send token card dm failed: {err}");
+                                    cx.update(|cx| {
+                                        let message =
+                                            crate::chat::friends_page::dm_open_failure_message(
+                                                &err, fallback, cx,
+                                            );
+                                        crate::chat::friends_page::toast_send_failed(message, cx);
+                                    });
+                                }
+                            })
+                            .detach();
                         }
                         let message =
                             mezon_i18n::t(&this.locale, "token.toast.success.sendSuccess")

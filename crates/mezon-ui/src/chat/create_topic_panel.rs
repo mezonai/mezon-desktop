@@ -17,7 +17,7 @@ use crate::chat::message::{ChannelMessages, ChannelMessagesEvent};
 use crate::components::primitives::{Icon, IconName, h_flex, v_flex};
 use crate::theme::ActiveTheme;
 
-const PANEL_WIDTH: f32 = 510.;
+const PANEL_WIDTH: f32 = 500.;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 struct ComposerTarget {

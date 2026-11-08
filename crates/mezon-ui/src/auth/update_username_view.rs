@@ -82,7 +82,7 @@ impl UpdateUsernameView {
     fn typed_username(&self, cx: &App) -> String {
         self.username_input
             .as_ref()
-            .map(|input| sanitize_username(&input.read(cx).value()))
+            .map(|input| sanitize_username(input.read(cx).value()))
             .unwrap_or_default()
     }
 

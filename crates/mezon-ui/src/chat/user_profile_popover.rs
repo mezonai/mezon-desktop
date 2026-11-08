@@ -13,7 +13,10 @@ use mezon_store::{
 use ui::{Clickable, PopoverMenu, Toggleable};
 
 use crate::app::shell::{FriendRemovalKind, Shell};
-use crate::chat::friends_page::{open_created_dm_if_route_unchanged, toast_send_failed};
+use crate::chat::call_actions::{CallTarget, call_user};
+use crate::chat::friends_page::{
+    dm_open_failure_message, open_created_dm_if_route_unchanged, toast_send_failed,
+};
 use crate::chat::message::{SendTokenModal, ShareContactModal, share_contact_subject};
 use crate::components::primitives::{Avatar, Icon, IconName, Input, InputEvent, InputState};
 use crate::image_cache::LruImageCache;
@@ -644,7 +647,7 @@ impl UserProfilePopover {
                     cx.notify();
                 });
                 cx.update(|cx| {
-                    toast_send_failed(error_message, cx);
+                    toast_send_failed(dm_open_failure_message(&err, error_message, cx), cx);
                 });
             }
         })
@@ -727,6 +730,12 @@ impl Render for UserProfilePopover {
         };
         let mut avatar = Avatar::new()
             .size_px(px(AVATAR_SIZE))
+            .anonymous(match self.context {
+                ProfileContext::Clan(clan_id) => ClanMembersStore::global(cx)
+                    .read(cx)
+                    .is_known_non_member(clan_id, self.user_id),
+                ProfileContext::Direct(_) => false,
+            })
             .image_cache(self.avatar_image_cache.clone());
         if !avatar_proxied.is_empty() {
             avatar = avatar
@@ -1081,6 +1090,33 @@ fn render_banner_actions(
             .size(px(16.))
             .text_color(gpui::white())
             .into_any_element(),
+    ));
+
+    buttons.push(banner_icon_button(
+        "profile-call",
+        IconName::IconPhoneDM,
+        false,
+        true,
+        cx.listener(|this, _: &ClickEvent, _window, cx| {
+            let profile = resolve_user_profile(this.user_id, this.context, cx).unwrap_or_default();
+            let label = if !profile.display_name.is_empty() {
+                profile.display_name
+            } else {
+                profile.username.clone()
+            };
+            let target = CallTarget {
+                user: this.user_id,
+                label: label.into(),
+                avatar: profile.avatar_url.into(),
+                username: profile.username.into(),
+            };
+            let error = SharedString::from(mezon_i18n::t(
+                &this.settings.read(cx).language,
+                "shareContact.card.callError",
+            ));
+            call_user(target, false, error, cx);
+            cx.emit(DismissEvent);
+        }),
     ));
 
     if show_share_contact {
