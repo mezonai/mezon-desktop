@@ -11,12 +11,12 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::router::{Route, Router};
 use gpui::{
-    AnyElement, AnyWindowHandle, App, Bounds, ClipboardEntry, ClipboardItem, Context, DismissEvent,
-    Div, Entity, EventEmitter, Focusable, FontWeight, HighlightStyle, Hsla, Image, ImageFormat,
-    IntoElement, KeyBinding, MouseButton, MouseMoveEvent, PathPromptOptions, Pixels, Rgba,
-    ScrollStrategy, SharedString, Stateful, StyledText, Subscription, Task,
-    UniformListScrollHandle, Window, actions, canvas, deferred, div, img, prelude::*, px,
-    uniform_list,
+    Animation, AnimationExt as _, AnyElement, AnyWindowHandle, App, Bounds, ClipboardEntry,
+    ClipboardItem, Context, DismissEvent, Div, Entity, EventEmitter, Focusable, FontWeight,
+    HighlightStyle, Hsla, Image, ImageFormat, IntoElement, KeyBinding, MouseButton,
+    MouseMoveEvent, PathPromptOptions, Pixels, Rgba, ScrollStrategy, SharedString, Stateful,
+    StyledText, Subscription, Task, UniformListScrollHandle, Window, actions, canvas, deferred,
+    div, ease_out_quint, img, prelude::*, px, uniform_list,
 };
 use mezon_client::transport::QUICK_MENU_TYPE_FLASH;
 use mezon_grammar::client::{MAX_CORRECTION_CHAR_COUNT, MezonGrammarClient};
@@ -74,6 +74,7 @@ const RECORDING_COLOR: Rgba = Rgba {
 const MAX_SUGGESTIONS: usize = 10;
 const SLOW_SEARCH_HINT: Duration = Duration::from_secs(1);
 const GRAMMAR_CORRECTION_DEBOUNCE: Duration = Duration::from_millis(200);
+const GRAMMAR_BAR_ENTER: Duration = Duration::from_millis(160);
 const MAX_EMOJI_CANDIDATES: usize = 20;
 const MENTION_HERE_DISPLAY: &str = "@here";
 const MENTION_HERE_NORM: &str = "@HERE";
@@ -125,49 +126,63 @@ pub fn init(cx: &mut App) {
 pub(crate) fn grammar_correction_bar(
     theme: &Theme,
     text: SharedString,
-    cap_top: bool,
     on_apply: impl Fn(&gpui::ClickEvent, &mut Window, &mut App) + 'static,
     on_dismiss: impl Fn(&gpui::ClickEvent, &mut Window, &mut App) + 'static,
 ) -> impl IntoElement {
-    div()
-        .id("grammar-correction-bar")
-        .flex()
-        .flex_row()
-        .items_center()
-        .justify_between()
-        .w_full()
-        .gap_2()
-        .p_2()
-        .when(cap_top, |bar| bar.rounded_tl_lg().rounded_tr_lg())
-        .bg(theme.tokens.theme_setting_nav)
-        .text_size(px(14.))
-        .child(
-            div()
-                .id("grammar-correction-apply")
-                .flex_1()
-                .min_w_0()
-                .cursor_pointer()
-                .text_color(theme.tokens.text_theme_primary)
-                .child(text)
-                .on_click(on_apply),
-        )
-        .child(
-            div()
-                .id("grammar-correction-close")
-                .flex()
-                .items_center()
-                .justify_center()
-                .flex_none()
-                .size_5()
-                .cursor_pointer()
-                .hover(|style| style.opacity(0.7))
-                .on_click(on_dismiss)
-                .child(
-                    Icon::new(IconName::Close)
-                        .size_4()
-                        .text_color(theme.tokens.text_theme_primary),
-                ),
-        )
+    deferred(
+        div()
+            .id("grammar-correction-bar")
+            .absolute()
+            .bottom_full()
+            .left_0()
+            .right_0()
+            .mb_2()
+            .flex()
+            .flex_row()
+            .items_center()
+            .justify_between()
+            .gap_2()
+            .p_2()
+            .rounded_lg()
+            .border_1()
+            .border_color(theme.tokens.border_primary)
+            .bg(theme.tokens.theme_setting_nav)
+            .shadow_lg()
+            .occlude()
+            .text_size(px(14.))
+            .child(
+                div()
+                    .id("grammar-correction-apply")
+                    .flex_1()
+                    .min_w_0()
+                    .cursor_pointer()
+                    .text_color(theme.tokens.text_theme_primary)
+                    .child(text)
+                    .on_click(on_apply),
+            )
+            .child(
+                div()
+                    .id("grammar-correction-close")
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .flex_none()
+                    .size_5()
+                    .cursor_pointer()
+                    .hover(|style| style.opacity(0.7))
+                    .on_click(on_dismiss)
+                    .child(
+                        Icon::new(IconName::Close)
+                            .size_4()
+                            .text_color(theme.tokens.text_theme_primary),
+                    ),
+            )
+            .with_animation(
+                "grammar-correction-bar-enter",
+                Animation::new(GRAMMAR_BAR_ENTER).with_easing(ease_out_quint()),
+                |bar, delta| bar.opacity(delta),
+            ),
+    )
 }
 
 pub(crate) fn toggle_anonymous_shortcut(in_topic: bool, cx: &mut App) {
@@ -3793,7 +3808,6 @@ impl MentionInput {
         grammar_correction_bar(
             &theme,
             text,
-            true,
             cx.listener(|this, _, window, cx| {
                 this.apply_grammar_correction(window, cx);
             }),
