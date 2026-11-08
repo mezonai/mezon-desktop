@@ -16,6 +16,7 @@ pub mod tokenizer;
 pub mod trie;
 
 pub use client::{KeystrokeEvent, MAX_CORRECTION_CHAR_COUNT, MezonGrammarClient};
+pub use neural::restore_sentence;
 pub use pronoun::{
     SUPPORTED_PRONOUNS, extract_mentioned_pronoun, extract_target_pronoun, generate_dynamic_replies,
     is_unreplyable_or_ack_message, mask_non_pronouns, render_dynamic_template,
