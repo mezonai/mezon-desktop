@@ -3710,7 +3710,9 @@ impl MentionInput {
                 }
                 this._grammar_task = None;
                 this.grammar_suggestion = suggestion.map(SharedString::from);
-                if this.grammar_suggestion.is_none() {
+                if this.grammar_suggestion.is_some() {
+                    this.grammar_correction_open = true;
+                } else {
                     this.grammar_correction_open = false;
                 }
                 cx.notify();
@@ -3813,14 +3815,32 @@ impl MentionInput {
             cx.propagate();
             return;
         }
-        if self.grammar_correction_open {
+        if self.grammar_correction_open || self.grammar_suggestion.is_some() {
             self.apply_grammar_correction(window, cx);
             return;
         }
-        if self.grammar_suggestion.is_some() {
-            self.grammar_correction_open = true;
-            cx.notify();
-            return;
+        if self.settings.read(cx).grammar_correction_enabled {
+            let content = self.input.read(cx).value_shared();
+            let text = content.as_ref().trim();
+            if !text.is_empty() && text.chars().count() <= MAX_CORRECTION_CHAR_COUNT {
+                let (masked_draft, committed_masks) =
+                    mask_committed_for_grammar(content.as_ref(), &self.committed);
+                let client = MezonGrammarClient::shared();
+                let restored = client.restore_sentence(&masked_draft);
+                let unmasked = unmask_committed_for_grammar(&restored, &committed_masks);
+                if unmasked != content.as_ref().trim() && !unmasked.contains('\u{E010}') {
+                    self.clear_grammar_correction(cx);
+                    let end = self.input.read(cx).value_shared().len();
+                    self.retarget_committed(&unmasked);
+                    self.input.update(cx, |input, cx| {
+                        input.replace_range(0..end, &unmasked, window, cx);
+                    });
+                    self.sync_ranges(cx);
+                    self.sync_history_payload(cx);
+                    cx.notify();
+                    return;
+                }
+            }
         }
         cx.propagate();
     }

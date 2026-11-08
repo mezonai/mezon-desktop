@@ -58,6 +58,10 @@ impl MezonGrammarClient {
         Some(self.correct(text))
     }
 
+    pub fn restore_sentence(&self, text: &str) -> String {
+        crate::neural::restore_sentence(text, true, true)
+    }
+
     pub fn correct(&self, text: &str) -> CorrectionResult {
         if text.trim().is_empty() {
             return CorrectionResult {
