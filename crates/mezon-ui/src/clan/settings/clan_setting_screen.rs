@@ -966,7 +966,11 @@ impl Render for ClanSettingScreen {
                                             .border_1()
                                             .border_color(theme.border)
                                             .bg(theme.bg_secondary)
-                                            .child(Icon::new(IconName::CLOSE_20).selected(false)),
+                                            .child(
+                                                Icon::new(IconName::Close)
+                                                    .size(gpui::px(20.))
+                                                    .selected(false),
+                                            ),
                                     )
                                     .child(
                                         div()

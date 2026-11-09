@@ -273,7 +273,9 @@ impl Render for PollDetailModal {
                     .hover(|s| s.bg(theme.tokens.bg_item_hover))
                     .on_click(|_, _, cx| Self::close(cx))
                     .child(
-                        Icon::new(IconName::CLOSE_20).text_color(theme.tokens.text_theme_primary),
+                        Icon::new(IconName::Close)
+                            .size(gpui::px(20.))
+                            .text_color(theme.tokens.text_theme_primary),
                     ),
             );
 

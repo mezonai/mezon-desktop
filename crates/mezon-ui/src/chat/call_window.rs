@@ -398,7 +398,11 @@ impl CallPanelView {
                                 .right_0()
                                 .flex()
                                 .justify_center()
-                                .child(Icon::new(IconName::MIC_OFF_20).text_color(rgb(0xffffff))),
+                                .child(
+                                    Icon::new(IconName::VoiceMicDisabledIcon)
+                                        .size(gpui::px(20.))
+                                        .text_color(rgb(0xffffff)),
+                                ),
                         )
                     },
                 )
@@ -664,7 +668,11 @@ impl CallPanelView {
                     .child(label),
             )
             .when(selected, |el| {
-                el.child(Icon::new(IconName::CHECK_16).text_color(rgb(CALL_GREEN)))
+                el.child(
+                    Icon::new(IconName::Check)
+                        .size(gpui::px(16.))
+                        .text_color(rgb(CALL_GREEN)),
+                )
             })
             .on_click(move |_, _, cx| {
                 let id = id.clone();
@@ -757,7 +765,11 @@ pub fn render_call_mini_bar(theme: &Theme, cx: &App) -> Option<gpui::AnyElement>
                                     .flex_row()
                                     .items_center()
                                     .gap_1()
-                                    .child(Icon::new(IconName::WIFI_16).text_color(rgb(CALL_GREEN)))
+                                    .child(
+                                        Icon::new(IconName::NetworkStatus)
+                                            .size(gpui::px(16.))
+                                            .text_color(rgb(CALL_GREEN)),
+                                    )
                                     .child(
                                         div()
                                             .text_color(rgb(CALL_GREEN))
@@ -792,7 +804,11 @@ pub fn render_call_mini_bar(theme: &Theme, cx: &App) -> Option<gpui::AnyElement>
                             .p_1()
                             .rounded_md()
                             .hover(|s| s.bg(rgba(0x5e5e5e66)))
-                            .child(Icon::new(IconName::CALL_END_20).selected(false))
+                            .child(
+                                Icon::new(IconName::EndCall)
+                                    .size(gpui::px(20.))
+                                    .selected(false),
+                            )
                             .on_click(move |_, _, cx| {
                                 call_hangup.update(cx, |store, cx| store.hangup(cx));
                             }),
@@ -917,7 +933,11 @@ fn video_tile(
                 .font_weight(FontWeight::MEDIUM)
                 .text_color(rgb(0xffffff))
                 .when(!mic_on, |el| {
-                    el.child(Icon::new(IconName::MIC_OFF_16).text_color(rgb(0xffffff)))
+                    el.child(
+                        Icon::new(IconName::VoiceMicDisabledIcon)
+                            .size(gpui::px(16.))
+                            .text_color(rgb(0xffffff)),
+                    )
                 })
                 .child(div().min_w_0().truncate().child(label.to_string())),
         )

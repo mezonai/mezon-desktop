@@ -373,7 +373,11 @@ fn render_answer_row(
                 .items_center()
                 .justify_center()
                 .flex_shrink_0()
-                .child(Icon::new(IconName::CHECK_16).selected(false)),
+                .child(
+                    Icon::new(IconName::Check)
+                        .size(gpui::px(16.))
+                        .selected(false),
+                ),
         );
     }
 
@@ -703,7 +707,11 @@ pub(crate) fn render_poll_card_readonly(
                     .items_center()
                     .justify_center()
                     .flex_shrink_0()
-                    .child(Icon::new(IconName::CHECK_16).text_color(tokens.text_secondary)),
+                    .child(
+                        Icon::new(IconName::Check)
+                            .size(gpui::px(16.))
+                            .text_color(tokens.text_secondary),
+                    ),
             );
         }
 

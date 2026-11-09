@@ -95,7 +95,8 @@ pub fn pagination_button(
             matches!(button, PaginationButton::Previous | PaginationButton::Next),
             |element| {
                 element.child(
-                    Icon::new(IconName::CHEVRON_RIGHT_20)
+                    Icon::new(IconName::ArrowRight)
+                        .size(gpui::px(20.))
                         .text_color(gpui::white())
                         .when(button == PaginationButton::Previous, |icon| {
                             icon.with_transformation(gpui::Transformation::rotate(gpui::radians(

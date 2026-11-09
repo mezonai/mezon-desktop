@@ -242,7 +242,11 @@ impl Render for EditCategoryModal {
                             .on_click(|_, _, cx| {
                                 Shell::global(cx).update(cx, |shell, cx| shell.close_modal(cx));
                             })
-                            .child(Icon::new(IconName::CLOSE_24).selected(false)),
+                            .child(
+                                Icon::new(IconName::Close)
+                                    .size(gpui::px(24.))
+                                    .selected(false),
+                            ),
                     ),
             )
             .child(

@@ -319,7 +319,8 @@ pub fn render_stream_connected_bar(
                                     .items_center()
                                     .gap_1()
                                     .child(
-                                        Icon::new(IconName::WIFI_16)
+                                        Icon::new(IconName::NetworkStatus)
+                                            .size(gpui::px(16.))
                                             .text_color(theme.status_online),
                                     )
                                     .child(
@@ -358,7 +359,11 @@ pub fn render_stream_connected_bar(
                             .cursor_pointer()
                             .opacity(80.)
                             .hover(move |s| s.bg(leave_hover_bg))
-                            .child(Icon::new(IconName::CALL_END_20).text_color(leave_icon_color))
+                            .child(
+                                Icon::new(IconName::EndCall)
+                                    .size(gpui::px(20.))
+                                    .text_color(leave_icon_color),
+                            )
                             .on_click(move |_, _, cx| {
                                 stream_leave.update(cx, |store, cx| store.leave_stream(cx));
                             }),
@@ -406,7 +411,11 @@ fn stream_header(
                 .flex_row()
                 .items_center()
                 .gap_2()
-                .child(Icon::new(IconName::LIVE_20).text_color(stream_icon_color))
+                .child(
+                    Icon::new(IconName::Stream)
+                        .size(gpui::px(20.))
+                        .text_color(stream_icon_color),
+                )
                 .child(
                     div()
                         .text_sm()
@@ -584,7 +593,11 @@ fn render_pre_join(
             .items_center()
             .justify_center()
             .bg(circle_bg)
-            .child(Icon::new(IconName::LIVE_40).text_color(theme.text_primary))
+            .child(
+                Icon::new(IconName::Stream)
+                    .size(gpui::px(40.))
+                    .text_color(theme.text_primary),
+            )
             .into_any_element(),
     };
 
@@ -772,7 +785,9 @@ fn render_members_toggle_button(
     stream: Entity<StreamStore>,
 ) -> AnyElement {
     let stream_toggle = stream;
-    let mut chevron = Icon::new(IconName::CHEVRON_DOWN_24).text_color(gpui::rgb(0xffffff));
+    let mut chevron = Icon::new(IconName::CaretDown)
+        .size(gpui::px(24.))
+        .text_color(gpui::rgb(0xffffff));
     if !show_members {
         chevron = chevron.with_transformation(gpui::Transformation::rotate(gpui::radians(
             std::f32::consts::PI,
@@ -792,7 +807,11 @@ fn render_members_toggle_button(
         .hover(|s| s.bg(gpui::rgba(0x666666ff)))
         .tooltip(Tooltip::text(tooltip))
         .child(chevron)
-        .child(Icon::new(IconName::MEMBERS_24).text_color(gpui::rgb(0xffffff)))
+        .child(
+            Icon::new(IconName::MemberIcon)
+                .size(gpui::px(24.))
+                .text_color(gpui::rgb(0xffffff)),
+        )
         .on_click(move |_, _, cx| {
             stream_toggle.update(cx, |store, cx| store.toggle_members(cx));
         })
@@ -952,7 +971,11 @@ fn render_viewer_count(locale: &str, count: u32, color: Hsla) -> AnyElement {
         .gap_1()
         .text_sm()
         .text_color(color)
-        .child(Icon::new(IconName::EYE_16).text_color(color))
+        .child(
+            Icon::new(IconName::EyeOpen)
+                .size(gpui::px(16.))
+                .text_color(color),
+        )
         .child(text)
         .into_any_element()
 }
@@ -1068,7 +1091,11 @@ fn render_controls_bar(
                 .bg(gpui::rgb(0xda373c))
                 .cursor_pointer()
                 .hover(|s| s.bg(gpui::rgb(0xa12829)))
-                .child(Icon::new(IconName::CALL_END_24).text_color(gpui::rgb(0xffffff)))
+                .child(
+                    Icon::new(IconName::EndCall)
+                        .size(gpui::px(24.))
+                        .text_color(gpui::rgb(0xffffff)),
+                )
                 .on_click(move |_, _, cx| {
                     stream_leave.update(cx, |store, cx| store.leave_stream(cx));
                 }),
@@ -1257,7 +1284,11 @@ impl Render for StreamQualityMenu {
                     .flex()
                     .items_center()
                     .justify_center()
-                    .child(Icon::new(IconName::CHECK_16).text_color(check_color))
+                    .child(
+                        Icon::new(IconName::Check)
+                            .size(gpui::px(16.))
+                            .text_color(check_color),
+                    )
                     .into_any_element()
             } else {
                 div().size(px(16.)).flex_shrink_0().into_any_element()
@@ -1397,7 +1428,11 @@ impl RenderOnce for StreamOutputTrigger {
             .hover(|s| s.bg(gpui::rgba(0xffffff1a)))
             .when(self.open, |el| el.bg(gpui::rgba(0xffffff26)))
             .when(!self.open, |el| el.tooltip(Tooltip::text(self.label)))
-            .child(Icon::new(IconName::SETTINGS_20).text_color(self.icon_color));
+            .child(
+                Icon::new(IconName::CallSetting)
+                    .size(gpui::px(20.))
+                    .text_color(self.icon_color),
+            );
         match self.on_click {
             Some(on_click) => trigger.on_click(on_click),
             None => trigger,

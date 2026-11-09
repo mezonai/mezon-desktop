@@ -378,7 +378,9 @@ impl TransactionHistoryModal {
     fn render_header(&self, theme: &Theme, window: &Window, cx: &mut Context<Self>) -> AnyElement {
         let locale = self.locale.clone();
         let tk = |key: &'static str| mezon_i18n::t(&locale, key).to_string();
-        let reload = Icon::new(IconName::REFRESH_20).text_color(theme.tokens.text_theme_primary);
+        let reload = Icon::new(IconName::ReloadIcon)
+            .size(gpui::px(20.))
+            .text_color(theme.tokens.text_theme_primary);
         let reload = if self.loading && window.is_window_active() {
             reload
                 .with_animation(
@@ -424,7 +426,9 @@ impl TransactionHistoryModal {
                                 linear_color_stop(rgb(HEADER_GRADIENT_TO), 1.),
                             ))
                             .child(
-                                Icon::new(IconName::HISTORY_40).text_color(rgb(HEADER_ICON_COLOR)),
+                                Icon::new(IconName::History)
+                                    .size(gpui::px(40.))
+                                    .text_color(rgb(HEADER_ICON_COLOR)),
                             ),
                     )
                     .child(
@@ -473,7 +477,8 @@ impl TransactionHistoryModal {
                             .hover(|s| s.bg(theme.tokens.bg_item_theme_hover))
                             .on_click(|_: &ClickEvent, _window, cx| Self::close(cx))
                             .child(
-                                Icon::new(IconName::CLOSE_20)
+                                Icon::new(IconName::Close)
+                                    .size(gpui::px(20.))
                                     .text_color(theme.tokens.text_theme_primary),
                             ),
                     ),
@@ -613,7 +618,11 @@ impl TransactionHistoryModal {
                     ),
             );
         } else if self.has_more {
-            content = content.child(Icon::new(IconName::ARROW_DOWN_16).selected(false));
+            content = content.child(
+                Icon::new(IconName::ArrowDown)
+                    .size(gpui::px(16.))
+                    .selected(false),
+            );
         } else if !self.rows.is_empty() {
             content = content.child(
                 mezon_i18n::t(&locale, "transactionHistory.footers.noti")
@@ -932,7 +941,11 @@ fn detail_field(
                         mezon_i18n::t(&locale, "token.historyTransaction.copied").to_string();
                     Shell::global(cx).update(cx, |shell, cx| shell.success(message, cx));
                 })
-                .child(Icon::new(IconName::COPY_16).text_color(theme.tokens.text_theme_primary)),
+                .child(
+                    Icon::new(IconName::CopyIcon)
+                        .size(gpui::px(16.))
+                        .text_color(theme.tokens.text_theme_primary),
+                ),
         );
     }
 
@@ -1046,7 +1059,12 @@ fn render_placeholder(
                 .flex()
                 .items_center()
                 .justify_center()
-                .child(Icon::new(IconName::FILE_40).selected(false).flex_none()),
+                .child(
+                    Icon::new(IconName::FileIcon)
+                        .size(gpui::px(40.))
+                        .selected(false)
+                        .flex_none(),
+                ),
         )
         .child(
             div()

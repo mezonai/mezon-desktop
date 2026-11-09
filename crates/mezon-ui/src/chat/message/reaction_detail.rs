@@ -180,7 +180,11 @@ impl Render for UserReactionPanel {
                     div()
                         .id(("reaction-remove", index))
                         .cursor_pointer()
-                        .child(Icon::new(IconName::CLOSE_16).selected(false))
+                        .child(
+                            Icon::new(IconName::Close)
+                                .size(gpui::px(16.))
+                                .selected(false),
+                        )
                         .on_click(move |_, _, cx| {
                             MessagesStore::global(cx).update(cx, |store, cx| {
                                 store.remove_reaction(

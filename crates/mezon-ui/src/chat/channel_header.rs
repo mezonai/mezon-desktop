@@ -612,7 +612,11 @@ impl ChannelHeader {
             .hover(move |s| s.bg(bg_hover))
             .tooltip(Tooltip::text(tooltip))
             .occlude()
-            .child(Icon::new(IconName::USER_PLUS_20).text_color(icon_color))
+            .child(
+                Icon::new(IconName::AddPerson)
+                    .size(gpui::px(20.))
+                    .text_color(icon_color),
+            )
             .on_click(move |_, window, cx| {
                 AddMembersToGroupModal::open(channel_id, locale.to_string(), window, cx);
             })
@@ -998,7 +1002,11 @@ impl ChannelHeader {
                 .rounded_md()
                 .cursor_pointer()
                 .hover(|s| s.bg(theme.bg_hover))
-                .child(Icon::new(IconName::INBOX_20).selected(false))
+                .child(
+                    Icon::new(IconName::EmptyUnread)
+                        .size(gpui::px(20.))
+                        .selected(false),
+                )
                 .into_any_element();
         };
 
@@ -1752,7 +1760,11 @@ fn render_stream_chat_sidebar_header(
                 .hover(move |s| s.bg(hover))
                 .rounded_md()
                 .p_1()
-                .child(Icon::new(IconName::CLOSE_20).text_color(theme.text_primary))
+                .child(
+                    Icon::new(IconName::Close)
+                        .size(gpui::px(20.))
+                        .text_color(theme.text_primary),
+                )
                 .on_click(move |_, _, cx| {
                     StreamStore::global(cx).update(cx, |store, cx| {
                         if store.show_chat() {
@@ -1811,7 +1823,11 @@ impl RenderOnce for AddFriendsPopoverTrigger {
             .when(self.open, |el| el.bg(bg_hover))
             .hover(move |s| s.bg(bg_hover))
             .tooltip(Tooltip::text(self.tooltip))
-            .child(Icon::new(IconName::USER_PLUS_20).text_color(self.icon_color))
+            .child(
+                Icon::new(IconName::AddPerson)
+                    .size(gpui::px(20.))
+                    .text_color(self.icon_color),
+            )
             .when_some(self.on_click, |el, handler| el.on_click(handler))
     }
 }
@@ -1876,7 +1892,11 @@ impl RenderOnce for ThreadPopoverTrigger {
             .cursor_pointer()
             .hover(move |s| s.bg(bg_hover))
             .occlude()
-            .child(Icon::new(IconName::THREAD_20).text_color(tint));
+            .child(
+                Icon::new(IconName::ThreadEmpty)
+                    .size(gpui::px(20.))
+                    .text_color(tint),
+            );
         if self.open {
             button = button.bg(self.bg_active);
         }
@@ -1953,7 +1973,11 @@ impl RenderOnce for InboxPopoverTrigger {
             .child(
                 div()
                     .relative()
-                    .child(Icon::new(IconName::INBOX_20).text_color(tint))
+                    .child(
+                        Icon::new(IconName::EmptyUnread)
+                            .size(gpui::px(20.))
+                            .text_color(tint),
+                    )
                     .when(self.show_badge, |d| {
                         d.child(
                             div()
@@ -2041,7 +2065,11 @@ impl RenderOnce for PinPopoverTrigger {
             .child(
                 div()
                     .relative()
-                    .child(Icon::new(IconName::PIN_20).text_color(tint))
+                    .child(
+                        Icon::new(IconName::PinList)
+                            .size(gpui::px(20.))
+                            .text_color(tint),
+                    )
                     .when(self.show_badge, |d| {
                         d.child(
                             div()
@@ -2105,7 +2133,11 @@ impl RenderOnce for CanvasPopoverTrigger {
     fn render(self, _window: &mut Window, _cx: &mut App) -> impl IntoElement {
         let mut button = Button::new("hdr-canvas-trigger")
             .with_size(Size::Small)
-            .icon(Icon::new(IconName::CANVAS_20).text_color(self.icon_color));
+            .icon(
+                Icon::new(IconName::CanvasIcon)
+                    .size(gpui::px(20.))
+                    .text_color(self.icon_color),
+            );
         button = if self.open {
             button.with_variant(ButtonVariant::Secondary)
         } else {

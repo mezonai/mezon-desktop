@@ -518,7 +518,11 @@ impl Render for FooterProfilePopup {
                                         cx.emit(DismissEvent);
                                         CustomStatusModal::open(locale, window, cx);
                                     }))
-                                    .child(Icon::new(IconName::EDIT_16).text_color(text_secondary)),
+                                    .child(
+                                        Icon::new(IconName::PenEdit)
+                                            .size(gpui::px(16.))
+                                            .text_color(text_secondary),
+                                    ),
                             )
                             .child(
                                 div()
@@ -539,7 +543,8 @@ impl Render for FooterProfilePopup {
                                         cx.notify();
                                     }))
                                     .child(
-                                        Icon::new(IconName::TRASH_16)
+                                        Icon::new(IconName::TrashIcon)
+                                            .size(gpui::px(16.))
                                             .text_color(gpui::rgb(0xdc2626)),
                                     ),
                             ),
@@ -573,7 +578,11 @@ impl Render for FooterProfilePopup {
             .gap_3()
             .px_2()
             .py(px(6.))
-            .child(Icon::new(IconName::CHECK_16).text_color(text_secondary))
+            .child(
+                Icon::new(IconName::Check)
+                    .size(gpui::px(16.))
+                    .text_color(text_secondary),
+            )
             .child(div().text_sm().text_color(text_primary).child(format!(
                 "{}: {} {CURRENCY_SYMBOL}",
                 tk("userProfile.statusProfile.balance"),
@@ -620,7 +629,11 @@ impl Render for FooterProfilePopup {
                                 .child(tk(status_label_key(self.status))),
                         ),
                 )
-                .child(Icon::new(IconName::CHEVRON_RIGHT_16).text_color(text_secondary)),
+                .child(
+                    Icon::new(IconName::ArrowRight)
+                        .size(gpui::px(16.))
+                        .text_color(text_secondary),
+                ),
         );
         if self.status_menu_open {
             let mut menu = div()
@@ -679,7 +692,8 @@ impl Render for FooterProfilePopup {
                     );
                 if has_duration {
                     row = row.child(
-                        Icon::new(IconName::CHEVRON_RIGHT_16)
+                        Icon::new(IconName::ArrowRight)
+                            .size(gpui::px(16.))
                             .text_color(text_primary)
                             .group_hover(
                                 SharedString::from(format!("footer-status-{option_id}")),

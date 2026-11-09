@@ -92,7 +92,11 @@ pub fn render_topic_view_button(msg: &Message, ctx: &RowCtx) -> AnyElement {
             });
         })
         .child(left)
-        .child(Icon::new(IconName::CHEVRON_RIGHT_16).text_color(theme.tokens.text_theme_primary));
+        .child(
+            Icon::new(IconName::ArrowRight)
+                .size(gpui::px(16.))
+                .text_color(theme.tokens.text_theme_primary),
+        );
 
     div().flex().min_w_0().child(button).into_any_element()
 }

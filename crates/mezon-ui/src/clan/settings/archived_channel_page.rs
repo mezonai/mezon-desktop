@@ -391,7 +391,8 @@ impl ArchivedChannelPage {
                 .hover(|style| style.bg(cx.theme().bg_hover))
                 .child(self.page_size.to_string())
                 .child(
-                    Icon::new(IconName::CHEVRON_DOWN_16)
+                    Icon::new(IconName::CaretDown)
+                        .size(gpui::px(16.))
                         .text_color(cx.theme().text_secondary)
                         .with_transformation(gpui::Transformation::rotate(gpui::radians(
                             chevron_angle,
@@ -471,9 +472,11 @@ impl ArchivedChannelPage {
             .justify_center()
             .py(px(48.0))
             .child(
-                div()
-                    .opacity(0.6)
-                    .child(Icon::new(IconName::CHANNEL_48).text_color(theme.text_primary)),
+                div().opacity(0.6).child(
+                    Icon::new(IconName::Hashtag)
+                        .size(gpui::px(48.))
+                        .text_color(theme.text_primary),
+                ),
             )
             .child(
                 div()
@@ -679,7 +682,11 @@ impl Render for ArchivedChannelPage {
                                 .bottom_0()
                                 .flex()
                                 .items_center()
-                                .child(Icon::new(IconName::SEARCH_20).selected(false)),
+                                .child(
+                                    Icon::new(IconName::Search)
+                                        .size(gpui::px(20.))
+                                        .selected(false),
+                                ),
                         ),
                 )
             })

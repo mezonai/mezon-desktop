@@ -446,7 +446,8 @@ impl ChannelWebhookTab {
                     }),
             )
             .child(
-                Icon::new(IconName::CARET_DOWN_16)
+                Icon::new(IconName::ArrowDownFill)
+                    .size(gpui::px(16.))
                     .flex_shrink_0()
                     .selected(false),
             );
@@ -531,7 +532,8 @@ fn render_channel_label(option: &ChannelOption, theme: &crate::theme::Theme) -> 
         .gap_2()
         .overflow_hidden()
         .child(
-            Icon::new(IconName::CHANNEL_16)
+            Icon::new(IconName::Hashtag)
+                .size(gpui::px(16.))
                 .flex_shrink_0()
                 .selected(false),
         )
@@ -772,7 +774,11 @@ fn render_channel_webhook_item(
                                         });
                                     }
                                 });
-                                pick_btn.child(Icon::new(IconName::IMAGE_ADD_16).selected(false))
+                                pick_btn.child(
+                                    Icon::new(IconName::ImageUploadIcon)
+                                        .size(gpui::px(16.))
+                                        .selected(false),
+                                )
                             })
                         })
                         .when(expanded && avatar_uploading, |el| {
@@ -808,9 +814,13 @@ fn render_channel_webhook_item(
                         ),
                 )
                 .child(if expanded {
-                    Icon::new(IconName::CHEVRON_DOWN_20).selected(false)
+                    Icon::new(IconName::CaretDown)
+                        .size(gpui::px(20.))
+                        .selected(false)
                 } else {
-                    Icon::new(IconName::CHEVRON_RIGHT_20).selected(false)
+                    Icon::new(IconName::ArrowRight)
+                        .size(gpui::px(20.))
+                        .selected(false)
                 }),
         )
         .when(expanded, |card| {

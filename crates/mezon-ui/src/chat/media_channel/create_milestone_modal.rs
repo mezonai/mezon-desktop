@@ -331,7 +331,11 @@ impl Render for CreateMilestoneModal {
                             .on_click(|_, _, cx| {
                                 Shell::global(cx).update(cx, |shell, cx| shell.close_modal(cx));
                             })
-                            .child(Icon::new(IconName::CLOSE_CIRCLE_20).selected(false)),
+                            .child(
+                                Icon::new(IconName::CloseIcon)
+                                    .size(gpui::px(20.))
+                                    .selected(false),
+                            ),
                     ),
             )
             .child(
@@ -498,7 +502,8 @@ fn render_attachments_section(
                 .child(if uploading {
                     Spinner::new().into_any_element()
                 } else {
-                    Icon::new(IconName::PLUS_CIRCLE_40)
+                    Icon::new(IconName::AddCircle)
+                        .size(gpui::px(40.))
                         .selected(false)
                         .into_any_element()
                 })
@@ -602,7 +607,11 @@ fn render_attachment_cell(
                     .items_center()
                     .justify_center()
                     .bg(bg)
-                    .child(Icon::new(IconName::PLAY_32).text_color(muted)),
+                    .child(
+                        Icon::new(IconName::AudioPlay)
+                            .size(gpui::px(32.))
+                            .text_color(muted),
+                    ),
             )
         })
         .when(!uploaded, |el| {
@@ -637,7 +646,11 @@ fn render_attachment_cell(
                         this.remove_attachment(index, cx);
                     }),
                 )
-                .child(Icon::new(IconName::CLOSE_CIRCLE_16).text_color(theme.text_primary)),
+                .child(
+                    Icon::new(IconName::CloseIcon)
+                        .size(gpui::px(16.))
+                        .text_color(theme.text_primary),
+                ),
         )
 }
 

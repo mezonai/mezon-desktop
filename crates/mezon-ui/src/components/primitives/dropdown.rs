@@ -206,7 +206,8 @@ impl RenderOnce for Dropdown {
                     .child(div().min_w_0().flex_1().truncate().child(label)),
             )
             .child(
-                Icon::new(IconName::ARROW_DOWN_16)
+                Icon::new(IconName::ArrowDown)
+                    .size(gpui::px(16.))
                     .flex_shrink_0()
                     .selected(false),
             );
@@ -330,7 +331,8 @@ impl RenderOnce for Dropdown {
                                                 )
                                                 .when(selected, |el| {
                                                     el.child(
-                                                        Icon::new(IconName::CHECK_16)
+                                                        Icon::new(IconName::Check)
+                                                            .size(gpui::px(16.))
                                                             .flex_shrink_0()
                                                             .text_color(theme.brand),
                                                     )

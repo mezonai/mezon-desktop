@@ -240,7 +240,6 @@ fn anonymous_circle(d: Pixels) -> AnyElement {
         .bg(Hsla::from(gpui::rgb(0xffffff)))
         .child(
             Icon::new(IconName::AnonymousAvatar)
-                .motion_enabled(false)
                 .text_color(gpui::black())
                 .size(d * 0.8),
         )
@@ -260,7 +259,6 @@ fn loading_circle(d: Pixels, fill: Hsla, border: Hsla) -> AnyElement {
 
 pub(crate) fn default_user_avatar(size: Pixels, corner_radius: Pixels) -> AnyElement {
     Icon::new(IconName::AvatarUser)
-        .motion_enabled(false)
         .size(size)
         .rounded(corner_radius)
         .into_any_element()

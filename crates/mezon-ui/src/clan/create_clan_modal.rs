@@ -294,7 +294,11 @@ impl CreateClanModal {
             .cursor_pointer()
             .hover(|s| s.border_color(theme.brand))
             .on_click(cx.listener(|this, _, _window, cx| this.go_to_details(None, cx)))
-            .child(Icon::new(IconName::SPARKLES_20).text_color(theme.tokens.text_theme_primary))
+            .child(
+                Icon::new(IconName::Sparkles)
+                    .size(gpui::px(20.))
+                    .text_color(theme.tokens.text_theme_primary),
+            )
             .child(
                 div()
                     .font_weight(gpui::FontWeight::SEMIBOLD)
@@ -429,7 +433,11 @@ impl CreateClanModal {
                 .justify_center()
                 .cursor_pointer()
                 .on_click(cx.listener(|this, _, window, cx| this.pick_logo(window, cx)))
-                .child(Icon::new(IconName::CAMERA_24).selected(false))
+                .child(
+                    Icon::new(IconName::UploadImage)
+                        .size(gpui::px(24.))
+                        .selected(false),
+                )
                 .child(
                     div()
                         .text_size(px(14.))

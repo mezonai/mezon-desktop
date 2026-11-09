@@ -97,7 +97,8 @@ impl RoleSettingPage {
                     .cursor_pointer()
                     .child(
                         div().ml(px(-10.0)).child(
-                            Icon::new(IconName::CHEVRON_LEFT_16)
+                            Icon::new(IconName::ArrowLeft)
+                                .size(gpui::px(16.))
                                 .text_color(theme.tokens.text_theme_primary),
                         ),
                     )
@@ -400,7 +401,8 @@ pub(super) fn role_glyph(
     cx: &App,
 ) -> gpui::AnyElement {
     if icon.is_empty() {
-        Icon::new(IconName::ROLE_20)
+        Icon::new(IconName::RoleIcon)
+            .size(gpui::px(20.))
             .flex_shrink_0()
             .text_color(role_tint(color))
             .into_any_element()
@@ -415,7 +417,8 @@ pub(super) fn role_glyph(
 }
 
 pub(super) fn role_lock_icon() -> Icon {
-    Icon::new(IconName::LOCK_16)
+    Icon::new(IconName::HashtagLock)
+        .size(gpui::px(16.))
         .flex_shrink_0()
         .text_color(rgb(ROLE_LOCK_COLOR))
 }

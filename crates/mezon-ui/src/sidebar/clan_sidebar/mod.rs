@@ -795,7 +795,9 @@ fn render_clan_footer(
                     }
                 })
                 .child(
-                    Icon::new(IconName::DISCOVER_20).text_color(theme.tokens.text_theme_primary),
+                    Icon::new(IconName::CompassIcon)
+                        .size(gpui::px(20.))
+                        .text_color(theme.tokens.text_theme_primary),
                 ),
         )
         .child(

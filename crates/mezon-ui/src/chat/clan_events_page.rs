@@ -233,7 +233,11 @@ impl ClanEventsModal {
                     .flex()
                     .items_center()
                     .gap_2()
-                    .child(Icon::new(IconName::EVENT_24).text_color(status_color))
+                    .child(
+                        Icon::new(IconName::IconEvents)
+                            .size(gpui::px(24.))
+                            .text_color(status_color),
+                    )
                     .child(
                         div()
                             .font_weight(FontWeight::SEMIBOLD)
@@ -280,7 +284,11 @@ impl ClanEventsModal {
                             .rounded_full()
                             .bg(theme.surfaces.secondary)
                             .child(interested.to_string())
-                            .child(Icon::new(IconName::MEMBERS_16).text_color(theme.text_primary)),
+                            .child(
+                                Icon::new(IconName::MemberIcon)
+                                    .size(gpui::px(16.))
+                                    .text_color(theme.text_primary),
+                            ),
                     ),
             );
 
@@ -418,11 +426,13 @@ impl ClanEventsModal {
                                     .min_w_0()
                                     .text_color(theme.text_secondary)
                                     .child(if is_location && !event.is_private {
-                                        Icon::new(IconName::LOCATION_20)
+                                        Icon::new(IconName::Location)
+                                            .size(gpui::px(20.))
                                             .selected(false)
                                             .into_any_element()
                                     } else {
-                                        Icon::new(IconName::SPEAKER_20)
+                                        Icon::new(IconName::LoudVolume)
+                                            .size(gpui::px(20.))
                                             .selected(false)
                                             .into_any_element()
                                     })
@@ -462,7 +472,8 @@ impl ClanEventsModal {
                                                     },
                                                 ))
                                                 .child(
-                                                    Icon::new(IconName::MORE_20)
+                                                    Icon::new(IconName::ThreeDot)
+                                                        .size(gpui::px(20.))
                                                         .selected(false)
                                                         .group_hover("event-three-dot", |style| {
                                                             style.text_color(theme.text_primary)
@@ -929,7 +940,11 @@ impl ClanEventsModal {
                         .flex()
                         .items_center()
                         .gap_3()
-                        .child(Icon::new(IconName::EVENT_24).selected(false))
+                        .child(
+                            Icon::new(IconName::IconEvents)
+                                .size(gpui::px(24.))
+                                .selected(false),
+                        )
                         .child(div().font_weight(FontWeight::SEMIBOLD).child(date)),
                 )
                 .child(
@@ -953,11 +968,13 @@ impl ClanEventsModal {
                         .items_center()
                         .gap_3()
                         .child(if !event.address.is_empty() {
-                            Icon::new(IconName::LOCATION_20)
+                            Icon::new(IconName::Location)
+                                .size(gpui::px(20.))
                                 .selected(false)
                                 .into_any_element()
                         } else {
-                            Icon::new(IconName::SPEAKER_20)
+                            Icon::new(IconName::LoudVolume)
+                                .size(gpui::px(20.))
                                 .selected(false)
                                 .into_any_element()
                         })
@@ -968,7 +985,11 @@ impl ClanEventsModal {
                         .flex()
                         .items_center()
                         .gap_3()
-                        .child(Icon::new(IconName::MEMBERS_20).selected(false))
+                        .child(
+                            Icon::new(IconName::MemberIcon)
+                                .size(gpui::px(20.))
+                                .selected(false),
+                        )
                         .child(if interested_count == 1 {
                             tr("eventCreator.eventDetail.personInterested")
                                 .replace("{{count}}", "1")
@@ -1099,7 +1120,11 @@ impl ClanEventsModal {
                                 this.selected_event_id = None;
                                 cx.notify();
                             }))
-                            .child(Icon::new(IconName::CLOSE_20).text_color(theme.text_primary)),
+                            .child(
+                                Icon::new(IconName::Close)
+                                    .size(gpui::px(20.))
+                                    .text_color(theme.text_primary),
+                            ),
                     ),
             )
             .child(
@@ -1159,9 +1184,14 @@ impl Render for ClanEventsModal {
                             .w(px(82.))
                             .h(px(82.))
                             .text_color(theme.text_muted)
-                            .child(div().absolute().left(px(10.)).top(px(10.)).child(
-                                Icon::new(IconName::EVENT_48).size(px(64.0)).selected(false),
-                            ))
+                            .child(
+                                div().absolute().left(px(10.)).top(px(10.)).child(
+                                    Icon::new(IconName::IconEvents)
+                                        .size(gpui::px(48.))
+                                        .size(px(64.0))
+                                        .selected(false),
+                                ),
+                            )
                             .child(
                                 div()
                                     .absolute()
@@ -1269,7 +1299,11 @@ impl Render for ClanEventsModal {
                             .items_center()
                             .gap_3()
                             .text_size(px(15.))
-                            .child(Icon::new(IconName::EVENT_24).selected(false))
+                            .child(
+                                Icon::new(IconName::IconEvents)
+                                    .size(gpui::px(24.))
+                                    .selected(false),
+                            )
                             .child(div().font_weight(FontWeight::BOLD).child(event_count_label))
                             .child(div().h(px(28.)).w(px(2.)).bg(theme.border))
                             .child(
@@ -1296,7 +1330,8 @@ impl Render for ClanEventsModal {
                             .hover(|style| style.text_color(theme.text_primary))
                             .on_click(cx.listener(|this, _, _, cx| this.close(cx)))
                             .child(
-                                Icon::new(IconName::CLOSE_20)
+                                Icon::new(IconName::Close)
+                                    .size(gpui::px(20.))
                                     .selected(false)
                                     .group_hover("close-events-modal", |style| {
                                         style.text_color(theme.text_primary)
@@ -1513,7 +1548,11 @@ impl Render for ShareEventModal {
                             .cursor_pointer()
                             .p_1()
                             .on_click(cx.listener(|this, _, window, cx| this.dismiss(window, cx)))
-                            .child(Icon::new(IconName::CLOSE_20).selected(false)),
+                            .child(
+                                Icon::new(IconName::Close)
+                                    .size(gpui::px(20.))
+                                    .selected(false),
+                            ),
                     ),
             )
             .child(
@@ -1523,7 +1562,11 @@ impl Render for ShareEventModal {
                     .items_center()
                     .gap_2()
                     .text_color(theme.text_primary)
-                    .child(Icon::new(IconName::SPEAKER_20).selected(false))
+                    .child(
+                        Icon::new(IconName::LoudVolume)
+                            .size(gpui::px(20.))
+                            .selected(false),
+                    )
                     .child(self.channel_name.clone()),
             )
             .child(

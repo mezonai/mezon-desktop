@@ -201,7 +201,11 @@ impl Render for CustomStatusModal {
                         cx.notify();
                     }))
                     .child(div().text_sm().child(selected_label))
-                    .child(Icon::new(IconName::ARROW_DOWN_16).text_color(text_secondary)),
+                    .child(
+                        Icon::new(IconName::ArrowDown)
+                            .size(gpui::px(16.))
+                            .text_color(text_secondary),
+                    ),
             );
         if self.menu_open {
             let mut menu = div()
@@ -246,7 +250,11 @@ impl Render for CustomStatusModal {
                         }))
                         .child(div().text_sm().child(label))
                         .when(is_selected, |d| {
-                            d.child(Icon::new(IconName::CHECK_16).text_color(text_secondary))
+                            d.child(
+                                Icon::new(IconName::Check)
+                                    .size(gpui::px(16.))
+                                    .text_color(text_secondary),
+                            )
                         }),
                 );
             }

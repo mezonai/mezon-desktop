@@ -2064,7 +2064,11 @@ fn render_canvas_chip(title: SharedString) -> AnyElement {
             s.bg(rgb(CANVAS_HOVER_BG))
                 .text_color(rgb(CANVAS_HOVER_TEXT))
         })
-        .child(Icon::new(IconName::CANVAS_16).text_color(rgb(CANVAS_TEXT)))
+        .child(
+            Icon::new(IconName::CanvasIcon)
+                .size(gpui::px(16.))
+                .text_color(rgb(CANVAS_TEXT)),
+        )
         .child(div().min_w_0().child(title))
         .into_any_element()
 }
@@ -2158,7 +2162,11 @@ fn render_social_poster(poster: SocialPoster, cache: Entity<LruImageCache>) -> A
                             b: 0.,
                             a: 0.5,
                         })
-                        .child(Icon::new(IconName::PLAY_20).text_color(gpui::white())),
+                        .child(
+                            Icon::new(IconName::AudioPlay)
+                                .size(gpui::px(20.))
+                                .text_color(gpui::white()),
+                        ),
                 ),
         )
         .into_any_element()

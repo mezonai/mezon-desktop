@@ -146,7 +146,11 @@ impl CategoryTab {
                     .truncate()
                     .child(category_name.to_uppercase()),
             )
-            .child(Icon::new(IconName::CARET_DOWN_16).text_color(theme.tokens.text_theme_message));
+            .child(
+                Icon::new(IconName::ArrowDownFill)
+                    .size(gpui::px(16.))
+                    .text_color(theme.tokens.text_theme_message),
+            );
 
         if !self.moving && has_options {
             trigger = trigger.on_click(cx.listener(|this, _, _, cx| {

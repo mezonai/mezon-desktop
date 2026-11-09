@@ -108,7 +108,8 @@ impl Render for ChannelTyping {
         match self.content(cx) {
             Some(TypingContent::One { name, suffix }) => bar
                 .child(
-                    Icon::new(IconName::TYPING_16)
+                    Icon::new(IconName::TypingIndicator)
+                        .size(gpui::px(16.))
                         .flex_none()
                         .text_color(primary),
                 )

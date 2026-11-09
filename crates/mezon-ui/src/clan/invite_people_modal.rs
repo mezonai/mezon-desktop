@@ -635,7 +635,11 @@ impl Render for InvitePeopleModal {
                             .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
                                 this.close(window, cx)
                             }))
-                            .child(Icon::new(IconName::CLOSE_24).selected(false)),
+                            .child(
+                                Icon::new(IconName::Close)
+                                    .size(gpui::px(24.))
+                                    .selected(false),
+                            ),
                     ),
             )
             .child(

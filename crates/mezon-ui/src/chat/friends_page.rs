@@ -942,7 +942,11 @@ impl FriendsPage {
                             .items_center()
                             .font_weight(gpui::FontWeight::MEDIUM)
                             .text_color(theme.tokens.text_secondary)
-                            .child(Icon::new(IconName::FRIENDS_20).flex_none())
+                            .child(
+                                Icon::new(IconName::IconFriends)
+                                    .size(gpui::px(20.))
+                                    .flex_none(),
+                            )
                             .child(mezon_i18n::t(locale, "friendsPage.friends")),
                     )
                     .child(
@@ -1031,7 +1035,9 @@ impl FriendsPage {
                     .flex()
                     .items_center()
                     .child(
-                        Icon::new(IconName::SEARCH_16).text_color(theme.tokens.text_theme_primary),
+                        Icon::new(IconName::Search)
+                            .size(gpui::px(16.))
+                            .text_color(theme.tokens.text_theme_primary),
                     ),
             );
 
@@ -1358,7 +1364,8 @@ fn render_friend_row(
                 .right(px(-1.))
                 .size(px(10.))
                 .child(
-                    Icon::new(IconName::MOON_16)
+                    Icon::new(IconName::DarkModeIcon)
+                        .size(gpui::px(16.))
                         .with_transformation(gpui::Transformation::rotate(gpui::radians(
                             -std::f32::consts::FRAC_PI_2,
                         )))

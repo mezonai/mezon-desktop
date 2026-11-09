@@ -240,11 +240,11 @@ impl RoleSettingPage {
                 .when(!can_edit, |el| el.opacity(0.5))
                 .bg(parse_role_color(&color).unwrap_or(theme.text_muted))
                 .child(
-                    div()
-                        .absolute()
-                        .top_1()
-                        .right_1()
-                        .child(Icon::new(IconName::EDIT_16).text_color(gpui::rgb(0x000000))),
+                    div().absolute().top_1().right_1().child(
+                        Icon::new(IconName::PenEdit)
+                            .size(gpui::px(16.))
+                            .text_color(gpui::rgb(0x000000)),
+                    ),
                 )
                 .when(is_custom, |el| {
                     el.child(

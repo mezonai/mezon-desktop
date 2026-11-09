@@ -229,6 +229,7 @@ pub enum IconName {
     PhoneOff,
     Pin,
     PinList,
+    PinOff,
     PinRight,
     PlayButton,
     Plus,
@@ -353,11 +354,6 @@ pub enum IconName {
 }
 
 impl IconName {
-    pub fn path_for_size(self, size: u16) -> &'static str {
-        let size = crate::mz_icon::standard_size(f32::from(size));
-        crate::mz_icons::legacy_pair(self.path(), size).map_or(self.path(), |icon| icon.path())
-    }
-
     pub fn path(self) -> &'static str {
         match self {
             Self::AddCircle => "icons/add-circle.svg",
@@ -575,6 +571,7 @@ impl IconName {
             Self::PhoneOff => "icons/phone-off.svg",
             Self::Pin => "icons/pin.svg",
             Self::PinList => "icons/pin-list.svg",
+            Self::PinOff => "icons/pin-off.svg",
             Self::PinRight => "icons/pin-right.svg",
             Self::PlayButton => "icons/play-button.svg",
             Self::Plus => "icons/plus.svg",
@@ -700,27 +697,9 @@ impl IconName {
     }
 }
 
-pub enum IconSource {
-    Named(IconName),
-    Sized(crate::MzIcon),
-}
-
-impl From<IconName> for IconSource {
-    fn from(name: IconName) -> Self {
-        Self::Named(name)
-    }
-}
-
-impl From<crate::MzIcon> for IconSource {
-    fn from(icon: crate::MzIcon) -> Self {
-        Self::Sized(icon)
-    }
-}
-
 pub struct Icon {
     pub(crate) svg: Svg,
     path: &'static str,
-    legacy: Option<&'static str>,
     motion: Option<MotionSpec>,
     id: ElementId,
     motion_enabled: bool,
@@ -736,18 +715,13 @@ impl Icon {
     }
 
     #[track_caller]
-    pub fn new(source: impl Into<IconSource>) -> Self {
-        let name = match source.into() {
-            IconSource::Named(name) => name,
-            IconSource::Sized(icon) => return Self::from_mz(icon),
-        };
+    pub fn new(name: IconName) -> Self {
         let motion = MotionSpec::for_path(name.path())
             .filter(|spec| spec.has_hover_motion())
             .copied();
         Self {
             svg: svg().path(name.path()).size(px(16.)).flex_none(),
             path: name.path(),
-            legacy: Some(name.path()),
             motion,
             id: ElementId::CodeLocation(*std::panic::Location::caller()),
             motion_enabled: true,
@@ -758,23 +732,15 @@ impl Icon {
         }
     }
 
-    #[track_caller]
-    pub(crate) fn from_mz(icon: crate::MzIcon) -> Self {
-        Self {
-            svg: svg()
-                .path(icon.path())
-                .size(px(f32::from(icon.size)))
-                .flex_none(),
-            path: icon.path(),
-            legacy: None,
-            motion: MotionSpec::for_mz(icon),
-            id: ElementId::CodeLocation(*std::panic::Location::caller()),
-            motion_enabled: true,
-            explicit_transformation: false,
-            base_transformation: Transformation::default(),
-            selected: false,
-            preserve_color: false,
-        }
+    pub fn selected(mut self, selected: bool) -> Self {
+        self.selected = selected;
+        self
+    }
+
+    pub fn color(mut self, color: impl Into<gpui::Hsla>) -> Self {
+        self.svg.style().text.color = Some(color.into());
+        self.preserve_color = true;
+        self
     }
 
     pub fn motion_enabled(mut self, enabled: bool) -> Self {
@@ -801,7 +767,7 @@ impl Icon {
         {
             return color;
         }
-        if self.path.starts_with("icons/mz/")
+        if MotionSpec::for_path(self.path).is_some()
             && let Some(theme) = mezon_theme::try_theme(cx)
         {
             if self.selected {
@@ -876,25 +842,6 @@ impl Element for Icon {
         window: &mut Window,
         cx: &mut App,
     ) -> (LayoutId, Self::RequestLayoutState) {
-        if let Some(legacy) = self.legacy {
-            let requested = match self.svg.style().size.width {
-                Some(gpui::Length::Definite(gpui::DefiniteLength::Absolute(length))) => {
-                    f32::from(length.to_pixels(window.rem_size()))
-                }
-                _ => 16.,
-            };
-            let size = crate::mz_icon::standard_size(requested);
-            if let Some(icon) = crate::mz_icons::legacy_pair(legacy, size) {
-                self.path = icon.path();
-                self.motion = MotionSpec::for_mz(icon);
-                let previous = std::mem::replace(&mut self.svg, svg());
-                self.svg = previous.path(icon.path()).size(px(if requested > 48. {
-                    requested
-                } else {
-                    f32::from(size)
-                }));
-            }
-        }
         self.svg.request_layout(global_id, inspector_id, window, cx)
     }
 
@@ -1009,21 +956,12 @@ mod tests {
     use gpui::{Context, MouseButton, Render, TestApp, div, point};
 
     #[test]
-    fn icon_name_resolves_size_specific_assets() {
-        assert_eq!(IconName::BELL_20.size, 20);
-        let mut paired = Icon::new(IconName::BELL_20);
-        assert_eq!(paired.path, "icons/mz/20/bell.svg");
-        assert_eq!(paired.svg.style().size.width, Some(px(20.).into()));
-        assert!(paired.legacy.is_none());
-        for size in [16, 20, 24, 32, 40, 48] {
-            assert_eq!(
-                IconName::Bell.path_for_size(size),
-                format!("icons/mz/{size}/bell.svg")
-            );
+    fn one_asset_supports_different_display_sizes() {
+        for size in [12., 18., 20., 32., 48., 64.] {
+            let mut icon = Icon::new(IconName::Bell).size(px(size));
+            assert_eq!(icon.path, "icons/bell.svg");
+            assert_eq!(icon.svg.style().size.width, Some(px(size).into()));
         }
-        assert_eq!(IconName::Bell.path_for_size(18), "icons/mz/20/bell.svg");
-        assert_eq!(IconName::Bell.path_for_size(70), "icons/mz/48/bell.svg");
-        assert_eq!(IconName::Apple.path_for_size(20), IconName::Apple.path());
     }
 
     #[test]
@@ -1047,7 +985,7 @@ mod tests {
     }
 
     #[test]
-    fn typed_icons_follow_runtime_theme_and_preserve_surface_foregrounds() {
+    fn icons_follow_runtime_theme_and_preserve_surface_foregrounds() {
         let mut app = TestApp::new();
         let mut window = app.open_window(|_, _| Fixture {
             clicks: 0,
@@ -1062,18 +1000,18 @@ mod tests {
                 let selected = theme.tokens.icon_selected();
                 mezon_theme::set_theme(theme, cx);
                 assert_eq!(
-                    crate::mz_icon(crate::mz::BELL_20).resolved_base_color(window, cx),
+                    Icon::new(IconName::Bell).resolved_base_color(window, cx),
                     normal.into()
                 );
                 assert_eq!(
-                    crate::mz_icon(crate::mz::BELL_20)
+                    Icon::new(IconName::Bell)
                         .selected(true)
                         .resolved_base_color(window, cx),
                     selected.into()
                 );
                 let foreground = gpui::rgb(0xff0000);
                 assert_eq!(
-                    crate::mz_icon(crate::mz::BELL_20)
+                    Icon::new(IconName::Bell)
                         .color(foreground)
                         .resolved_base_color(window, cx),
                     foreground.into()

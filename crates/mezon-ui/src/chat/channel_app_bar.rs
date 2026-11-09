@@ -64,7 +64,8 @@ pub fn render_channel_app_bar(
                     );
                 })
                 .child(
-                    Icon::new(IconName::GAMEPAD_24)
+                    Icon::new(IconName::GamingConsoleIcon)
+                        .size(gpui::px(24.))
                         .text_color(icon_color)
                         .group_hover("channel-app-launch", |s| s.text_color(icon_hover_color)),
                 )
@@ -97,7 +98,8 @@ pub fn render_channel_app_bar(
                 .bg(theme.tokens.bg_active_member_channel)
                 .text_color(theme.tokens.text_theme_primary)
                 .child(
-                    Icon::new(IconName::GUIDE_24)
+                    Icon::new(IconName::AppHelpIcon)
+                        .size(gpui::px(24.))
                         .text_color(icon_color)
                         .group_hover("channel-app-help", |s| s.text_color(icon_hover_color)),
                 )

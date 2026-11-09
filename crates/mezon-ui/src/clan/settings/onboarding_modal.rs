@@ -130,7 +130,11 @@ pub(super) fn setup_modal(
                         .text_color(theme.text_secondary)
                         .cursor_pointer()
                         .hover(|style| style.bg(theme.bg_hover).text_color(theme.text_primary))
-                        .child(Icon::new(IconName::CLOSE_CIRCLE_20).selected(false))
+                        .child(
+                            Icon::new(IconName::CloseIcon)
+                                .size(gpui::px(20.))
+                                .selected(false),
+                        )
                         .on_click(on_close),
                 ),
         )
@@ -172,7 +176,11 @@ pub(super) fn editor_modal(
                             .rounded_full()
                             .cursor_pointer()
                             .hover(|style| style.bg(theme.bg_hover))
-                            .child(Icon::new(IconName::CLOSE_CIRCLE_20).selected(false))
+                            .child(
+                                Icon::new(IconName::CloseIcon)
+                                    .size(gpui::px(20.))
+                                    .selected(false),
+                            )
                             .on_click(on_close),
                     ),
                 )

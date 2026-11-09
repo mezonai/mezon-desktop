@@ -533,7 +533,9 @@ impl Render for ClanWebhookTab {
                                                 }
                                             });
                                             pick_btn.child(
-                                                Icon::new(IconName::IMAGE_ADD_16).selected(false),
+                                                Icon::new(IconName::ImageUploadIcon)
+                                                    .size(gpui::px(16.))
+                                                    .selected(false),
                                             )
                                         })
                                     })
@@ -566,7 +568,11 @@ impl Render for ClanWebhookTab {
                                         h_flex()
                                             .gap_1()
                                             .items_center()
-                                            .child(Icon::new(IconName::CLOCK_16).selected(false))
+                                            .child(
+                                                Icon::new(IconName::ClockIcon)
+                                                    .size(gpui::px(16.))
+                                                    .selected(false),
+                                            )
                                             .child(
                                                 div()
                                                     .text_xs()
@@ -577,9 +583,13 @@ impl Render for ClanWebhookTab {
                             )
                             .when(can_manage, |row| {
                                 row.child(if expanded {
-                                    Icon::new(IconName::CHEVRON_DOWN_20).selected(false)
+                                    Icon::new(IconName::CaretDown)
+                                        .size(gpui::px(20.))
+                                        .selected(false)
                                 } else {
-                                    Icon::new(IconName::CHEVRON_RIGHT_20).selected(false)
+                                    Icon::new(IconName::ArrowRight)
+                                        .size(gpui::px(20.))
+                                        .selected(false)
                                 })
                             })
                     })

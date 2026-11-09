@@ -373,7 +373,8 @@ impl Render for SoundPanel {
                         .border_color(theme.tokens.border_primary)
                         .opacity(0.5)
                         .child(
-                            Icon::new(IconName::SPEAKER_32)
+                            Icon::new(IconName::LoudVolume)
+                                .size(gpui::px(32.))
                                 .text_color(theme.tokens.text_theme_primary),
                         )
                         .child(
@@ -589,7 +590,11 @@ fn render_sound_cell(
                 .items_center()
                 .justify_center()
                 .cursor_pointer()
-                .child(Icon::new(IconName::SEND_20).text_color(theme.tokens.text_theme_primary))
+                .child(
+                    Icon::new(IconName::ResendMessageRightClick)
+                        .size(gpui::px(20.))
+                        .text_color(theme.tokens.text_theme_primary),
+                )
                 .on_click(move |_, _, cx| {
                     let url = send_url.to_string();
                     let filename = send_name.to_string();

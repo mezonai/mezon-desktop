@@ -5,8 +5,8 @@ use gpui::{
     App, AvailableSpace, BorderStyle, Bounds, ContentMask, Corners, CursorStyle, DispatchPhase,
     Edges, Element, ElementId, FontWeight, GlobalElementId, Hitbox, HitboxBehavior, Hsla,
     InspectorElementId, IntoElement, LayoutId, MouseButton, MouseDownEvent, MouseMoveEvent,
-    MouseUpEvent, Pixels, Point, SharedString, Style, TextAlign, TransformationMatrix, Window,
-    fill, point, px, quad, size, transparent_black,
+    MouseUpEvent, Pixels, Point, SharedString, Style, TextAlign, Window, fill, point, px, quad,
+    size, transparent_black,
 };
 
 use crate::components::primitives::IconName;
@@ -14,7 +14,7 @@ use crate::components::primitives::IconName;
 const ROW_VERTICAL_PADDING: Pixels = px(8.);
 const BG_HORIZONTAL_INSET: Pixels = px(8.);
 const ICON_LEFT_INSET: Pixels = px(16.);
-const ICON_SIZE: Pixels = px(16.);
+const ICON_SIZE: Pixels = px(20.);
 const NAME_LEFT_INSET: Pixels = px(40.);
 const NAME_RIGHT_RESERVE: Pixels = px(24.);
 const GEAR_SIZE: Pixels = px(20.);
@@ -72,6 +72,8 @@ pub struct ChannelRowTrailingAction {
 struct ChannelRowElementState {
     hovered: Rc<Cell<bool>>,
     mouse_down: Rc<Cell<bool>>,
+    icon_motion: mezon_widgets::IconMotion,
+    trailing_motion: mezon_widgets::IconMotion,
 }
 
 pub struct ChannelRowElement {
@@ -284,7 +286,7 @@ impl Element for ChannelRowElement {
         window.with_element_state::<ChannelRowElementState, _>(
             global_id.unwrap(),
             |state, window| {
-                let state = state.unwrap_or_default();
+                let mut state = state.unwrap_or_default();
 
                 let hovered = hitbox.is_hovered(window);
                 state.hovered.set(hovered);
@@ -387,12 +389,12 @@ impl Element for ChannelRowElement {
                         origin: point(left + ICON_LEFT_INSET, top + (row_height - ICON_SIZE) / 2.),
                         size: size(ICON_SIZE, ICON_SIZE),
                     };
-                    let _ = window.paint_svg(
+                    state.icon_motion.paint(
+                        self.icon,
                         icon_bounds,
-                        self.icon.path().into(),
-                        None,
-                        TransformationMatrix::default(),
                         icon_color,
+                        hovered && !cx.has_active_drag(),
+                        window,
                         cx,
                     );
                 }
@@ -532,14 +534,16 @@ impl Element for ChannelRowElement {
                 {
                     let gear_bounds = gear_bounds(bounds);
                     let gear_color = action.hover_color;
-                    let _ = window.paint_svg(
+                    state.trailing_motion.paint(
+                        action.icon,
                         gear_bounds,
-                        action.icon.path().into(),
-                        None,
-                        TransformationMatrix::default(),
                         gear_color,
+                        gear_bounds.contains(&window.mouse_position()) && !cx.has_active_drag(),
+                        window,
                         cx,
                     );
+                } else {
+                    state.trailing_motion = Default::default();
                 }
 
                 if hovered {
@@ -633,5 +637,86 @@ impl IntoElement for ChannelRowElement {
 
     fn into_element(self) -> Self::Element {
         self
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use gpui::{Context, Render, TestApp, div, prelude::*};
+
+    #[derive(Default)]
+    struct Fixture {
+        clicks: usize,
+        right_clicks: usize,
+        gear_clicks: usize,
+    }
+
+    impl Render for Fixture {
+        fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+            let click = cx.entity();
+            let context = click.clone();
+            let gear = click.clone();
+            div().w(px(240.)).h(px(80.)).child(
+                ChannelRowElement::new("channel-row", IconName::Hashtag, "general".into())
+                    .trailing_action(Some(ChannelRowTrailingAction {
+                        icon: IconName::Settings,
+                        hover_color: gpui::white(),
+                        on_click: Rc::new(move |_, cx| {
+                            gear.update(cx, |this, cx| {
+                                this.gear_clicks += 1;
+                                cx.notify();
+                            });
+                        }),
+                    }))
+                    .on_click(move |_, cx| {
+                        click.update(cx, |this, cx| {
+                            this.clicks += 1;
+                            cx.notify();
+                        });
+                    })
+                    .on_right_click(move |_, _, cx| {
+                        context.update(cx, |this, cx| {
+                            this.right_clicks += 1;
+                            cx.notify();
+                        });
+                    }),
+            )
+        }
+    }
+
+    #[test]
+    fn animated_row_preserves_body_clicks_context_menu_and_hitbox() {
+        let mut app = TestApp::new();
+        let mut window = app.open_window(|_, _| Fixture::default());
+        window.draw();
+        window.simulate_mouse_move(point(px(100.), px(70.)));
+        window.draw();
+        window.simulate_mouse_move(point(px(100.), px(12.)));
+        window.draw();
+        window.simulate_click(point(px(100.), px(12.)), MouseButton::Left);
+        window.simulate_click(point(px(100.), px(12.)), MouseButton::Right);
+        assert_eq!(
+            window.read(|view, _| (view.clicks, view.right_clicks)),
+            (1, 1)
+        );
+        window.simulate_click(point(px(100.), px(70.)), MouseButton::Left);
+        assert_eq!(window.read(|view, _| view.clicks), 1);
+        window.simulate_mouse_move(point(px(218.), px(12.)));
+        window.draw();
+        window.simulate_click(point(px(218.), px(12.)), MouseButton::Left);
+        assert_eq!(
+            window.read(|view, _| (view.clicks, view.gear_clicks)),
+            (1, 1)
+        );
+        app.update(|cx| {
+            cx.set_global(mezon_widgets::IconMotionPreferences {
+                reduced_motion: true,
+            });
+        });
+        window.simulate_mouse_move(point(px(100.), px(12.)));
+        window.draw();
+        window.simulate_click(point(px(100.), px(12.)), MouseButton::Left);
+        assert_eq!(window.read(|view, _| view.clicks), 2);
     }
 }

@@ -509,7 +509,11 @@ fn render_header(
                 .flex_shrink_0()
                 .border_r_1()
                 .border_color(tokens.border_theme_primary)
-                .child(Icon::new(IconName::FILE_20).text_color(tokens.bg_icon_theme))
+                .child(
+                    Icon::new(IconName::FileIcon)
+                        .size(gpui::px(20.))
+                        .text_color(tokens.bg_icon_theme),
+                )
                 .child(
                     div()
                         .text_base()
@@ -548,7 +552,9 @@ fn render_header(
                         .items_center()
                         .pl_1()
                         .child(
-                            Icon::new(IconName::SEARCH_16).text_color(tokens.text_theme_primary),
+                            Icon::new(IconName::Search)
+                                .size(gpui::px(16.))
+                                .text_color(tokens.text_theme_primary),
                         ),
                 ),
         )
@@ -556,7 +562,11 @@ fn render_header(
             Button::new("files-close")
                 .ghost()
                 .with_size(Size::Small)
-                .icon(Icon::new(IconName::CLOSE_16).text_color(tokens.text_theme_primary))
+                .icon(
+                    Icon::new(IconName::Close)
+                        .size(gpui::px(16.))
+                        .text_color(tokens.text_theme_primary),
+                )
                 .on_click(cx.listener(|_, _: &ClickEvent, _window, cx| {
                     cx.emit(DismissEvent);
                 })),
@@ -687,7 +697,11 @@ fn render_empty_body(locale: &str, theme: &Theme) -> impl IntoElement {
                 .p(px(22.))
                 .rounded_full()
                 .bg(tokens.bg_item_theme_hover)
-                .child(Icon::new(IconName::FILE_40).text_color(tokens.text_theme_primary))
+                .child(
+                    Icon::new(IconName::FileIcon)
+                        .size(gpui::px(40.))
+                        .text_color(tokens.text_theme_primary),
+                )
                 .child(
                     svg()
                         .path(IconName::EmptyUnreadStyle.path())
@@ -827,7 +841,8 @@ fn file_row(
                     .items_center()
                     .justify_center()
                     .child(
-                        Icon::new(IconName::FILE_40)
+                        Icon::new(IconName::FileIcon)
+                            .size(gpui::px(40.))
                             .text_color(tokens.text_secondary)
                             .flex_none(),
                     ),
@@ -969,7 +984,9 @@ fn file_row(
                             );
                         })
                         .child(
-                            Icon::new(IconName::DOWNLOAD_16).text_color(tokens.text_theme_primary),
+                            Icon::new(IconName::Download)
+                                .size(gpui::px(16.))
+                                .text_color(tokens.text_theme_primary),
                         ),
                 ),
         )
@@ -998,7 +1015,8 @@ fn file_audio_thumb(
         .items_center()
         .justify_center()
         .child(
-            Icon::new(IconName::FILE_40)
+            Icon::new(IconName::FileIcon)
+                .size(gpui::px(40.))
                 .text_color(icon_color)
                 .flex_none(),
         )

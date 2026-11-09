@@ -1103,7 +1103,11 @@ impl LoginView {
                             .rounded_full()
                             .bg(white())
                             .shadow_md()
-                            .child(Icon::new(IconName::REFRESH_24).text_color(rgb(0x155eef))),
+                            .child(
+                                Icon::new(IconName::ReloadIcon)
+                                    .size(gpui::px(24.))
+                                    .text_color(rgb(0x155eef)),
+                            ),
                     ),
             );
         }
@@ -1223,7 +1227,11 @@ impl Render for LoginView {
                         .justify_center()
                         .when(checked, |el| el.bg(blue))
                         .when(checked, |el| {
-                            el.child(Icon::new(IconName::CHECK_16).text_color(white()))
+                            el.child(
+                                Icon::new(IconName::Check)
+                                    .size(gpui::px(16.))
+                                    .text_color(white()),
+                            )
                         }),
                 )
                 .child(

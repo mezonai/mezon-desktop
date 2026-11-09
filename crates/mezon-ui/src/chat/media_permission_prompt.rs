@@ -146,7 +146,11 @@ fn close_button(store: &Entity<MediaPermissionStore>, theme: &Theme) -> AnyEleme
         .rounded_full()
         .cursor_pointer()
         .hover(move |s| s.bg(hover))
-        .child(Icon::new(IconName::CLOSE_16).selected(false))
+        .child(
+            Icon::new(IconName::Close)
+                .size(gpui::px(16.))
+                .selected(false),
+        )
         .on_click(move |_, _, cx| store.update(cx, |store, cx| store.dismiss(cx)))
         .into_any_element()
 }
@@ -464,7 +468,11 @@ fn windows_title_bar(theme: &Theme) -> gpui::Div {
         .bg(theme.bg_secondary)
         .child(div().w(px(7.)).h(px(1.)).bg(glyph))
         .child(div().size(px(7.)).border_1().border_color(glyph))
-        .child(Icon::new(IconName::CLOSE_16).text_color(glyph))
+        .child(
+            Icon::new(IconName::Close)
+                .size(gpui::px(16.))
+                .text_color(glyph),
+        )
 }
 
 fn settings_pane_header(theme: &Theme, device: MediaDevice, locale: &str) -> gpui::Div {

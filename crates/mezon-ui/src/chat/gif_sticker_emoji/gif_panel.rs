@@ -220,7 +220,9 @@ impl Render for GifPanel {
                 .pb_2()
                 .cursor_pointer()
                 .child(
-                    Icon::new(IconName::ARROW_LEFT_20).text_color(theme.tokens.text_theme_primary),
+                    Icon::new(IconName::BackToCategoriesGif)
+                        .size(gpui::px(20.))
+                        .text_color(theme.tokens.text_theme_primary),
                 )
                 .child(
                     div()
@@ -424,7 +426,11 @@ fn render_category_tile(theme: &Theme, cell: &CatCell, entity: &Entity<GifPanel>
         .justify_center()
         .gap_2();
     if matches!(cell, CatCell::Trending { .. }) {
-        label_row = label_row.child(Icon::new(IconName::TRENDING_20).text_color(gpui::white()));
+        label_row = label_row.child(
+            Icon::new(IconName::TrendingGifs)
+                .size(gpui::px(20.))
+                .text_color(gpui::white()),
+        );
     }
     tile = tile.child(
         label_row.child(

@@ -5,8 +5,7 @@ use std::time::Duration;
 
 use gpui::{
     Anchor, AnyElement, App, ClickEvent, CursorStyle, Entity, FontWeight, Hsla, MouseButton,
-    MouseDownEvent, ObjectFit, SharedString, Transformation, Window, div, img, prelude::*, px,
-    radians, rems, rgba,
+    MouseDownEvent, ObjectFit, SharedString, Window, div, img, prelude::*, px, rems, rgba,
 };
 use mezon_store::{
     AccountStore, AlbumLayout, AppConfig, AttachmentSeedInput, BadgeService, ChannelId,
@@ -484,7 +483,8 @@ pub fn render_head(msg: &Message, ctx: &RowCtx) -> AnyElement {
     };
     if shows_anonymous_hat(msg, ctx.app) {
         name = name.flex().flex_row().items_center().child(
-            Icon::new(IconName::ANONYMOUS_16)
+            Icon::new(IconName::AnonymousAvatar)
+                .size(gpui::px(16.))
                 .ml(px(4.))
                 .flex_none()
                 .text_color(theme.tokens.text_theme_primary),
@@ -573,7 +573,11 @@ pub fn render_reply(msg: &Message, reference: &MessageReference, ctx: &RowCtx) -
                     .justify_center()
                     .rounded_full()
                     .bg(theme.tokens.bg_active_member_channel)
-                    .child(Icon::new(IconName::REPLY_16).selected(false)),
+                    .child(
+                        Icon::new(IconName::IconReplyMessDeletedWeb)
+                            .size(gpui::px(16.))
+                            .selected(false),
+                    ),
             )
             .child(
                 div()
@@ -665,7 +669,9 @@ pub fn render_reply(msg: &Message, reference: &MessageReference, ctx: &RowCtx) -
                         .child(mezon_i18n::t(ctx.locale, "chat.clickToSeeAttachment")),
                 )
                 .child(
-                    Icon::new(IconName::FILE_IMAGE_16).text_color(theme.tokens.text_theme_primary),
+                    Icon::new(IconName::ImageThumbnail)
+                        .size(gpui::px(16.))
+                        .text_color(theme.tokens.text_theme_primary),
                 )
                 .into_any_element()
         } else if reference.is_poll {
@@ -1007,7 +1013,11 @@ fn render_private_source_placeholder(ctx: &RowCtx) -> AnyElement {
                 .h(px(160.))
                 .rounded_md()
                 .bg(theme.tokens.bg_secondary)
-                .child(Icon::new(IconName::LOCK_24).selected(false))
+                .child(
+                    Icon::new(IconName::HashtagLock)
+                        .size(gpui::px(24.))
+                        .selected(false),
+                )
                 .child(
                     div()
                         .px_3()
@@ -1093,7 +1103,9 @@ fn attachment_failed_overlay(
     box_height: f32,
 ) -> impl IntoElement {
     let fits_label = box_width >= SENDING_LABEL_MIN_WIDTH && box_height >= SENDING_LABEL_MIN_HEIGHT;
-    let icon = Icon::new(IconName::WARNING_16).text_color(theme.danger_text);
+    let icon = Icon::new(IconName::TriangleAlert)
+        .size(gpui::px(16.))
+        .text_color(theme.danger_text);
     let badge = if fits_label {
         div()
             .flex()
@@ -1532,7 +1544,11 @@ fn render_photo(
                         .items_center()
                         .justify_center()
                         .bg(fallback_bg)
-                        .child(Icon::new(IconName::FILE_IMAGE_32).text_color(fallback_fg))
+                        .child(
+                            Icon::new(IconName::ImageThumbnail)
+                                .size(gpui::px(32.))
+                                .text_color(fallback_fg),
+                        )
                         .into_any_element()
                 }),
         );
@@ -1657,7 +1673,11 @@ fn render_photo(
                     .items_center()
                     .justify_center()
                     .bg(fallback_bg)
-                    .child(Icon::new(IconName::FILE_IMAGE_32).text_color(fallback_fg))
+                    .child(
+                        Icon::new(IconName::ImageThumbnail)
+                            .size(gpui::px(32.))
+                            .text_color(fallback_fg),
+                    )
                     .into_any_element()
             }),
     );
@@ -1789,7 +1809,11 @@ fn render_video_poster(
                     b: 0.,
                     a: 0.5,
                 })
-                .child(Icon::new(IconName::PLAY_20).text_color(gpui::white())),
+                .child(
+                    Icon::new(IconName::AudioPlay)
+                        .size(gpui::px(20.))
+                        .text_color(gpui::white()),
+                ),
         );
     container
         .cursor_pointer()
@@ -1941,7 +1965,11 @@ fn render_file_box(
                     )
                 })
                 .when(failed, |d| {
-                    d.child(Icon::new(IconName::WARNING_32).text_color(theme.danger_text))
+                    d.child(
+                        Icon::new(IconName::TriangleAlert)
+                            .size(gpui::px(32.))
+                            .text_color(theme.danger_text),
+                    )
                 }),
         )
         .child(
@@ -2117,7 +2145,11 @@ fn add_reaction_button(message_id: MessageId, ctx: &RowCtx) -> AnyElement {
             d.cursor_pointer()
                 .bg(bg)
                 .hover(move |s| s.bg(bg_hover))
-                .child(Icon::new(IconName::EMOJI_20).text_color(icon_color))
+                .child(
+                    Icon::new(IconName::Smile)
+                        .size(gpui::px(20.))
+                        .text_color(icon_color),
+                )
                 .on_click(move |_, window, cx| {
                     let position = window.mouse_position();
                     let _ = host.update(cx, |this, cx| {
@@ -2281,18 +2313,16 @@ pub fn hover_actions_visible(msg: &Message, ctx: &RowCtx) -> bool {
 pub fn render_hover_actions(msg: &Message, is_different_day: bool, ctx: &RowCtx) -> AnyElement {
     let theme = ctx.theme;
     let bg_hover = theme.bg_hover;
-    let action = move |id: &'static str, icon: IconName, size: f32| {
-        let mut svg_icon = Icon::new(icon)
-            .size(px(size))
-            .text_color(theme.text_secondary);
-        if matches!(icon, IconName::Reply) {
-            // Mirrors React's `rotate-180` on the toolbar's reply icon (the same
-            // asset is used un-rotated for the "···" menu's reply item).
-            svg_icon =
-                svg_icon.with_transformation(Transformation::rotate(radians(std::f32::consts::PI)));
-        }
+    let action = move |id: &'static str, icon: IconName| {
+        let svg_icon = Icon::new(icon)
+            .size(px(20.))
+            .color(theme.tokens.icon_normal())
+            .group_hover("message-hover-action", |style| {
+                style.text_color(theme.tokens.icon_selected())
+            });
         div()
             .id(id)
+            .group("message-hover-action")
             .p_1()
             .rounded_md()
             .cursor_pointer()
@@ -2416,7 +2446,7 @@ pub fn render_hover_actions(msg: &Message, is_different_day: bool, ctx: &RowCtx)
         .when(show_topic, |d| {
             let message_id = msg.id;
             d.child(
-                action("topic", IconName::TopicIcon, 24.).on_click(move |_, _, cx| {
+                action("topic", IconName::TopicIcon).on_click(move |_, _, cx| {
                     TopicsStore::global(cx).update(cx, |store, cx| {
                         store.start_create_for_message(message_id, cx);
                     });
@@ -2424,7 +2454,7 @@ pub fn render_hover_actions(msg: &Message, is_different_day: bool, ctx: &RowCtx)
             )
         })
         .child(
-            action("react", IconName::Smile, 20.).on_click(move |_, window, cx| {
+            action("react", IconName::Smile).on_click(move |_, window, cx| {
                 let position = window.mouse_position();
                 let _ = react_host.update(cx, |this, cx| {
                     this.open_reaction_picker(react_id, position, window, cx);
@@ -2433,21 +2463,19 @@ pub fn render_hover_actions(msg: &Message, is_different_day: bool, ctx: &RowCtx)
         )
         .when(!is_own_message, |d| {
             let is_topic = ctx.is_topic_box;
-            d.child(
-                action("reply", IconName::Reply, 20.).on_click(move |_, _, cx| {
-                    if is_topic {
-                        TopicsStore::global(cx)
-                            .update(cx, |store, cx| store.set_reply_to(reply_target, cx));
-                    } else {
-                        MessagesStore::global(cx)
-                            .update(cx, |store, cx| store.set_reply_to(reply_target, cx));
-                    }
-                }),
-            )
+            d.child(action("reply", IconName::Reply).on_click(move |_, _, cx| {
+                if is_topic {
+                    TopicsStore::global(cx)
+                        .update(cx, |store, cx| store.set_reply_to(reply_target, cx));
+                } else {
+                    MessagesStore::global(cx)
+                        .update(cx, |store, cx| store.set_reply_to(reply_target, cx));
+                }
+            }))
         })
         .when(show_edit, |d| {
             d.child(
-                action("edit", IconName::PenEdit, 20.).on_click(move |_, window, cx| {
+                action("edit", IconName::PenEdit).on_click(move |_, window, cx| {
                     let _ = edit_host.update(cx, |this, cx| {
                         this.begin_edit(msg_id, window, cx);
                     });
@@ -2456,7 +2484,7 @@ pub fn render_hover_actions(msg: &Message, is_different_day: bool, ctx: &RowCtx)
         })
         .when(show_thread, |d| {
             d.child(
-                action("thread", IconName::ThreadIcon, 24.).on_click(move |_, _, cx| {
+                action("thread", IconName::ThreadIcon).on_click(move |_, _, cx| {
                     ThreadsStore::global(cx).update(cx, |store, cx| store.start_create(cx));
                 }),
             )
@@ -2464,18 +2492,16 @@ pub fn render_hover_actions(msg: &Message, is_different_day: bool, ctx: &RowCtx)
         .when(show_coffee, |d| {
             let target = msg.message_ref();
             d.child(
-                action("give-coffee", IconName::DollarIconRightClick, 20.).on_click(
-                    move |_, _, cx| {
-                        MessagesStore::global(cx).update(cx, |store, cx| {
-                            store.give_coffee_reaction(target, cx);
-                        });
-                    },
-                ),
+                action("give-coffee", IconName::DollarIconRightClick).on_click(move |_, _, cx| {
+                    MessagesStore::global(cx).update(cx, |store, cx| {
+                        store.give_coffee_reaction(target, cx);
+                    });
+                }),
             )
         })
         .when(ctx.context_menu_enabled, |row| {
             row.child(
-                action("option", IconName::ThreeDot, 20.).on_click(move |_, window, cx| {
+                action("option", IconName::ThreeDot).on_click(move |_, window, cx| {
                     let position = window.mouse_position();
                     let _ = option_host.update(cx, |this, cx| {
                         this.open_context_menu(msg_id, position, cx);

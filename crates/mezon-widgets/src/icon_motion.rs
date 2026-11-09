@@ -2,8 +2,8 @@ use std::time::Instant;
 
 use gpui::{
     AnyElement, App, Bounds, DispatchPhase, Element, ElementId, Global, GlobalElementId, Hitbox,
-    HitboxBehavior, InspectorElementId, IntoElement, LayoutId, MouseMoveEvent, Pixels,
-    Transformation, Window, point, px, radians, size,
+    HitboxBehavior, Hsla, InspectorElementId, IntoElement, LayoutId, MouseMoveEvent, Pixels,
+    Styled, Transformation, Window, point, px, radians, size, svg,
 };
 
 #[derive(Clone, Copy, Default)]
@@ -17,6 +17,53 @@ impl IconMotionPreferences {
     pub(crate) fn enabled(cx: &App) -> bool {
         mezon_store::Settings::try_global(cx).is_none_or(|s| s.read(cx).icon_motion)
             && !cx.try_global::<Self>().is_some_and(|p| p.reduced_motion)
+    }
+}
+
+#[derive(Default)]
+pub struct IconMotion {
+    playback: MotionPlayback,
+}
+
+impl IconMotion {
+    pub fn paint(
+        &mut self,
+        icon: crate::IconName,
+        bounds: Bounds<Pixels>,
+        color: Hsla,
+        hovered: bool,
+        window: &mut Window,
+        cx: &mut App,
+    ) {
+        let view = window.current_view();
+        let mut was_inside = bounds.contains(&window.mouse_position());
+        window.on_mouse_event(move |event: &MouseMoveEvent, phase, _, cx| {
+            let inside = bounds.contains(&event.position);
+            if phase == DispatchPhase::Capture && inside != was_inside {
+                was_inside = inside;
+                cx.notify(view);
+            }
+        });
+        let hovered = hovered && window.is_window_active() && IconMotionPreferences::enabled(cx);
+        let frame = self.playback.frame(
+            icon.path(),
+            MotionSpec::for_path(icon.path()),
+            hovered,
+            Instant::now(),
+        );
+        let transformation = frame
+            .as_ref()
+            .map_or_else(Transformation::default, |frame| {
+                frame.transformation(bounds)
+            });
+        if frame.is_some_and(|frame| frame.running) {
+            window.request_animation_frame();
+        }
+        svg()
+            .path(icon.path())
+            .text_color(color)
+            .with_transformation(transformation)
+            .paint(None, None, bounds, &mut (), &mut None, window, cx);
     }
 }
 
@@ -136,25 +183,6 @@ pub(crate) struct MotionSpec {
 }
 
 impl MotionSpec {
-    pub(crate) fn for_mz(icon: crate::MzIcon) -> Option<Self> {
-        use crate::MzAnim;
-        let (anim, duration_ms, turn_deg) = match icon.anim {
-            MzAnim::None => return None,
-            MzAnim::Hop => (MotionKind::Hop, 350, None),
-            MzAnim::Ring => (MotionKind::Ring, 450, None),
-            MzAnim::Swing => (MotionKind::Swing, 500, None),
-            MzAnim::Spin { turn_deg } => (MotionKind::Spin, 400, Some(f32::from(turn_deg))),
-            MzAnim::Zoom => (MotionKind::Zoom, 300, None),
-            MzAnim::Typing => (MotionKind::Typing, 900, None),
-            MzAnim::Live => (MotionKind::Live, 1600, None),
-        };
-        Some(Self {
-            anim,
-            duration_ms,
-            turn_deg,
-        })
-    }
-
     pub(crate) fn translates_only(&self) -> bool {
         matches!(
             self.anim,
@@ -382,42 +410,94 @@ impl ColorPlayback {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub struct MzTransform {
-    pub translate_y_pct: f32,
-    pub rotate_deg: f32,
-    pub scale: f32,
-    pub opacity: f32,
-}
-
-pub fn sample_keyframe(anim: crate::MzAnim, t: f32) -> MzTransform {
-    use crate::MzAnim;
-    let t = t.clamp(0., 1.);
-    let mut transform = MzTransform {
-        translate_y_pct: 0.,
-        rotate_deg: 0.,
-        scale: 1.,
-        opacity: 1.,
-    };
-    match anim {
-        MzAnim::Hop | MzAnim::Typing | MzAnim::Live => {
-            transform.translate_y_pct = -8.33 * keyframe(HOP_KEYFRAMES, t);
-        }
-        MzAnim::Ring => transform.rotate_deg = keyframe(RING_KEYFRAMES, t),
-        MzAnim::Swing => transform.rotate_deg = keyframe(SWING_KEYFRAMES, t),
-        MzAnim::Spin { turn_deg } => {
-            transform.rotate_deg = f32::from(turn_deg) * cubic_bezier(t, 0.2, 0., 0., 1.)
-        }
-        MzAnim::Zoom => transform.scale = keyframe(ZOOM_KEYFRAMES, t),
-        MzAnim::None => {}
-    }
-    transform
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::time::Duration;
+
+    #[test]
+    fn custom_icon_painter_respects_settings_and_restarts_on_row_hover() {
+        use gpui::{AppContext, Context, Render, TestApp, canvas};
+        use std::{cell::RefCell, rc::Rc};
+
+        struct Fixture {
+            motion: Rc<RefCell<IconMotion>>,
+            hovered: bool,
+        }
+
+        impl Render for Fixture {
+            fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+                let motion = self.motion.clone();
+                let hovered = self.hovered;
+                canvas(
+                    |_, _, _| (),
+                    move |bounds, _, window, cx| {
+                        motion.borrow_mut().paint(
+                            crate::IconName::Hashtag,
+                            bounds,
+                            gpui::white(),
+                            hovered,
+                            window,
+                            cx,
+                        );
+                    },
+                )
+                .size(px(20.))
+            }
+        }
+
+        let mut app = TestApp::new();
+        let settings = app.update(|cx| {
+            let settings = cx.new(|_| mezon_store::Settings {
+                icon_motion: false,
+                ..Default::default()
+            });
+            mezon_store::Settings::init_global(&settings, cx);
+            settings
+        });
+        let motion = Rc::new(RefCell::new(IconMotion::default()));
+        let for_window = motion.clone();
+        let mut window = app.open_window(move |_, _| Fixture {
+            motion: for_window,
+            hovered: true,
+        });
+        window.update(|_, window, _| window.activate_window());
+        window.draw();
+        assert!(motion.borrow().playback.started.is_none());
+        window.update(|_, _, cx| {
+            settings.update(cx, |settings, cx| {
+                settings.icon_motion = true;
+                cx.notify();
+            });
+            cx.refresh_windows();
+        });
+        window.draw();
+        let started = motion.borrow().playback.started;
+        assert!(started.is_some());
+        window.draw();
+        assert_eq!(motion.borrow().playback.started, started);
+        window.update(|view, _, cx| {
+            view.hovered = false;
+            cx.notify();
+        });
+        window.draw();
+        assert!(motion.borrow().playback.started.is_none());
+        window.update(|view, _, cx| {
+            view.hovered = true;
+            cx.notify();
+        });
+        window.draw();
+        assert!(motion.borrow().playback.started.is_some());
+        window.update(|_, _, cx| {
+            settings.update(cx, |settings, cx| {
+                settings.icon_motion = false;
+                cx.notify();
+            });
+            cx.refresh_windows();
+        });
+        window.draw();
+        assert!(motion.borrow().playback.started.is_none());
+    }
 
     #[test]
     fn color_transition_finishes_and_can_reverse_mid_flight() {
@@ -435,28 +515,6 @@ mod tests {
         let finished = playback.frame(black, now + Duration::from_millis(300));
         assert!(!finished.1);
         assert!(gpui::Rgba::from(finished.0).r < 0.001);
-    }
-
-    #[test]
-    fn keyframes_end_at_identity_and_spin_uses_package_turn() {
-        use crate::MzAnim;
-        for anim in [
-            MzAnim::None,
-            MzAnim::Hop,
-            MzAnim::Ring,
-            MzAnim::Swing,
-            MzAnim::Zoom,
-            MzAnim::Typing,
-            MzAnim::Live,
-        ] {
-            let frame = sample_keyframe(anim, 1.);
-            assert!(frame.translate_y_pct.abs() < 0.001);
-            assert!(frame.rotate_deg.abs() < 0.001);
-            assert!((frame.scale - 1.).abs() < 0.001);
-            assert_eq!(frame.opacity, 1.);
-        }
-        assert!((sample_keyframe(MzAnim::Hop, 0.35).translate_y_pct + 8.33).abs() < 0.001);
-        assert!((sample_keyframe(crate::mz::SETTINGS_20.anim, 1.).rotate_deg - 45.).abs() < 0.001);
     }
 
     #[test]

@@ -301,7 +301,8 @@ impl Render for GifStickerEmojiPopup {
                         .flex()
                         .items_center()
                         .child(
-                            Icon::new(IconName::SEARCH_20)
+                            Icon::new(IconName::Search)
+                                .size(gpui::px(20.))
                                 .text_color(theme.tokens.text_theme_primary),
                         ),
                 ),

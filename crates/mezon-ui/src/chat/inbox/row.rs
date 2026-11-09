@@ -1551,7 +1551,11 @@ fn render_inbox_video(
                             b: 0.,
                             a: 0.5,
                         })
-                        .child(Icon::new(IconName::PLAY_20).text_color(gpui::white())),
+                        .child(
+                            Icon::new(IconName::AudioPlay)
+                                .size(gpui::px(20.))
+                                .text_color(gpui::white()),
+                        ),
                 ),
         )
         .on_click(move |_: &ClickEvent, window, cx| {
@@ -1675,7 +1679,8 @@ fn render_inbox_file_card(
                             );
                         })
                         .child(
-                            Icon::new(IconName::DOWNLOAD_16)
+                            Icon::new(IconName::Download)
+                                .size(gpui::px(16.))
                                 .text_color(theme.tokens.text_theme_primary),
                         ),
                 ),

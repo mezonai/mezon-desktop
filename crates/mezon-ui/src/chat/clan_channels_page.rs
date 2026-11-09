@@ -354,7 +354,8 @@ impl ClanChannelsPage {
             })
             .child(label)
             .child(
-                Icon::new(IconName::ARROW_DOWN_16)
+                Icon::new(IconName::ArrowDown)
+                    .size(gpui::px(16.))
                     .text_color(if active {
                         cx.theme().text_primary
                     } else {
@@ -474,8 +475,8 @@ impl ClanChannelsPage {
             .map(|channel| channel.age_restricted)
             .unwrap_or(0);
         let channel_icon = Icon::new(channel_type_icon(channel_type, row.private, age_restricted))
-            .size(px(if is_thread { 20. } else { 22. }))
-            .text_color(cx.theme().text_secondary)
+            .size(px(20.))
+            .color(cx.theme().tokens.icon_normal())
             .into_any_element();
         div()
             .id(format!("channel-setting-row-{}", row.id.get()))
@@ -547,9 +548,9 @@ impl ClanChannelsPage {
                                 cx,
                             )
                         } else {
-                            Icon::new(IconName::USER_CIRCLE_24)
-                                .motion_enabled(false)
-                                .text_color(cx.theme().tokens.text_secondary)
+                            Icon::new(IconName::AvatarUser)
+                                .size(gpui::px(24.))
+                                .color(cx.theme().tokens.icon_normal())
                                 .flex_none()
                                 .into_any_element()
                         })
@@ -599,6 +600,7 @@ impl ClanChannelsPage {
                             }),
                     ),
             )
+            .map(|row| Icon::motion_scope(row, true))
             .into_any_element()
     }
 
@@ -675,7 +677,8 @@ impl ClanChannelsPage {
                 .hover(|style| style.bg(cx.theme().bg_hover))
                 .child(self.page_size.to_string())
                 .child(
-                    Icon::new(IconName::CHEVRON_DOWN_16)
+                    Icon::new(IconName::CaretDown)
+                        .size(gpui::px(16.))
                         .text_color(cx.theme().text_secondary)
                         .with_transformation(gpui::Transformation::rotate(gpui::radians(
                             chevron_angle,
@@ -893,7 +896,11 @@ impl Render for ClanChannelsPage {
                     .bottom_0()
                     .flex()
                     .items_center()
-                    .child(Icon::new(IconName::SEARCH_20).text_color(cx.theme().text_secondary)),
+                    .child(
+                        Icon::new(IconName::Search)
+                            .size(gpui::px(20.))
+                            .text_color(cx.theme().text_secondary),
+                    ),
             )
             .on_mouse_down_out(|_, window, _| window.blur());
         let footer = div()

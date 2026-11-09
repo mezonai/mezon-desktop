@@ -165,7 +165,11 @@ impl Render for UserInfoBar {
             .p_1()
             .rounded_md()
             .hover(|s| s.bg(theme.tokens.bg_item_hover))
-            .child(Icon::new(IconName::SETTINGS_20).selected(false));
+            .child(
+                Icon::new(IconName::CallSetting)
+                    .size(gpui::px(20.))
+                    .selected(false),
+            );
         settings_btn.interactivity().on_click(on_settings_click());
 
         let mut avatar = Avatar::new().size_px(px(32.0));

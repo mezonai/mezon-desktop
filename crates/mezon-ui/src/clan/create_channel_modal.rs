@@ -361,7 +361,11 @@ impl Render for CreateChannelModal {
                             .opacity(0.65)
                             .hover(|s| s.opacity(1.0))
                             .on_click(|_, _, cx| Self::close(cx))
-                            .child(Icon::new(IconName::CLOSE_24).selected(false)),
+                            .child(
+                                Icon::new(IconName::Close)
+                                    .size(gpui::px(24.))
+                                    .selected(false),
+                            ),
                     ),
             )
             .child(
@@ -442,7 +446,11 @@ impl Render for CreateChannelModal {
                                     h_flex()
                                         .gap_2()
                                         .items_center()
-                                        .child(Icon::new(IconName::LOCK_24).selected(false))
+                                        .child(
+                                            Icon::new(IconName::HashtagLock)
+                                                .size(gpui::px(24.))
+                                                .selected(false),
+                                        )
                                         .child(
                                             div()
                                                 .text_sm()

@@ -4408,7 +4408,11 @@ impl ChannelMessages {
                         .child(badge_label),
                 )
             })
-            .child(Icon::new(IconName::ARROW_DOWN_20).text_color(theme.text_primary))
+            .child(
+                Icon::new(IconName::ArrowDown)
+                    .size(gpui::px(20.))
+                    .text_color(theme.text_primary),
+            )
     }
 
     fn advance_skeleton(&mut self, loading: bool, key: SkeletonKey, cx: &mut Context<Self>) {

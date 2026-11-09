@@ -232,7 +232,11 @@ impl QuickActionsTab {
             .border_1()
             .border_color(theme.tokens.border_theme_primary)
             .bg(theme.tokens.theme_setting_nav)
-            .child(Icon::new(IconName::MAIL_48).text_color(theme.tokens.text_theme_primary))
+            .child(
+                Icon::new(IconName::QuickActionEmpty)
+                    .size(gpui::px(48.))
+                    .text_color(theme.tokens.text_theme_primary),
+            )
             .child(
                 div()
                     .mt_4()
@@ -357,7 +361,11 @@ impl QuickActionsTab {
                                         style.text_color(theme.text_primary).bg(theme.bg_hover)
                                     })
                                     .tooltip(Tooltip::text(edit_title))
-                                    .child(Icon::new(IconName::EDIT_16).selected(false))
+                                    .child(
+                                        Icon::new(IconName::PenEdit)
+                                            .size(gpui::px(16.))
+                                            .selected(false),
+                                    )
                                     .on_click(cx.listener({
                                         let menu_name = menu_name.clone();
                                         let action_msg = action_msg.clone();
@@ -392,7 +400,11 @@ impl QuickActionsTab {
                                         style.text_color(theme.danger).bg(theme.danger_hover_bg)
                                     })
                                     .tooltip(Tooltip::text(delete_title))
-                                    .child(Icon::new(IconName::TRASH_16).selected(false))
+                                    .child(
+                                        Icon::new(IconName::TrashIcon)
+                                            .size(gpui::px(16.))
+                                            .selected(false),
+                                    )
                                     .on_click(cx.listener({
                                         let command_label = command_label.clone();
                                         move |this, _, window, cx| {
@@ -465,7 +477,11 @@ impl Render for QuickActionsTab {
                     .child(
                         Button::new("quick-actions-add")
                             .label(add_label)
-                            .icon(Icon::new(IconName::PLUS_CIRCLE_16).text_color(gpui::white()))
+                            .icon(
+                                Icon::new(IconName::AddCircle)
+                                    .size(gpui::px(16.))
+                                    .text_color(gpui::white()),
+                            )
                             .primary()
                             .on_click(cx.listener(|this, _, window, cx| match this.active_tab {
                                 QuickActionsSubTab::Flash => {
@@ -1207,7 +1223,11 @@ impl Render for CreateQuickMenuModal {
                             .border_1()
                             .border_color(Hsla::from(rgb(TYPE_BADGE)).opacity(0.2))
                             .bg(Hsla::from(rgb(TYPE_BADGE)).opacity(0.1))
-                            .child(Icon::new(IconName::INFO_16).text_color(rgb(TYPE_BADGE_TEXT)))
+                            .child(
+                                Icon::new(IconName::QuickActionInfo)
+                                    .size(gpui::px(16.))
+                                    .text_color(rgb(TYPE_BADGE_TEXT)),
+                            )
                             .child(
                                 v_flex()
                                     .child(

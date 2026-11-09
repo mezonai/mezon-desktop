@@ -632,7 +632,11 @@ impl PdfViewer {
                 .items_center()
                 .justify_center()
                 .gap_3()
-                .child(Icon::new(IconName::WARNING_32).text_color(theme.danger_text))
+                .child(
+                    Icon::new(IconName::TriangleAlert)
+                        .size(gpui::px(32.))
+                        .text_color(theme.danger_text),
+                )
                 .child(
                     div()
                         .text_size(px(14.))

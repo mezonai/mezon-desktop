@@ -162,7 +162,11 @@ pub(crate) fn grammar_correction_bar(
                 .cursor_pointer()
                 .hover(|style| style.opacity(0.7))
                 .on_click(on_dismiss)
-                .child(Icon::new(IconName::CLOSE_16).text_color(theme.tokens.text_theme_primary)),
+                .child(
+                    Icon::new(IconName::Close)
+                        .size(gpui::px(16.))
+                        .text_color(theme.tokens.text_theme_primary),
+                ),
         )
 }
 
@@ -1632,7 +1636,8 @@ impl MentionInput {
                         }),
                     )
                     .child(
-                        Icon::new(IconName::IMAGE_ADD_20)
+                        Icon::new(IconName::ImageUploadIcon)
+                            .size(gpui::px(20.))
                             .flex_none()
                             .text_color(text_color)
                             .hover(|s| s.text_color(text_hover)),
@@ -1662,7 +1667,8 @@ impl MentionInput {
                             cx.listener(|this, _, window, cx| this.open_share_location(window, cx)),
                         )
                         .child(
-                            Icon::new(IconName::LOCATION_20)
+                            Icon::new(IconName::Location)
+                                .size(gpui::px(20.))
                                 .flex_none()
                                 .text_color(text_color)
                                 .hover(|s| s.text_color(text_hover)),
@@ -1691,7 +1697,11 @@ impl MentionInput {
                         MouseButton::Left,
                         cx.listener(|this, _, window, cx| this.open_create_poll(window, cx)),
                     )
-                    .child(Icon::new(IconName::LIST_CHECK_20).flex_none())
+                    .child(
+                        Icon::new(IconName::CheckListIcon)
+                            .size(gpui::px(20.))
+                            .flex_none(),
+                    )
                     .child(div().text_sm().font_weight(FontWeight::MEDIUM).child(
                         mezon_i18n::t(&locale, "message.fileSelection.createPoll").to_string(),
                     ))
@@ -2198,7 +2208,11 @@ impl MentionInput {
                         .items_center()
                         .justify_center()
                         .cursor_pointer()
-                        .child(Icon::new(IconName::CLOSE_16).text_color(muted))
+                        .child(
+                            Icon::new(IconName::Close)
+                                .size(gpui::px(16.))
+                                .text_color(muted),
+                        )
                         .on_click(cx.listener(move |this, _event, _window, cx| {
                             this.remove_attachment(index, cx)
                         })),
@@ -3889,7 +3903,8 @@ impl MentionInput {
                 Suggestion::Role(role) => {
                     display_color = role.color;
                     let leading = if role.icon_src.is_empty() {
-                        Icon::new(IconName::ROLE_20)
+                        Icon::new(IconName::RoleIcon)
+                            .size(gpui::px(20.))
                             .flex_shrink_0()
                             .text_color(role.color)
                             .into_any_element()
@@ -4505,7 +4520,8 @@ impl Render for MentionInput {
                             .cursor_pointer()
                             .hover(|s| s.bg(icon_bg_hover))
                             .child(
-                                Icon::new(IconName::PLUS_CIRCLE_20)
+                                Icon::new(IconName::AddCircle)
+                                    .size(gpui::px(20.))
                                     .selected(false)
                                     .hover(|s| s.text_color(icon_hover)),
                             )
@@ -4545,9 +4561,12 @@ impl Render for MentionInput {
                         cx.listener(|this, _event, _window, cx| this.stop_recording(cx)),
                     )
                     .child(if self.recording.is_some() {
-                        Icon::new(IconName::MIC_20).text_color(RECORDING_COLOR)
+                        Icon::new(IconName::Mic)
+                            .size(gpui::px(20.))
+                            .text_color(RECORDING_COLOR)
                     } else {
-                        Icon::new(IconName::MIC_20)
+                        Icon::new(IconName::Mic)
+                            .size(gpui::px(20.))
                             .selected(false)
                             .hover(|s| s.text_color(icon_hover))
                     }),

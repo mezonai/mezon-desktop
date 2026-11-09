@@ -128,7 +128,8 @@ fn filter_chip(
                 .child(label.into()),
         )
         .child(
-            Icon::new(IconName::CARET_DOWN_16)
+            Icon::new(IconName::ArrowDownFill)
+                .size(gpui::px(16.))
                 .flex_shrink_0()
                 .selected(false),
         );
@@ -191,7 +192,11 @@ fn filter_menu_row(
                 .child(label),
         );
     if selected {
-        row = row.child(Icon::new(IconName::CHECK_16).text_color(theme.tokens.text_theme_primary));
+        row = row.child(
+            Icon::new(IconName::Check)
+                .size(gpui::px(16.))
+                .text_color(theme.tokens.text_theme_primary),
+        );
     }
     row.interactivity().on_click(on_click);
     row
@@ -807,7 +812,11 @@ impl AuditLogSettingPage {
                     v_flex()
                         .items_center()
                         .gap_2()
-                        .child(Icon::new(IconName::SEARCH_32).selected(false))
+                        .child(
+                            Icon::new(IconName::Search)
+                                .size(gpui::px(32.))
+                                .selected(false),
+                        )
                         .child(
                             div()
                                 .text_sm()

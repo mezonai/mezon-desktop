@@ -357,7 +357,11 @@ impl StreamingPage {
                             .min_w_0()
                             .items_center()
                             .gap_2()
-                            .child(Icon::new(IconName::LIVE_16).text_color(theme.text_primary))
+                            .child(
+                                Icon::new(IconName::Stream)
+                                    .size(gpui::px(16.))
+                                    .text_color(theme.text_primary),
+                            )
                             .child(
                                 div()
                                     .min_w_0()
@@ -436,7 +440,11 @@ impl StreamingPage {
                                 .cursor_pointer()
                                 .when(is_selected, |el| el.bg(theme.bg_hover))
                                 .when(!is_selected, |el| el.hover(|s| s.bg(theme.bg_hover)))
-                                .child(Icon::new(IconName::LIVE_16).text_color(theme.text_primary))
+                                .child(
+                                    Icon::new(IconName::Stream)
+                                        .size(gpui::px(16.))
+                                        .text_color(theme.text_primary),
+                                )
                                 .child(
                                     div()
                                         .flex_1()

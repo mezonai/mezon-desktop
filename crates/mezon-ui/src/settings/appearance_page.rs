@@ -140,7 +140,11 @@ fn theme_swatch(
                     .rounded_full()
                     .bg(theme.brand)
                     .p(px(2.0))
-                    .child(Icon::new(IconName::CHECK_16).text_color(rgba(255, 255, 255, 1.0))),
+                    .child(
+                        Icon::new(IconName::Check)
+                            .size(gpui::px(16.))
+                            .text_color(rgba(255, 255, 255, 1.0)),
+                    ),
             )
         })
 }
@@ -224,6 +228,37 @@ impl Render for AppearancePage {
                     ))),
             )
             .child(
+                v_flex()
+                    .mt(px(40.0))
+                    .p_5()
+                    .gap_2()
+                    .rounded_lg()
+                    .bg(theme.bg_secondary)
+                    .child(
+                        Label::new(mezon_i18n::t(&locale, "setting.appearance.theme"))
+                            .text_color(theme.text_primary)
+                            .font_weight(FontWeight::BOLD),
+                    )
+                    .child(
+                        h_flex()
+                            .mt_5()
+                            .flex_wrap()
+                            .gap_x(px(30.0))
+                            .gap_y_4()
+                            .children(THEME_KEYS.iter().zip(themes.iter()).map(
+                                |(key, (_, label_key))| {
+                                    theme_swatch(
+                                        (*key).to_string(),
+                                        mezon_i18n::t(&locale, label_key).to_string(),
+                                        canonical_theme_key(&current_theme) == *key,
+                                        theme,
+                                        settings.clone(),
+                                    )
+                                },
+                            )),
+                    ),
+            )
+            .child(
                 h_flex()
                     .mt_4()
                     .p_4()
@@ -259,37 +294,6 @@ impl Render for AppearancePage {
                             cx.refresh_windows();
                         },
                     )),
-            )
-            .child(
-                v_flex()
-                    .mt(px(40.0))
-                    .p_5()
-                    .gap_2()
-                    .rounded_lg()
-                    .bg(theme.bg_secondary)
-                    .child(
-                        Label::new(mezon_i18n::t(&locale, "setting.appearance.theme"))
-                            .text_color(theme.text_primary)
-                            .font_weight(FontWeight::BOLD),
-                    )
-                    .child(
-                        h_flex()
-                            .mt_5()
-                            .flex_wrap()
-                            .gap_x(px(30.0))
-                            .gap_y_4()
-                            .children(THEME_KEYS.iter().zip(themes.iter()).map(
-                                |(key, (_, label_key))| {
-                                    theme_swatch(
-                                        (*key).to_string(),
-                                        mezon_i18n::t(&locale, label_key).to_string(),
-                                        canonical_theme_key(&current_theme) == *key,
-                                        theme,
-                                        settings.clone(),
-                                    )
-                                },
-                            )),
-                    ),
             )
     }
 }

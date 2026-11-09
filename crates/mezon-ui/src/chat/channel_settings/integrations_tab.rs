@@ -737,14 +737,18 @@ impl IntegrationsTab {
                     .child(mezon_i18n::t(locale, "integrations.title")),
             )
             .when(on_webhooks, |el| {
-                el.child(Icon::new(IconName::CHEVRON_RIGHT_20).text_color(theme.text_primary))
-                    .child(
-                        div()
-                            .text_xl()
-                            .font_weight(FontWeight::SEMIBOLD)
-                            .text_color(theme.text_primary)
-                            .child(mezon_i18n::t(locale, "integrations.webhooks")),
-                    )
+                el.child(
+                    Icon::new(IconName::ArrowRight)
+                        .size(gpui::px(20.))
+                        .text_color(theme.text_primary),
+                )
+                .child(
+                    div()
+                        .text_xl()
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .text_color(theme.text_primary)
+                        .child(mezon_i18n::t(locale, "integrations.webhooks")),
+                )
             })
     }
 
@@ -790,7 +794,8 @@ impl IntegrationsTab {
                             .gap_4()
                             .min_w_0()
                             .child(
-                                Icon::new(IconName::WEBHOOK_20)
+                                Icon::new(IconName::WebhooksIcon)
+                                    .size(gpui::px(20.))
                                     .flex_shrink_0()
                                     .text_color(theme.tokens.text_theme_primary),
                             )
@@ -828,7 +833,8 @@ impl IntegrationsTab {
                             .text_color(theme.tokens.text_theme_primary)
                             .child(mezon_i18n::t(locale, "integrations.viewWebhook"))
                             .child(
-                                Icon::new(IconName::CHEVRON_RIGHT_16)
+                                Icon::new(IconName::ArrowRight)
+                                    .size(gpui::px(16.))
                                     .text_color(theme.tokens.text_theme_primary),
                             )
                             .into_any_element()
@@ -888,7 +894,8 @@ impl IntegrationsTab {
                             .child(selected_label),
                     )
                     .child(
-                        Icon::new(IconName::CARET_DOWN_16)
+                        Icon::new(IconName::ArrowDownFill)
+                            .size(gpui::px(16.))
                             .flex_shrink_0()
                             .text_color(theme.tokens.text_theme_primary),
                     ),
@@ -943,7 +950,8 @@ impl IntegrationsTab {
                                                 .font_weight(FontWeight::SEMIBOLD)
                                         })
                                         .child(
-                                            Icon::new(IconName::CHANNEL_16)
+                                            Icon::new(IconName::Hashtag)
+                                                .size(gpui::px(16.))
                                                 .flex_shrink_0()
                                                 .selected(false),
                                         )
@@ -1024,7 +1032,7 @@ impl IntegrationsTab {
                                             },
                                         ));
                                         pick.child(
-                                            Icon::new(IconName::IMAGE_ADD_16).selected(false),
+                                            Icon::new(IconName::ImageUploadIcon).size(gpui::px(16.)).selected(false),
                                         )
                                     })
                                     .when(self.avatar_uploading, |el| {
@@ -1349,7 +1357,8 @@ fn render_webhook_row(
                                         .items_center()
                                         .gap_1()
                                         .child(
-                                            Icon::new(IconName::CLOCK_16)
+                                            Icon::new(IconName::ClockIcon)
+                                                .size(gpui::px(16.))
                                                 .flex_shrink_0()
                                                 .text_color(theme.tokens.text_theme_primary),
                                         )
@@ -1365,11 +1374,13 @@ fn render_webhook_row(
                                 ),
                         )
                         .child(if expanded {
-                            Icon::new(IconName::CHEVRON_DOWN_32)
+                            Icon::new(IconName::CaretDown)
+                                .size(gpui::px(32.))
                                 .flex_shrink_0()
                                 .selected(false)
                         } else {
-                            Icon::new(IconName::CHEVRON_RIGHT_32)
+                            Icon::new(IconName::ArrowRight)
+                                .size(gpui::px(32.))
                                 .flex_shrink_0()
                                 .selected(false)
                         }),

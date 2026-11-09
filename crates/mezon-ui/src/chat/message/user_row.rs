@@ -95,7 +95,11 @@ pub fn render_user_message(
                 .font_weight(gpui::FontWeight::MEDIUM)
                 .text_color(theme.tokens.text_theme_primary)
                 .opacity(0.6)
-                .child(Icon::new(IconName::FORWARD_16).text_color(theme.tokens.text_theme_primary))
+                .child(
+                    Icon::new(IconName::ForwardRightClick)
+                        .size(gpui::px(16.))
+                        .text_color(theme.tokens.text_theme_primary),
+                )
                 .child(mezon_i18n::t(ctx.locale, "chat.forwarded")),
         );
     }
@@ -335,7 +339,11 @@ fn render_ephemeral_notice(msg: &Message, ctx: &RowCtx) -> AnyElement {
         .text_size(px(12.))
         .text_color(ctx.theme.tokens.text_theme_primary)
         .opacity(0.6)
-        .child(Icon::new(IconName::EYE_OFF_16).text_color(ctx.theme.tokens.text_theme_primary))
+        .child(
+            Icon::new(IconName::EyeClose)
+                .size(gpui::px(16.))
+                .text_color(ctx.theme.tokens.text_theme_primary),
+        )
         .child(mezon_i18n::t(ctx.locale, "message.onlyVisibleToRecipient"))
         .child("·")
         .child(
@@ -387,11 +395,16 @@ fn render_go_to_topic_footer(msg: &Message, ctx: &RowCtx) -> AnyElement {
                 .text_size(px(14.))
                 .text_color(theme.tokens.text_theme_primary)
                 .opacity(0.75)
-                .child(Icon::new(IconName::CHAT_20).text_color(theme.tokens.text_theme_primary))
+                .child(
+                    Icon::new(IconName::Chat)
+                        .size(gpui::px(20.))
+                        .text_color(theme.tokens.text_theme_primary),
+                )
                 .child(mezon_i18n::t(ctx.locale, "message.goToTopic")),
         )
         .child(
-            Icon::new(IconName::CHEVRON_RIGHT_16)
+            Icon::new(IconName::ArrowRight)
+                .size(gpui::px(16.))
                 .text_color(theme.tokens.text_theme_primary)
                 .opacity(0.5),
         )

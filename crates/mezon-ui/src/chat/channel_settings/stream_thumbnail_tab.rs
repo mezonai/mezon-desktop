@@ -339,7 +339,11 @@ impl Render for StreamThumbnailTab {
                             Button::new("thumbnail-change")
                                 .large()
                                 .label(self.t("streamThumbnail.buttons.change", cx))
-                                .icon(Icon::new(IconName::EDIT_16).text_color(theme.text_primary))
+                                .icon(
+                                    Icon::new(IconName::PenEdit)
+                                        .size(gpui::px(16.))
+                                        .text_color(theme.text_primary),
+                                )
                                 .primary()
                                 .disabled(disabled)
                                 .on_click(cx.listener(|this, _, _, cx| this.choose(cx))),
@@ -348,7 +352,11 @@ impl Render for StreamThumbnailTab {
                             Button::new("thumbnail-remove")
                                 .large()
                                 .label(self.t("streamThumbnail.buttons.remove", cx))
-                                .icon(Icon::new(IconName::TRASH_16).text_color(theme.text_primary))
+                                .icon(
+                                    Icon::new(IconName::TrashIcon)
+                                        .size(gpui::px(16.))
+                                        .text_color(theme.text_primary),
+                                )
                                 .danger()
                                 .disabled(disabled)
                                 .on_click(cx.listener(|this, _, _, cx| this.confirm(None, cx))),
@@ -386,7 +394,11 @@ impl Render for StreamThumbnailTab {
                                 .flex()
                                 .items_center()
                                 .justify_center()
-                                .child(Icon::new(IconName::CAMERA_48).text_color(theme.brand)),
+                                .child(
+                                    Icon::new(IconName::UploadImage)
+                                        .size(gpui::px(48.))
+                                        .text_color(theme.brand),
+                                ),
                         )
                         .child(
                             div()
@@ -403,7 +415,11 @@ impl Render for StreamThumbnailTab {
                             Button::new("thumbnail-select")
                                 .large()
                                 .label(self.t("streamThumbnail.buttons.selectFile", cx))
-                                .icon(Icon::new(IconName::CAMERA_16).text_color(theme.text_primary))
+                                .icon(
+                                    Icon::new(IconName::UploadImage)
+                                        .size(gpui::px(16.))
+                                        .text_color(theme.text_primary),
+                                )
                                 .primary()
                                 .disabled(disabled)
                                 .on_click(cx.listener(|this, _, _, cx| {
@@ -582,7 +598,11 @@ impl Render for ThumbnailConfirmation {
                 "streamThumbnail.buttons.removeThumbnail"
             }))
             .when(!upload, |button| {
-                button.icon(Icon::new(IconName::TRASH_16).text_color(theme.text_primary))
+                button.icon(
+                    Icon::new(IconName::TrashIcon)
+                        .size(gpui::px(16.))
+                        .text_color(theme.text_primary),
+                )
             })
             .on_click(cx.listener(|this, _, _, cx| this.submit(cx)));
         v_flex()
@@ -616,7 +636,11 @@ impl Render for ThumbnailConfirmation {
                                 .flex()
                                 .items_center()
                                 .justify_center()
-                                .child(Icon::new(IconName::CAMERA_24).text_color(theme.brand)),
+                                .child(
+                                    Icon::new(IconName::UploadImage)
+                                        .size(gpui::px(24.))
+                                        .text_color(theme.brand),
+                                ),
                         )
                     })
                     .child(

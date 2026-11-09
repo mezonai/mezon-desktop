@@ -1546,7 +1546,11 @@ impl Render for ChannelSidebar {
                                         .text_color(theme.text_primary)
                                         .child(clan_name.clone()),
                                 )
-                                .child(Icon::new(IconName::CHEVRON_DOWN_20).selected(false)),
+                                .child(
+                                    Icon::new(IconName::CaretDown)
+                                        .size(gpui::px(20.))
+                                        .selected(false),
+                                ),
                         )
                     })
                     .when(!has_clan, |el| {
@@ -2011,7 +2015,11 @@ fn onboarding_get_started(
                                 .font_weight(gpui::FontWeight::BOLD)
                                 .child(total.to_string()),
                         )
-                        .child(Icon::new(IconName::CHEVRON_RIGHT_16).selected(false)),
+                        .child(
+                            Icon::new(IconName::ArrowRight)
+                                .size(gpui::px(16.))
+                                .selected(false),
+                        ),
                 ),
         )
         .child(
@@ -2043,6 +2051,7 @@ fn nav_row(
 ) -> gpui::Div {
     let label = label.into();
     div()
+        .group("clan-navigation-row")
         .flex()
         .flex_row()
         .items_center()
@@ -2053,17 +2062,20 @@ fn nav_row(
         .rounded(px(4.))
         .cursor_pointer()
         .when(active, |element| element.bg(theme.bg_hover))
-        .hover(|style| style.bg(theme.bg_hover))
+        .hover(|style| style.bg(theme.bg_hover).text_color(theme.text_primary))
         .text_color(if active {
             theme.text_primary
         } else {
             theme.text_secondary
         })
-        .child(Icon::new(icon).size(px(20.)).text_color(if active {
-            theme.text_primary
-        } else {
-            theme.text_secondary
-        }))
+        .child(
+            Icon::new(icon)
+                .size(px(20.))
+                .selected(active)
+                .group_hover("clan-navigation-row", |style| {
+                    style.text_color(theme.tokens.icon_selected())
+                }),
+        )
         .child(
             div()
                 .text_base()
@@ -2310,44 +2322,18 @@ fn render_banner_and_events(
             .clan(clan_id)
             .is_some_and(|clan| clan.is_onboarding)
     });
-    let guide_row = div()
-        .group("clan-guide-nav")
-        .flex()
-        .flex_row()
-        .items_center()
-        .w_full()
-        .px_2()
-        .h(px(34.))
-        .gap_2()
-        .rounded(px(4.))
-        .cursor_pointer()
-        .when(guide_active, |element| element.bg(theme.bg_hover))
-        .hover(|style| style.bg(theme.bg_hover))
-        .text_color(if guide_active {
-            theme.tokens.text_theme_primary
-        } else {
-            theme.tokens.text_secondary
-        })
-        .child(
-            Icon::new(IconName::GUIDE_20)
-                .flex_none()
-                .when(!guide_active, |icon| {
-                    icon.opacity(0.65)
-                        .group_hover("clan-guide-nav", |style| style.opacity(1.))
-                }),
-        )
-        .child(
-            div()
-                .text_base()
-                .font_weight(gpui::FontWeight::MEDIUM)
-                .child(mezon_i18n::t(locale, "channelList.navigation.clanGuide")),
-        )
-        .id("clan-guide-nav")
-        .on_click(move |_, _, cx| {
-            if let Some(clan_id) = members_clan_id {
-                crate::router::navigate(cx, crate::router::Route::ClanGuide { clan_id });
-            }
-        });
+    let guide_row = nav_row(
+        IconName::AppHelpIcon,
+        mezon_i18n::t(locale, "channelList.navigation.clanGuide"),
+        theme,
+        guide_active,
+    )
+    .id("clan-guide-nav")
+    .on_click(move |_, _, cx| {
+        if let Some(clan_id) = members_clan_id {
+            crate::router::navigate(cx, crate::router::Route::ClanGuide { clan_id });
+        }
+    });
     let members_row = nav_row(IconName::MemberList, "Members", theme, members_active)
         .id("clan-members-nav")
         .relative()
@@ -2483,7 +2469,8 @@ fn render_banner_and_events(
                     )
                     .into_any_element()
             } else {
-                Icon::new(IconName::CHANNEL_APP_24)
+                Icon::new(IconName::AppChannelIcon)
+                    .size(gpui::px(24.))
                     .text_color(theme.text_primary)
                     .into_any_element()
             };
@@ -2536,7 +2523,11 @@ fn render_banner_and_events(
                             sidebar.open_app_list(all_apps.clone(), cx);
                         });
                     })
-                    .child(Icon::new(IconName::CHEVRON_RIGHT_24).text_color(theme.text_primary)),
+                    .child(
+                        Icon::new(IconName::ArrowRight)
+                            .size(gpui::px(24.))
+                            .text_color(theme.text_primary),
+                    ),
             );
         }
 
@@ -2679,7 +2670,11 @@ fn render_sidebar_item(
                                 Shell::global(cx)
                                     .update(cx, |shell, cx| shell.show_modal(modal.into(), cx));
                             })
-                            .child(Icon::new(IconName::PLUS_20).selected(false)),
+                            .child(
+                                Icon::new(IconName::Plus)
+                                    .size(gpui::px(20.))
+                                    .selected(false),
+                            ),
                     )
                 })
                 .on_click({
@@ -3175,7 +3170,8 @@ fn render_sidebar_item(
                     )
                     .when(member.sharing_screen, |el| {
                         el.child(
-                            Icon::new(IconName::SCREEN_SHARE_16)
+                            Icon::new(IconName::VoiceScreenShareIcon)
+                                .size(gpui::px(16.))
                                 .text_color(crate::util::user_status::in_voice_icon_color(theme)),
                         )
                     })
@@ -3209,7 +3205,11 @@ fn viewer_count_badge(viewer_count: u32, theme: &Theme) -> gpui::Div {
         .gap_1()
         .text_xs()
         .text_color(theme.text_muted)
-        .child(Icon::new(IconName::EYE_16).selected(false))
+        .child(
+            Icon::new(IconName::EyeOpen)
+                .size(gpui::px(16.))
+                .selected(false),
+        )
         .child(viewer_count.to_string())
 }
 

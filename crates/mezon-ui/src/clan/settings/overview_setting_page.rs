@@ -708,7 +708,11 @@ impl OverviewSettingPage {
                 )
             })
             .when(!has_logo, |el| {
-                el.child(Icon::new(IconName::CAMERA_32).selected(false))
+                el.child(
+                    Icon::new(IconName::UploadImage)
+                        .size(gpui::px(32.))
+                        .selected(false),
+                )
             })
             .child(
                 div()
@@ -819,10 +823,11 @@ impl OverviewSettingPage {
                 )
             })
             .when(!has_banner, |el| {
-                el.flex()
-                    .items_center()
-                    .justify_center()
-                    .child(Icon::new(IconName::CAMERA_32).selected(false))
+                el.flex().items_center().justify_center().child(
+                    Icon::new(IconName::UploadImage)
+                        .size(gpui::px(32.))
+                        .selected(false),
+                )
             })
             .child(
                 div()
@@ -868,7 +873,8 @@ impl OverviewSettingPage {
             .gap_1()
             .overflow_hidden()
             .child(
-                Icon::new(IconName::CHANNEL_16)
+                Icon::new(IconName::Hashtag)
+                    .size(gpui::px(16.))
                     .flex_shrink_0()
                     .selected(false),
             )
@@ -924,7 +930,8 @@ impl OverviewSettingPage {
                     }),
             )
             .child(
-                Icon::new(IconName::CARET_DOWN_16)
+                Icon::new(IconName::ArrowDownFill)
+                    .size(gpui::px(16.))
                     .flex_shrink_0()
                     .selected(false),
             );

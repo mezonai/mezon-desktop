@@ -282,7 +282,9 @@ impl Render for CreatePollModal {
                     .hover(|s| s.bg(theme.tokens.bg_item_hover))
                     .on_click(|_: &ClickEvent, _window, cx| Self::close(cx))
                     .child(
-                        Icon::new(IconName::CLOSE_20).text_color(theme.tokens.text_theme_primary),
+                        Icon::new(IconName::Close)
+                            .size(gpui::px(20.))
+                            .text_color(theme.tokens.text_theme_primary),
                     ),
             );
 
@@ -338,7 +340,8 @@ impl Render for CreatePollModal {
                 .aspect_square()
                 .flex_none()
                 .into_any_element(),
-                None => Icon::new(IconName::EMOJI_20)
+                None => Icon::new(IconName::Smile)
+                    .size(gpui::px(20.))
                     .flex_none()
                     .text_color(theme.tokens.text_theme_primary)
                     .hover(|s| s.text_color(theme.tokens.text_secondary))
@@ -406,7 +409,8 @@ impl Render for CreatePollModal {
                             this.remove_answer(index, cx);
                         }))
                         .child(
-                            Icon::new(IconName::TRASH_20)
+                            Icon::new(IconName::TrashIcon)
+                                .size(gpui::px(20.))
                                 .text_color(theme.tokens.text_theme_primary),
                         ),
                 );
@@ -443,7 +447,8 @@ impl Render for CreatePollModal {
                         this.add_answer(window, cx);
                     }))
                     .child(
-                        Icon::new(IconName::PLUS_CIRCLE_16)
+                        Icon::new(IconName::AddCircle)
+                            .size(gpui::px(16.))
                             .flex_none()
                             .text_color(theme.tokens.text_theme_primary)
                             .hover(|s| s.text_color(theme.tokens.text_secondary)),
@@ -481,7 +486,8 @@ impl Render for CreatePollModal {
                     }))
                     .child(t(self.duration_label()))
                     .child(
-                        Icon::new(IconName::ARROW_DOWN_20)
+                        Icon::new(IconName::ArrowDown)
+                            .size(gpui::px(20.))
                             .text_color(theme.tokens.text_theme_primary),
                     ),
             );
@@ -577,7 +583,11 @@ impl Render for CreatePollModal {
                             .border_color(theme.tokens.bg_button_primary)
                     })
                     .when(allow_multiple, |d| {
-                        d.child(Icon::new(IconName::CHECK_16).selected(false))
+                        d.child(
+                            Icon::new(IconName::Check)
+                                .size(gpui::px(16.))
+                                .selected(false),
+                        )
                     }),
             )
             .child(

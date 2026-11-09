@@ -112,7 +112,8 @@ pub fn render_create_thread_panel(params: CreateThreadPanelParams<'_>) -> AnyEle
                         .id("create-thread-close")
                         .cursor_pointer()
                         .child(
-                            Icon::new(IconName::CLOSE_16)
+                            Icon::new(IconName::Close)
+                                .size(gpui::px(16.))
                                 .text_color(tokens.text_theme_primary_hover),
                         )
                         .on_click(move |_: &ClickEvent, _window, cx| {

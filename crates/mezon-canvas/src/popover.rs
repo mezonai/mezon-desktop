@@ -203,7 +203,11 @@ fn render_header(
         .flex_shrink_0()
         .border_r_1()
         .border_color(tokens.border_primary)
-        .child(Icon::new(IconName::CANVAS_16).text_color(tokens.bg_icon_theme))
+        .child(
+            Icon::new(IconName::CanvasIcon)
+                .size(gpui::px(16.))
+                .text_color(tokens.bg_icon_theme),
+        )
         .child(
             div()
                 .text_base()
@@ -241,7 +245,11 @@ fn render_header(
                 .bottom_0()
                 .items_center()
                 .pl_1()
-                .child(Icon::new(IconName::SEARCH_16).text_color(tokens.text_theme_primary)),
+                .child(
+                    Icon::new(IconName::Search)
+                        .size(gpui::px(16.))
+                        .text_color(tokens.text_theme_primary),
+                ),
         );
 
     let create_btn = Button::new("canvas-create-btn")
@@ -253,7 +261,11 @@ fn render_header(
         }));
 
     let close_btn = Button::new("canvas-close-btn")
-        .icon(Icon::new(IconName::CLOSE_16).text_color(tokens.text_theme_primary_hover))
+        .icon(
+            Icon::new(IconName::Close)
+                .size(gpui::px(16.))
+                .text_color(tokens.text_theme_primary_hover),
+        )
         .ghost()
         .with_size(Size::Small)
         .on_click(move |_: &ClickEvent, _window, cx| {
@@ -383,7 +395,8 @@ fn render_empty(
         .px_12()
         .gap_2()
         .child(
-            Icon::new(IconName::CANVAS_48)
+            Icon::new(IconName::CanvasIcon)
+                .size(gpui::px(48.))
                 .size(px(56.0))
                 .text_color(tokens.bg_icon_theme),
         )

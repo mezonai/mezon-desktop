@@ -732,7 +732,9 @@ fn target_grid(
 }
 
 fn tile_icon(color: gpui::Hsla) -> impl IntoElement {
-    Icon::new(IconName::SCREEN_SHARE_40).text_color(color)
+    Icon::new(IconName::VoiceScreenShareIcon)
+        .size(gpui::px(40.))
+        .text_color(color)
 }
 
 const MACOS_SCREEN_CAPTURE_SETTINGS_URL: &str =
@@ -764,7 +766,11 @@ fn permission_denied_state(locale: &str, cx: &mut Context<ScreenShareModal>) -> 
                 .size(px(64.))
                 .rounded_full()
                 .bg(icon_bg)
-                .child(Icon::new(IconName::SCREEN_SHARE_32).text_color(text_muted)),
+                .child(
+                    Icon::new(IconName::VoiceScreenShareIcon)
+                        .size(gpui::px(32.))
+                        .text_color(text_muted),
+                ),
         )
         .child(
             div()

@@ -429,7 +429,11 @@ impl Render for MediaChannelPanel {
                                     .ok();
                             }
                         })
-                        .child(Icon::new(IconName::PLUS_24).text_color(theme.text_primary)),
+                        .child(
+                            Icon::new(IconName::Plus)
+                                .size(gpui::px(24.))
+                                .text_color(theme.text_primary),
+                        ),
                 )
             })
             .into_any_element()
@@ -655,7 +659,11 @@ fn render_empty_state(
                 .flex()
                 .items_center()
                 .justify_center()
-                .child(Icon::new(IconName::FILE_IMAGE_48).selected(false)),
+                .child(
+                    Icon::new(IconName::ImageThumbnail)
+                        .size(gpui::px(48.))
+                        .selected(false),
+                ),
         )
         .child(
             div()
@@ -692,7 +700,11 @@ fn render_empty_state(
                     .cursor_pointer()
                     .hover(|el| el.opacity(0.9))
                     .on_click(move |_, window, cx| on_create(window, cx))
-                    .child(Icon::new(IconName::PLUS_CIRCLE_20).text_color(theme.text_primary))
+                    .child(
+                        Icon::new(IconName::AddCircle)
+                            .size(gpui::px(20.))
+                            .text_color(theme.text_primary),
+                    )
                     .child(
                         div()
                             .font_weight(FontWeight::MEDIUM)

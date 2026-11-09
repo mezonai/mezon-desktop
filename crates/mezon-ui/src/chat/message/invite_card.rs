@@ -148,7 +148,11 @@ pub fn render_invite_card(
                 .h(px(20.))
                 .rounded_full()
                 .bg(rgb(COMMUNITY_GREEN))
-                .child(Icon::new(IconName::CHECK_16).text_color(theme.tokens.text_theme_primary)),
+                .child(
+                    Icon::new(IconName::Check)
+                        .size(gpui::px(16.))
+                        .text_color(theme.tokens.text_theme_primary),
+                ),
         );
     }
 

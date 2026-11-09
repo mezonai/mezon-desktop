@@ -591,7 +591,8 @@ impl ChannelSettingScreen {
                             .cursor_pointer()
                             .hover(|style| style.bg(theme.bg_hover))
                             .child(
-                                Icon::new(IconName::CLOSE_16)
+                                Icon::new(IconName::Close)
+                                    .size(gpui::px(16.))
                                     .text_color(theme.tokens.text_theme_primary),
                             )
                             .on_click(|_, _, cx| crate::router::go_back(cx)),

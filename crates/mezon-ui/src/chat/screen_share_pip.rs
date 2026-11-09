@@ -92,7 +92,8 @@ impl Render for ScreenSharePipView {
                 .size_full()
                 .object_fit(ObjectFit::Contain)
                 .into_any_element(),
-            None => Icon::new(IconName::SCREEN_SHARE_40)
+            None => Icon::new(IconName::VoiceScreenShareIcon)
+                .size(gpui::px(40.))
                 .text_color(rgb(0x9a9a9a))
                 .into_any_element(),
         };
@@ -114,7 +115,11 @@ impl Render for ScreenSharePipView {
             .when(cfg!(target_os = "windows"), |el| {
                 el.window_control_area(WindowControlArea::Close)
             })
-            .child(Icon::new(IconName::CLOSE_16).text_color(rgb(0xffffff)))
+            .child(
+                Icon::new(IconName::Close)
+                    .size(gpui::px(16.))
+                    .text_color(rgb(0xffffff)),
+            )
             .on_mouse_down(MouseButton::Left, |_, window, cx| {
                 cx.stop_propagation();
                 window.remove_window();

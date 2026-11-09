@@ -806,10 +806,11 @@ impl CommunitySettingPage {
                 )
             })
             .when(!has_banner, |el| {
-                el.flex()
-                    .items_center()
-                    .justify_center()
-                    .child(Icon::new(IconName::CAMERA_32).selected(false))
+                el.flex().items_center().justify_center().child(
+                    Icon::new(IconName::UploadImage)
+                        .size(gpui::px(32.))
+                        .selected(false),
+                )
             })
             .child(
                 div()

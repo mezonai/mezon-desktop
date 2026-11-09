@@ -362,7 +362,11 @@ impl MeetingView {
                             .rounded_md()
                             .cursor_pointer()
                             .hover(|style| style.bg(theme.bg_hover))
-                            .child(Icon::new(IconName::CLOSE_16).selected(false))
+                            .child(
+                                Icon::new(IconName::Close)
+                                    .size(gpui::px(16.))
+                                    .selected(false),
+                            )
                             .on_click(cx.listener(|this, _, _, cx| this.toggle_voice_chat(cx))),
                     ),
             )
