@@ -7,7 +7,7 @@ use crate::components::primitives::{Icon, IconName};
 
 const GREEN_600: u32 = 0x16_a3_4a;
 const BLUE_500: u32 = 0x3b_82_f6;
-const CARD_WIDTH: f32 = 300.0;
+const CARD_WIDTH: f32 = 360.0;
 const DETAIL_MAX_WIDTH: f32 = 200.0;
 
 pub fn render_token_transaction_card(
@@ -31,7 +31,7 @@ pub fn render_token_transaction_card(
         .gap_2()
         .w_full()
         .child(
-            div().w(px(50.)).child(
+            div().w(px(50.)).flex_shrink_0().child(
                 Icon::new(IconName::Transaction)
                     .size(px(50.))
                     .text_color(rgb(GREEN_600)),
@@ -47,6 +47,8 @@ pub fn render_token_transaction_card(
                 .child(
                     div()
                         .cursor(gpui::CursorStyle::IBeam)
+                        .w_full()
+                        .min_w_0()
                         .font_weight(FontWeight::SEMIBOLD)
                         .text_color(theme.tokens.text_theme_primary)
                         .when_some(title_range, |div, range| {
@@ -105,6 +107,7 @@ pub fn render_token_transaction_card(
         .child(
             div()
                 .w(px(CARD_WIDTH))
+                .max_w_full()
                 .border_1()
                 .border_color(theme.tokens.border_primary)
                 .rounded(px(6.))
