@@ -1072,6 +1072,7 @@ fn match_copied_mention<'a>(
     mention: &CopiedMention,
     members: impl Iterator<Item = &'a MentionMemberRaw> + Clone,
     roles: &[Rc<RoleSuggestRaw>],
+    roster_partial: bool,
 ) -> Option<(String, TokenKind)> {
     if mention.user_id == MENTION_HERE_USER_ID {
         return Some((
@@ -1095,9 +1096,14 @@ fn match_copied_mention<'a>(
             .filter(named)
             .find(|member| member.user_id == mention.user_id)
             .or_else(|| members.clone().find(|member| member.username_lc == name))
-            .or_else(|| members.clone().find(named))?;
+            .or_else(|| members.clone().find(named));
+        let user_id = match member {
+            Some(member) => member.user_id.clone(),
+            None if roster_partial => mention.user_id.clone(),
+            None => return None,
+        };
         TokenKind::Mention {
-            user_id: member.user_id.clone(),
+            user_id,
             role_id: String::new(),
         }
     } else if !mention.role_id.is_empty() {
@@ -1857,13 +1863,17 @@ impl MentionInput {
         }
     }
 
-    fn resolve_copied_mention(&self, mention: &CopiedMention) -> Option<(String, TokenKind)> {
+    fn resolve_copied_mention(
+        &self,
+        mention: &CopiedMention,
+        roster_partial: bool,
+    ) -> Option<(String, TokenKind)> {
         let members = self
             .session_members
             .iter()
             .chain(self.remote_members.iter())
             .map(Rc::as_ref);
-        match_copied_mention(mention, members, &self.session_roles)
+        match_copied_mention(mention, members, &self.session_roles, roster_partial)
     }
 
     fn on_paste(
@@ -1906,8 +1916,9 @@ impl MentionInput {
                 self.refresh_pool(Sigil::At, cx);
                 self.pooled[Sigil::At.slot()] = (!self.pool_is_empty(Sigil::At)).then_some(scope);
             }
+            let roster_partial = mention_remote_search_scope(cx).is_some();
             let (rebuilt, tokens) = rebuild_pasted_mentions(pasted, &mentions, |mention| {
-                self.resolve_copied_mention(mention)
+                self.resolve_copied_mention(mention, roster_partial)
             });
             let replaced = self.input.read(cx).insert_range();
             shift_committed_for_paste(&mut self.committed, &replaced, rebuilt.len());
@@ -5520,12 +5531,12 @@ mod draft_tests {
         members: &[super::MentionMemberRaw],
         roles: &[std::rc::Rc<super::RoleSuggestRaw>],
     ) -> Option<(String, String, String)> {
-        super::match_copied_mention(mention, members.iter(), roles).map(
-            |(display, kind)| match kind {
+        super::match_copied_mention(mention, members.iter(), roles, false).map(|(display, kind)| {
+            match kind {
                 TokenKind::Mention { user_id, role_id } => (display, user_id, role_id),
                 _ => panic!("pasted mentions resolve to mention tokens"),
-            },
-        )
+            }
+        })
     }
 
     #[test]
@@ -5560,6 +5571,30 @@ mod draft_tests {
         assert_eq!(
             matched(&copied("@Bob Builder", "9", ""), &members, &[]),
             Some(("@Bob Builder".to_string(), "2".to_string(), String::new()))
+        );
+    }
+
+    #[test]
+    fn a_clan_whose_roster_is_cut_by_the_server_keeps_an_unknown_user_mention_by_id() {
+        let members = [pool_member("2", "Bob", "bob", "")];
+        assert_eq!(
+            super::match_copied_mention(
+                &copied("@Early Joiner", "9", ""),
+                members.iter(),
+                &[],
+                true
+            ),
+            Some((
+                "@Early Joiner".to_string(),
+                TokenKind::Mention {
+                    user_id: "9".to_string(),
+                    role_id: String::new(),
+                }
+            ))
+        );
+        assert!(
+            super::match_copied_mention(&copied("@Mod", "", "7"), members.iter(), &[], true)
+                .is_none()
         );
     }
 
