@@ -2365,6 +2365,7 @@
   "contextMenu.member.shareContact": "この連絡先を共有",
   "contextMenu.member.unBanChat": "ブロックを解除",
   "contextMenu.member.unblock": "ブロックを解除",
+  "contextMenu.member.block": "ブロック",
   "contextMenu.member.unblockFailed": "ユーザーのブロックを解除できません",
   "contextMenu.member.unblockSuccess": "ユーザーのブロックを解除しました",
   "contextMenu.menu": "オプション",

@@ -2365,6 +2365,7 @@
   "contextMenu.member.shareContact": "Compartilhar contato",
   "contextMenu.member.unBanChat": "Desbloquear",
   "contextMenu.member.unblock": "Desbloquear",
+  "contextMenu.member.block": "Bloquear",
   "contextMenu.member.unblockFailed": "Não foi possível desbloquear o usuário",
   "contextMenu.member.unblockSuccess": "Usuário desbloqueado com sucesso",
   "contextMenu.menu": "Opções",

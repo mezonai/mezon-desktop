@@ -2364,6 +2364,7 @@
   "contextMenu.member.shareContact": "Поділитися цим контактом",
   "contextMenu.member.unBanChat": "Розблокувати",
   "contextMenu.member.unblock": "Розблокувати",
+  "contextMenu.member.block": "Заблокувати",
   "contextMenu.member.unblockFailed": "Не вдалося розблокувати користувача",
   "contextMenu.member.unblockSuccess": "Користувача успішно розблоковано",
   "contextMenu.menu": "Меню",

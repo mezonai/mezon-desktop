@@ -1772,8 +1772,7 @@ impl ChatArea {
             }
         };
         let dm_blocked = dm_peer.is_some_and(|peer| {
-            FriendStore::try_global(cx)
-                .is_some_and(|store| store.read(cx).is_user_blocked_by_me(peer, cx))
+            FriendStore::try_global(cx).is_some_and(|store| store.read(cx).is_blocked_with(peer))
         });
         let mut notify = self.dm_blocked != dm_blocked;
         self.dm_blocked = dm_blocked;

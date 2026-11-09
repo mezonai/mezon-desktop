@@ -2373,6 +2373,7 @@
   "contextMenu.member.shareContact": "Контакт белән уртаклашу",
   "contextMenu.member.unBanChat": "Баннан алу",
   "contextMenu.member.unblock": "Блоктан алу",
+  "contextMenu.member.block": "Блоклау",
   "contextMenu.member.unblockFailed": "Кулланучыны блоктан алып булмады",
   "contextMenu.member.unblockSuccess": "Кулланучы блоктан алынды",
   "contextMenu.menu": "Меню",
