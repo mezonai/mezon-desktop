@@ -1802,7 +1802,7 @@ impl Render for ChatLayout {
                     .on_click(|_, _, cx| mezon_store::update_restart_clicked(cx))
                     .child(
                         Icon::new(IconName::ReloadIcon)
-                            .size(gpui::px(16.))
+                            .size(px(16.))
                             .text_color(gpui::white()),
                     )
                     .child(
@@ -1838,7 +1838,7 @@ impl Render for ChatLayout {
                     .on_click(|_, _, cx| mezon_store::update_available_clicked(cx))
                     .child(
                         Icon::new(IconName::Download)
-                            .size(gpui::px(16.))
+                            .size(px(16.))
                             .text_color(gpui::white()),
                     )
                     .child(
@@ -1881,7 +1881,7 @@ impl Render for ChatLayout {
                     })
                     .child(
                         Icon::new(IconName::Download)
-                            .size(gpui::px(16.))
+                            .size(px(16.))
                             .text_color(gpui::white()),
                     )
                     .child(
@@ -2650,11 +2650,11 @@ impl ChatLayout {
         let loading = store.noise_suppression_loading();
         let icon = if enabled {
             Icon::new(IconName::NoiseSupressionIcon)
-                .size(gpui::px(20.))
+                .size(px(20.))
                 .text_color(theme.text_primary)
         } else {
             Icon::new(IconName::NoiseSupressionDisabledIcon)
-                .size(gpui::px(20.))
+                .size(px(20.))
                 .text_color(theme.danger_text)
         };
         let button = div()

@@ -93,7 +93,7 @@ impl TransferOwnerModal {
                 el.child(
                     div().absolute().top(px(-14.)).child(
                         Icon::new(IconName::OwnerIcon)
-                            .size(gpui::px(20.))
+                            .size(px(20.))
                             .text_color(rgb(OWNER_ICON_COLOR)),
                     ),
                 )
@@ -165,7 +165,7 @@ impl Render for TransferOwnerModal {
                             .child(
                                 div().mt(px(24.)).child(
                                     Icon::new(IconName::TransferOwner)
-                                        .size(gpui::px(48.))
+                                        .size(px(48.))
                                         .size(px(60.0))
                                         .text_color(theme.text_primary),
                                 ),

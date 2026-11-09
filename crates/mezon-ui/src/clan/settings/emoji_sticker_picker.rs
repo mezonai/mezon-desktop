@@ -627,11 +627,7 @@ impl Render for EmojiStickerPicker {
                             .rounded_full()
                             .cursor_pointer()
                             .hover(|s| s.bg(theme.bg_hover))
-                            .child(
-                                Icon::new(IconName::Close)
-                                    .size(gpui::px(16.))
-                                    .selected(false),
-                            )
+                            .child(Icon::new(IconName::Close).size(px(16.)).selected(false))
                             .on_click(cx.listener(|this, _, _, cx| this.close(cx))),
                     ),
             )
@@ -749,7 +745,7 @@ fn preview_image(
             .rounded_md()
             .into_any_element(),
         None => Icon::new(IconName::UploadImage)
-            .size(gpui::px(48.))
+            .size(px(48.))
             .size(px(50.0))
             .text_color(placeholder_color)
             .into_any_element(),

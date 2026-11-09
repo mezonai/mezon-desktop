@@ -205,7 +205,7 @@ fn render_header(
         .border_color(tokens.border_primary)
         .child(
             Icon::new(IconName::CanvasIcon)
-                .size(gpui::px(16.))
+                .size(px(16.))
                 .text_color(tokens.bg_icon_theme),
         )
         .child(
@@ -247,7 +247,7 @@ fn render_header(
                 .pl_1()
                 .child(
                     Icon::new(IconName::Search)
-                        .size(gpui::px(16.))
+                        .size(px(16.))
                         .text_color(tokens.text_theme_primary),
                 ),
         );
@@ -263,7 +263,7 @@ fn render_header(
     let close_btn = Button::new("canvas-close-btn")
         .icon(
             Icon::new(IconName::Close)
-                .size(gpui::px(16.))
+                .size(px(16.))
                 .text_color(tokens.text_theme_primary_hover),
         )
         .ghost()
@@ -396,7 +396,7 @@ fn render_empty(
         .gap_2()
         .child(
             Icon::new(IconName::CanvasIcon)
-                .size(gpui::px(48.))
+                .size(px(48.))
                 .size(px(56.0))
                 .text_color(tokens.bg_icon_theme),
         )

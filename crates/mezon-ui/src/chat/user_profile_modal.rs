@@ -559,11 +559,7 @@ impl Render for UserProfileModal {
                                 .rounded(px(4.))
                                 .cursor_pointer()
                                 .hover(|style| style.bg(theme.bg_hover))
-                                .child(
-                                    Icon::new(IconName::PenEdit)
-                                        .size(gpui::px(16.))
-                                        .selected(false),
-                                )
+                                .child(Icon::new(IconName::PenEdit).size(px(16.)).selected(false))
                                 .child(
                                     div()
                                         .text_sm()
@@ -676,7 +672,7 @@ fn render_profile_actions(
         .child(profile_action_button(
             "full-profile-transfer",
             Icon::new(IconName::Transaction)
-                .size(gpui::px(16.))
+                .size(px(16.))
                 .text_color(gpui::white())
                 .into_any_element(),
             mezon_i18n::t(locale, "common.transfer"),
@@ -719,7 +715,7 @@ fn render_profile_actions(
             .child(profile_action_button(
                 "full-profile-ignore-friend",
                 Icon::new(IconName::Close)
-                    .size(gpui::px(16.))
+                    .size(px(16.))
                     .text_color(gpui::white())
                     .into_any_element(),
                 mezon_i18n::t(locale, "common.ignore"),
@@ -743,7 +739,7 @@ fn render_profile_actions(
     let friend_icon = match friend_state {
         Some(FriendState::Friend) => friend_icon(icon_cache.clone()),
         Some(FriendState::InviteSent) => Icon::new(IconName::PendingFriend)
-            .size(gpui::px(16.))
+            .size(px(16.))
             .text_color(gpui::hsla(0., 0., 0.92, 1.))
             .into_any_element(),
         Some(FriendState::Blocked) => return actions.into_any_element(),

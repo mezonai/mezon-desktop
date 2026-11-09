@@ -913,7 +913,7 @@ fn render_header(theme: &Theme, locale: &str) -> impl IntoElement {
         .bg(tokens.theme_setting_nav)
         .child(
             Icon::new(IconName::PinList)
-                .size(gpui::px(16.))
+                .size(px(16.))
                 .text_color(tokens.bg_icon_theme),
         )
         .child(
@@ -2290,7 +2290,7 @@ fn render_pin_file_attachment(
                         })
                         .child(
                             Icon::new(IconName::Download)
-                                .size(gpui::px(16.))
+                                .size(px(16.))
                                 .text_color(theme.tokens.text_theme_primary),
                         ),
                 ),

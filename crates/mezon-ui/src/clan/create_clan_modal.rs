@@ -296,7 +296,7 @@ impl CreateClanModal {
             .on_click(cx.listener(|this, _, _window, cx| this.go_to_details(None, cx)))
             .child(
                 Icon::new(IconName::Sparkles)
-                    .size(gpui::px(20.))
+                    .size(px(20.))
                     .text_color(theme.tokens.text_theme_primary),
             )
             .child(
@@ -435,7 +435,7 @@ impl CreateClanModal {
                 .on_click(cx.listener(|this, _, window, cx| this.pick_logo(window, cx)))
                 .child(
                     Icon::new(IconName::UploadImage)
-                        .size(gpui::px(24.))
+                        .size(px(24.))
                         .selected(false),
                 )
                 .child(

@@ -520,7 +520,7 @@ impl Render for FooterProfilePopup {
                                     }))
                                     .child(
                                         Icon::new(IconName::PenEdit)
-                                            .size(gpui::px(16.))
+                                            .size(px(16.))
                                             .text_color(text_secondary),
                                     ),
                             )
@@ -544,7 +544,7 @@ impl Render for FooterProfilePopup {
                                     }))
                                     .child(
                                         Icon::new(IconName::TrashIcon)
-                                            .size(gpui::px(16.))
+                                            .size(px(16.))
                                             .text_color(gpui::rgb(0xdc2626)),
                                     ),
                             ),
@@ -580,7 +580,7 @@ impl Render for FooterProfilePopup {
             .py(px(6.))
             .child(
                 Icon::new(IconName::Check)
-                    .size(gpui::px(16.))
+                    .size(px(16.))
                     .text_color(text_secondary),
             )
             .child(div().text_sm().text_color(text_primary).child(format!(
@@ -631,7 +631,7 @@ impl Render for FooterProfilePopup {
                 )
                 .child(
                     Icon::new(IconName::ArrowRight)
-                        .size(gpui::px(16.))
+                        .size(px(16.))
                         .text_color(text_secondary),
                 ),
         );
@@ -693,7 +693,7 @@ impl Render for FooterProfilePopup {
                 if has_duration {
                     row = row.child(
                         Icon::new(IconName::ArrowRight)
-                            .size(gpui::px(16.))
+                            .size(px(16.))
                             .text_color(text_primary)
                             .group_hover(
                                 SharedString::from(format!("footer-status-{option_id}")),

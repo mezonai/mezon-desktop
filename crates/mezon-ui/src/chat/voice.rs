@@ -633,7 +633,7 @@ pub fn render_mini_bar(
                         .gap_1()
                         .child(
                             Icon::new(IconName::LoudVolume)
-                                .size(gpui::px(16.))
+                                .size(px(16.))
                                 .text_color(header_color),
                         )
                         .child(
@@ -1138,7 +1138,7 @@ impl RenderOnce for VoiceInboxTrigger {
                     .relative()
                     .child(
                         Icon::new(IconName::EmptyUnread)
-                            .size(gpui::px(20.))
+                            .size(px(20.))
                             .text_color(tint),
                     )
                     .when(self.show_badge, |d| {
@@ -1450,7 +1450,7 @@ fn join_role_button(
                         .text_color(gpui::rgb(0xffffff))
                         .child(
                             Icon::new(IconName::CaretDown)
-                                .size(gpui::px(16.))
+                                .size(px(16.))
                                 .text_color(gpui::rgb(0xffffff)),
                         )
                         .on_click({
@@ -1848,7 +1848,7 @@ fn raised_hands_overlay(
                     )
                     .child(
                         Icon::new(IconName::VoiceRaiseHandIcon)
-                            .size(gpui::px(32.))
+                            .size(px(32.))
                             .text_color(gpui::rgb(RAISE_HAND_GOLD)),
                     )
             }))
@@ -2281,7 +2281,7 @@ pub(crate) fn render_screen_fullscreen_overlay(
     let media = match frame_opt {
         Some(frame) => render_voice_frame(frame, ObjectFit::Contain),
         None => Icon::new(IconName::VoiceScreenShareIcon)
-            .size(gpui::px(48.))
+            .size(px(48.))
             .size(px(64.0))
             .selected(false)
             .into_any_element(),
@@ -2303,7 +2303,7 @@ pub(crate) fn render_screen_fullscreen_overlay(
         .hover(|s| s.bg(gpui::rgba(0x000000d9)))
         .child(
             Icon::new(IconName::ExitFullScreen)
-                .size(gpui::px(20.))
+                .size(px(20.))
                 .text_color(gpui::rgb(0xffffff)),
         )
         .on_click(move |_, _, cx| {
@@ -2410,7 +2410,7 @@ fn kick_confirm_modal(
                         .bg(theme.bg_hover)
                         .child(
                             Icon::new(IconName::CloseIcon)
-                                .size(gpui::px(24.))
+                                .size(px(24.))
                                 .text_color(theme.danger_text),
                         ),
                 )
@@ -2875,7 +2875,7 @@ fn render_focus_layout<H: CallLayoutHost>(
             )
             .child(
                 Icon::new(IconName::MemberIcon)
-                    .size(gpui::px(20.))
+                    .size(px(20.))
                     .text_color(gpui::rgb(0xffffff)),
             )
             .child(
@@ -3398,7 +3398,7 @@ fn tile_inner(
 
     if cell.is_screen {
         return Icon::new(IconName::VoiceScreenShareIcon)
-            .size(gpui::px(48.))
+            .size(px(48.))
             .selected(false)
             .into_any_element();
     }
@@ -3454,7 +3454,7 @@ fn tile_metadata(locale: &str, cell: &VideoCell) -> AnyElement {
                 .when(cell.muted && !cell.is_screen, |this| {
                     this.child(
                         Icon::new(IconName::VoiceMicDisabledIcon)
-                            .size(gpui::px(16.))
+                            .size(px(16.))
                             .flex_none()
                             .text_color(gpui::rgba(0xffffff80)),
                     )
@@ -3462,7 +3462,7 @@ fn tile_metadata(locale: &str, cell: &VideoCell) -> AnyElement {
                 .when(cell.is_screen, |this| {
                     this.child(
                         Icon::new(IconName::VoiceScreenShareIcon)
-                            .size(gpui::px(16.))
+                            .size(px(16.))
                             .flex_none()
                             .text_color(gpui::rgb(0xffffff)),
                     )
@@ -3529,7 +3529,7 @@ fn tile_sound_overlay(store: &VoiceStore, cell: &VideoCell) -> Option<AnyElement
             .shadow_lg()
             .child(
                 Icon::new(IconName::VoiceSoundControlIcon)
-                    .size(gpui::px(16.))
+                    .size(px(16.))
                     .text_color(gpui::rgb(0xffffff)),
             )
             .into_any_element(),
@@ -4144,7 +4144,7 @@ fn control_bar(
                         .id("voice-record-stalled")
                         .child(
                             Icon::new(IconName::VoiceScreenShareStopIcon)
-                                .size(gpui::px(16.))
+                                .size(px(16.))
                                 .text_color(gpui::rgb(RAISE_HAND_GOLD)),
                         )
                         .tooltip(Tooltip::text(mezon_i18n::t(
@@ -4248,7 +4248,7 @@ fn render_network_warning_callout(locale: &str, voice: &Entity<VoiceStore>) -> A
                         .bg(with_alpha(gpui::rgb(NETWORK_WARNING_ICON), 0.15))
                         .child(
                             Icon::new(IconName::TriangleAlert)
-                                .size(gpui::px(20.))
+                                .size(px(20.))
                                 .text_color(gpui::rgb(NETWORK_WARNING_ICON)),
                         ),
                 )
@@ -4285,7 +4285,7 @@ fn render_network_warning_callout(locale: &str, voice: &Entity<VoiceStore>) -> A
                         .hover(|s| s.bg(gpui::rgba(0x0000000d)))
                         .child(
                             Icon::new(IconName::Close)
-                                .size(gpui::px(16.))
+                                .size(px(16.))
                                 .text_color(with_alpha(text_color, 0.7)),
                         )
                         .on_click(move |_, _, cx| {
@@ -4436,7 +4436,7 @@ fn render_control_hint_callout(
                                 .hover(|s| s.bg(gpui::rgba(0xffffff1a)))
                                 .child(
                                     Icon::new(IconName::Close)
-                                        .size(gpui::px(16.))
+                                        .size(px(16.))
                                         .text_color(theme.tokens.text_theme_primary),
                                 )
                                 .on_click(move |_, _, cx| on_dismiss(cx)),
@@ -4656,7 +4656,7 @@ impl Render for InteractiveAppPopoverPanel {
                                 .text_color(green)
                                 .child(
                                     Icon::new(IconName::GamingConsoleIcon)
-                                        .size(gpui::px(16.))
+                                        .size(px(16.))
                                         .text_color(green),
                                 )
                                 .child(mezon_i18n::t(&self.locale, key).to_string()),
@@ -4681,7 +4681,7 @@ impl Render for InteractiveAppPopoverPanel {
                                 .text_color(green)
                                 .child(
                                     Icon::new(IconName::GamingConsoleIcon)
-                                        .size(gpui::px(16.))
+                                        .size(px(16.))
                                         .text_color(green),
                                 )
                                 .child(mezon_i18n::t(&self.locale, key).to_string()),
@@ -5137,7 +5137,7 @@ fn device_row(
         )
         .child(
             Icon::new(IconName::ArrowRight)
-                .size(gpui::px(16.))
+                .size(px(16.))
                 .selected(false),
         )
         .on_hover(move |hovered, _, cx| {

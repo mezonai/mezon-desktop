@@ -699,7 +699,7 @@ impl Render for MediaImageModal {
                                         }))
                                         .child(
                                             Icon::new(IconName::ArrowLeft)
-                                                .size(gpui::px(20.))
+                                                .size(px(20.))
                                                 .text_color(modal_fg),
                                         ),
                                 )
@@ -720,7 +720,7 @@ impl Render for MediaImageModal {
                                         }))
                                         .child(
                                             Icon::new(IconName::ArrowRight)
-                                                .size(gpui::px(20.))
+                                                .size(px(20.))
                                                 .text_color(modal_fg),
                                         ),
                                 )

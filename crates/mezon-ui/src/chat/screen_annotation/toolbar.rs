@@ -358,7 +358,7 @@ impl Render for AnnotationToolbar {
             .cursor(CursorStyle::OpenHand)
             .child(
                 Icon::new(IconName::AnnotateGrip)
-                    .size(gpui::px(16.))
+                    .size(px(16.))
                     .text_color(gpui::rgba(0xffffff99)),
             );
         #[cfg(target_os = "windows")]

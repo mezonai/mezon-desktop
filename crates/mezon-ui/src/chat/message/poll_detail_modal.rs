@@ -274,7 +274,7 @@ impl Render for PollDetailModal {
                     .on_click(|_, _, cx| Self::close(cx))
                     .child(
                         Icon::new(IconName::Close)
-                            .size(gpui::px(20.))
+                            .size(px(20.))
                             .text_color(theme.tokens.text_theme_primary),
                     ),
             );

@@ -179,7 +179,7 @@ impl Render for FirstJoinModal {
                             .hover(|s| s.bg(theme.tokens.bg_item_hover))
                             .child(
                                 Icon::new(IconName::Close)
-                                    .size(gpui::px(16.))
+                                    .size(px(16.))
                                     .text_color(theme.tokens.text_theme_primary),
                             )
                             .on_click(|_: &ClickEvent, _window, cx| Self::close(cx)),

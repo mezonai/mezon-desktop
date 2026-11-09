@@ -72,7 +72,7 @@ impl RenderOnce for Checkbox {
             .when(checked, |el| {
                 el.child(
                     Icon::new(IconName::Check)
-                        .size(gpui::px(16.))
+                        .size(px(16.))
                         .motion_enabled(enabled)
                         .flex_none()
                         .text_color(gpui::white()),

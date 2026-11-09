@@ -1553,7 +1553,7 @@ fn render_inbox_video(
                         })
                         .child(
                             Icon::new(IconName::AudioPlay)
-                                .size(gpui::px(20.))
+                                .size(px(20.))
                                 .text_color(gpui::white()),
                         ),
                 ),
@@ -1680,7 +1680,7 @@ fn render_inbox_file_card(
                         })
                         .child(
                             Icon::new(IconName::Download)
-                                .size(gpui::px(16.))
+                                .size(px(16.))
                                 .text_color(theme.tokens.text_theme_primary),
                         ),
                 ),

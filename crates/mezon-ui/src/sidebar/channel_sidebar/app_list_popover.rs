@@ -54,7 +54,7 @@ pub fn app_list_popover_overlay(
                 .into_any_element()
         } else {
             Icon::new(IconName::AppChannelIcon)
-                .size(gpui::px(32.))
+                .size(px(32.))
                 .text_color(theme.text_primary)
                 .into_any_element()
         };
@@ -174,7 +174,7 @@ pub fn app_list_popover_overlay(
                                     .group_hover("app-list-find", |s| s.bg(theme.bg_tertiary))
                                     .child(
                                         Icon::new(IconName::Search)
-                                            .size(gpui::px(20.))
+                                            .size(px(20.))
                                             .text_color(theme.text_primary),
                                     ),
                             )
@@ -198,7 +198,7 @@ pub fn app_list_popover_overlay(
                             )
                             .child(
                                 Icon::new(IconName::ArrowRight)
-                                    .size(gpui::px(20.))
+                                    .size(px(20.))
                                     .selected(false),
                             ),
                     ),

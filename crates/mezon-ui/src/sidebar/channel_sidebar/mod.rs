@@ -1547,9 +1547,7 @@ impl Render for ChannelSidebar {
                                         .child(clan_name.clone()),
                                 )
                                 .child(
-                                    Icon::new(IconName::CaretDown)
-                                        .size(gpui::px(20.))
-                                        .selected(false),
+                                    Icon::new(IconName::CaretDown).size(px(20.)).selected(false),
                                 ),
                         )
                     })
@@ -2017,7 +2015,7 @@ fn onboarding_get_started(
                         )
                         .child(
                             Icon::new(IconName::ArrowRight)
-                                .size(gpui::px(16.))
+                                .size(px(16.))
                                 .selected(false),
                         ),
                 ),
@@ -2470,7 +2468,7 @@ fn render_banner_and_events(
                     .into_any_element()
             } else {
                 Icon::new(IconName::AppChannelIcon)
-                    .size(gpui::px(24.))
+                    .size(px(24.))
                     .text_color(theme.text_primary)
                     .into_any_element()
             };
@@ -2525,7 +2523,7 @@ fn render_banner_and_events(
                     })
                     .child(
                         Icon::new(IconName::ArrowRight)
-                            .size(gpui::px(24.))
+                            .size(px(24.))
                             .text_color(theme.text_primary),
                     ),
             );
@@ -2670,11 +2668,7 @@ fn render_sidebar_item(
                                 Shell::global(cx)
                                     .update(cx, |shell, cx| shell.show_modal(modal.into(), cx));
                             })
-                            .child(
-                                Icon::new(IconName::Plus)
-                                    .size(gpui::px(20.))
-                                    .selected(false),
-                            ),
+                            .child(Icon::new(IconName::Plus).size(px(20.)).selected(false)),
                     )
                 })
                 .on_click({
@@ -3171,7 +3165,7 @@ fn render_sidebar_item(
                     .when(member.sharing_screen, |el| {
                         el.child(
                             Icon::new(IconName::VoiceScreenShareIcon)
-                                .size(gpui::px(16.))
+                                .size(px(16.))
                                 .text_color(crate::util::user_status::in_voice_icon_color(theme)),
                         )
                     })
@@ -3205,11 +3199,7 @@ fn viewer_count_badge(viewer_count: u32, theme: &Theme) -> gpui::Div {
         .gap_1()
         .text_xs()
         .text_color(theme.text_muted)
-        .child(
-            Icon::new(IconName::EyeOpen)
-                .size(gpui::px(16.))
-                .selected(false),
-        )
+        .child(Icon::new(IconName::EyeOpen).size(px(16.)).selected(false))
         .child(viewer_count.to_string())
 }
 

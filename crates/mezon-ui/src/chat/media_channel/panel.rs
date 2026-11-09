@@ -431,7 +431,7 @@ impl Render for MediaChannelPanel {
                         })
                         .child(
                             Icon::new(IconName::Plus)
-                                .size(gpui::px(24.))
+                                .size(px(24.))
                                 .text_color(theme.text_primary),
                         ),
                 )
@@ -661,7 +661,7 @@ fn render_empty_state(
                 .justify_center()
                 .child(
                     Icon::new(IconName::ImageThumbnail)
-                        .size(gpui::px(48.))
+                        .size(px(48.))
                         .selected(false),
                 ),
         )
@@ -702,7 +702,7 @@ fn render_empty_state(
                     .on_click(move |_, window, cx| on_create(window, cx))
                     .child(
                         Icon::new(IconName::AddCircle)
-                            .size(gpui::px(20.))
+                            .size(px(20.))
                             .text_color(theme.text_primary),
                     )
                     .child(

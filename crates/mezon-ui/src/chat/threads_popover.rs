@@ -365,7 +365,7 @@ fn render_header(
         .border_color(tokens.border_primary)
         .child(
             Icon::new(IconName::ThreadEmpty)
-                .size(gpui::px(16.))
+                .size(px(16.))
                 .text_color(tokens.bg_icon_theme),
         )
         .child(
@@ -418,7 +418,7 @@ fn render_header(
     let close_btn = Button::new("thread-close-btn")
         .icon(
             Icon::new(IconName::Close)
-                .size(gpui::px(16.))
+                .size(px(16.))
                 .text_color(tokens.text_theme_primary_hover),
         )
         .ghost()
@@ -554,7 +554,7 @@ fn render_empty_body(
                 .bg(tokens.bg_active_member_channel)
                 .child(
                     Icon::new(IconName::ThreadEmpty)
-                        .size(gpui::px(40.))
+                        .size(px(40.))
                         .text_color(tokens.text_secondary)
                         .flex_none(),
                 )

@@ -718,7 +718,7 @@ pub(crate) fn audio_pill(
                         .on_click(on_download)
                         .child(
                             Icon::new(IconName::Download)
-                                .size(gpui::px(20.))
+                                .size(px(20.))
                                 .text_color(gpui::white()),
                         ),
                 ),
@@ -803,7 +803,7 @@ pub(crate) fn audio_failed_pill(duration: f64) -> gpui::AnyElement {
                         .bg(gpui::white())
                         .child(
                             Icon::new(IconName::TriangleAlert)
-                                .size(gpui::px(16.))
+                                .size(px(16.))
                                 .text_color(PILL_BG),
                         ),
                 )

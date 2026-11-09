@@ -519,7 +519,7 @@ impl ConfirmBirthdayModal {
                     .child(div().min_w_0().truncate().child(label))
                     .child(
                         Icon::new(IconName::CaretDown)
-                            .size(gpui::px(16.))
+                            .size(px(16.))
                             .flex_none()
                             .text_color(rgb(FIELD_TEXT)),
                     )

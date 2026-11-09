@@ -1190,7 +1190,7 @@ impl ProfilePage {
                                         |element| {
                                             element.child(
                                                 Icon::new(IconName::Plus)
-                                                    .size(gpui::px(24.))
+                                                    .size(px(24.))
                                                     .selected(false),
                                             )
                                         },

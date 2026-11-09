@@ -454,7 +454,7 @@ fn close_button(
         .when(tooltip, |s| s.tooltip(Tooltip::text(tooltip_text)))
         .child(
             Icon::new(IconName::Close)
-                .size(gpui::px(16.))
+                .size(px(16.))
                 .text_color(gpui::rgb(0xffffff)),
         )
         .on_click(move |e, window, cx| {

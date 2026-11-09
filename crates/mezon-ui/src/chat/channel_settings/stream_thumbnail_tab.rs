@@ -341,7 +341,7 @@ impl Render for StreamThumbnailTab {
                                 .label(self.t("streamThumbnail.buttons.change", cx))
                                 .icon(
                                     Icon::new(IconName::PenEdit)
-                                        .size(gpui::px(16.))
+                                        .size(px(16.))
                                         .text_color(theme.text_primary),
                                 )
                                 .primary()
@@ -354,7 +354,7 @@ impl Render for StreamThumbnailTab {
                                 .label(self.t("streamThumbnail.buttons.remove", cx))
                                 .icon(
                                     Icon::new(IconName::TrashIcon)
-                                        .size(gpui::px(16.))
+                                        .size(px(16.))
                                         .text_color(theme.text_primary),
                                 )
                                 .danger()
@@ -396,7 +396,7 @@ impl Render for StreamThumbnailTab {
                                 .justify_center()
                                 .child(
                                     Icon::new(IconName::UploadImage)
-                                        .size(gpui::px(48.))
+                                        .size(px(48.))
                                         .text_color(theme.brand),
                                 ),
                         )
@@ -417,7 +417,7 @@ impl Render for StreamThumbnailTab {
                                 .label(self.t("streamThumbnail.buttons.selectFile", cx))
                                 .icon(
                                     Icon::new(IconName::UploadImage)
-                                        .size(gpui::px(16.))
+                                        .size(px(16.))
                                         .text_color(theme.text_primary),
                                 )
                                 .primary()
@@ -600,7 +600,7 @@ impl Render for ThumbnailConfirmation {
             .when(!upload, |button| {
                 button.icon(
                     Icon::new(IconName::TrashIcon)
-                        .size(gpui::px(16.))
+                        .size(px(16.))
                         .text_color(theme.text_primary),
                 )
             })
@@ -638,7 +638,7 @@ impl Render for ThumbnailConfirmation {
                                 .justify_center()
                                 .child(
                                     Icon::new(IconName::UploadImage)
-                                        .size(gpui::px(24.))
+                                        .size(px(24.))
                                         .text_color(theme.brand),
                                 ),
                         )

@@ -355,7 +355,7 @@ impl ClanChannelsPage {
             .child(label)
             .child(
                 Icon::new(IconName::ArrowDown)
-                    .size(gpui::px(16.))
+                    .size(px(16.))
                     .text_color(if active {
                         cx.theme().text_primary
                     } else {
@@ -549,7 +549,7 @@ impl ClanChannelsPage {
                             )
                         } else {
                             Icon::new(IconName::AvatarUser)
-                                .size(gpui::px(24.))
+                                .size(px(24.))
                                 .color(cx.theme().tokens.icon_normal())
                                 .flex_none()
                                 .into_any_element()
@@ -678,7 +678,7 @@ impl ClanChannelsPage {
                 .child(self.page_size.to_string())
                 .child(
                     Icon::new(IconName::CaretDown)
-                        .size(gpui::px(16.))
+                        .size(px(16.))
                         .text_color(cx.theme().text_secondary)
                         .with_transformation(gpui::Transformation::rotate(gpui::radians(
                             chevron_angle,
@@ -898,7 +898,7 @@ impl Render for ClanChannelsPage {
                     .items_center()
                     .child(
                         Icon::new(IconName::Search)
-                            .size(gpui::px(20.))
+                            .size(px(20.))
                             .text_color(cx.theme().text_secondary),
                     ),
             )

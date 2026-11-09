@@ -234,7 +234,7 @@ impl QuickActionsTab {
             .bg(theme.tokens.theme_setting_nav)
             .child(
                 Icon::new(IconName::QuickActionEmpty)
-                    .size(gpui::px(48.))
+                    .size(px(48.))
                     .text_color(theme.tokens.text_theme_primary),
             )
             .child(
@@ -362,9 +362,7 @@ impl QuickActionsTab {
                                     })
                                     .tooltip(Tooltip::text(edit_title))
                                     .child(
-                                        Icon::new(IconName::PenEdit)
-                                            .size(gpui::px(16.))
-                                            .selected(false),
+                                        Icon::new(IconName::PenEdit).size(px(16.)).selected(false),
                                     )
                                     .on_click(cx.listener({
                                         let menu_name = menu_name.clone();
@@ -402,7 +400,7 @@ impl QuickActionsTab {
                                     .tooltip(Tooltip::text(delete_title))
                                     .child(
                                         Icon::new(IconName::TrashIcon)
-                                            .size(gpui::px(16.))
+                                            .size(px(16.))
                                             .selected(false),
                                     )
                                     .on_click(cx.listener({
@@ -479,7 +477,7 @@ impl Render for QuickActionsTab {
                             .label(add_label)
                             .icon(
                                 Icon::new(IconName::AddCircle)
-                                    .size(gpui::px(16.))
+                                    .size(px(16.))
                                     .text_color(gpui::white()),
                             )
                             .primary()
@@ -1225,7 +1223,7 @@ impl Render for CreateQuickMenuModal {
                             .bg(Hsla::from(rgb(TYPE_BADGE)).opacity(0.1))
                             .child(
                                 Icon::new(IconName::QuickActionInfo)
-                                    .size(gpui::px(16.))
+                                    .size(px(16.))
                                     .text_color(rgb(TYPE_BADGE_TEXT)),
                             )
                             .child(

@@ -214,7 +214,7 @@ impl ClanGuidePage {
                     )
                     .child(
                         Icon::new(IconName::ClanGuideHouse)
-                            .size(gpui::px(24.))
+                            .size(px(24.))
                             .flex_none()
                             .text_color(theme.tokens.text_theme_primary),
                     )
@@ -438,7 +438,7 @@ impl ClanGuidePage {
                 SharedString::from(format!("clan-guide-rule-{}", rule.id)),
                 theme,
                 Icon::new(IconName::RuleIcon)
-                    .size(gpui::px(24.))
+                    .size(px(24.))
                     .text_color(theme.tokens.text_theme_primary)
                     .into_any_element(),
                 rule.title.clone().into(),
@@ -495,7 +495,7 @@ impl ClanGuidePage {
                     .justify_center()
                     .child(
                         Icon::new(IconName::Check)
-                            .size(gpui::px(24.))
+                            .size(px(24.))
                             .text_color(rgb(TICK_COLOR)),
                     )
                     .into_any_element()
@@ -506,7 +506,7 @@ impl ClanGuidePage {
                     SharedString::from(format!("clan-guide-mission-{}", mission.id)),
                     theme,
                     Icon::new(IconName::TargetIcon)
-                        .size(gpui::px(24.))
+                        .size(px(24.))
                         .text_color(theme.tokens.text_theme_primary)
                         .into_any_element(),
                     mission.title.clone().into(),

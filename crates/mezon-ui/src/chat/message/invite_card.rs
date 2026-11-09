@@ -150,7 +150,7 @@ pub fn render_invite_card(
                 .bg(rgb(COMMUNITY_GREEN))
                 .child(
                     Icon::new(IconName::Check)
-                        .size(gpui::px(16.))
+                        .size(px(16.))
                         .text_color(theme.tokens.text_theme_primary),
                 ),
         );

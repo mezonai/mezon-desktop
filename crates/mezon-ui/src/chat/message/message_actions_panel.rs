@@ -122,7 +122,7 @@ pub(super) fn render_message_button(
     if has_url {
         element = element.child(
             Icon::new(IconName::ForwardRightClick)
-                .size(gpui::px(16.))
+                .size(px(16.))
                 .ml_2()
                 .text_color(text_color),
         );
@@ -247,7 +247,7 @@ pub(super) fn render_message_select(
         .child(left.into_any_element())
         .child(
             Icon::new(IconName::ArrowDownFill)
-                .size(gpui::px(16.))
+                .size(px(16.))
                 .text_color(theme.tokens.text_theme_primary)
                 .into_any_element(),
         );

@@ -508,7 +508,7 @@ impl ClanMembersPage {
                             .when(assigned, |element| {
                                 element.child(
                                     Icon::new(IconName::Check)
-                                        .size(gpui::px(16.))
+                                        .size(px(16.))
                                         .text_color(theme.tokens.text_theme_primary),
                                 )
                             }),
@@ -670,7 +670,7 @@ impl ClanMembersPage {
             .child(label)
             .child(
                 Icon::new(IconName::ArrowDown)
-                    .size(gpui::px(16.))
+                    .size(px(16.))
                     .text_color(if active {
                         cx.theme().text_primary
                     } else {
@@ -751,11 +751,7 @@ impl ClanMembersPage {
                             .bottom_0()
                             .flex()
                             .items_center()
-                            .child(
-                                Icon::new(IconName::Search)
-                                    .size(gpui::px(20.))
-                                    .selected(false),
-                            ),
+                            .child(Icon::new(IconName::Search).size(px(20.)).selected(false)),
                     )
                     .on_mouse_down_out(|_, window, _| window.blur()),
             )
@@ -773,7 +769,7 @@ impl ClanMembersPage {
                     .gap_1()
                     .child(
                         Icon::new(IconName::ConvertAccount)
-                            .size(gpui::px(20.))
+                            .size(px(20.))
                             .text_color(gpui::white())
                             .with_transformation(gpui::Transformation::rotate(gpui::radians(
                                 std::f32::consts::FRAC_PI_2,
@@ -848,7 +844,7 @@ impl ClanMembersPage {
                 .child(self.page_size.to_string())
                 .child(
                     Icon::new(IconName::CaretDown)
-                        .size(gpui::px(16.))
+                        .size(px(16.))
                         .text_color(cx.theme().text_secondary)
                         .with_transformation(gpui::Transformation::rotate(gpui::radians(
                             chevron_angle,

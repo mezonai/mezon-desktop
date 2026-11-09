@@ -135,7 +135,7 @@ impl Render for NotificationSettingPanel {
                 .when(!muted, |row| {
                     row.child(
                         Icon::new(IconName::ArrowRight)
-                            .size(gpui::px(16.))
+                            .size(px(16.))
                             .text_color(tokens.text_secondary),
                     )
                 }),

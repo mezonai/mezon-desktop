@@ -400,7 +400,7 @@ impl CallPanelView {
                                 .justify_center()
                                 .child(
                                     Icon::new(IconName::VoiceMicDisabledIcon)
-                                        .size(gpui::px(20.))
+                                        .size(px(20.))
                                         .text_color(rgb(0xffffff)),
                                 ),
                         )
@@ -670,7 +670,7 @@ impl CallPanelView {
             .when(selected, |el| {
                 el.child(
                     Icon::new(IconName::Check)
-                        .size(gpui::px(16.))
+                        .size(px(16.))
                         .text_color(rgb(CALL_GREEN)),
                 )
             })
@@ -767,7 +767,7 @@ pub fn render_call_mini_bar(theme: &Theme, cx: &App) -> Option<gpui::AnyElement>
                                     .gap_1()
                                     .child(
                                         Icon::new(IconName::NetworkStatus)
-                                            .size(gpui::px(16.))
+                                            .size(px(16.))
                                             .text_color(rgb(CALL_GREEN)),
                                     )
                                     .child(
@@ -804,11 +804,7 @@ pub fn render_call_mini_bar(theme: &Theme, cx: &App) -> Option<gpui::AnyElement>
                             .p_1()
                             .rounded_md()
                             .hover(|s| s.bg(rgba(0x5e5e5e66)))
-                            .child(
-                                Icon::new(IconName::EndCall)
-                                    .size(gpui::px(20.))
-                                    .selected(false),
-                            )
+                            .child(Icon::new(IconName::EndCall).size(px(20.)).selected(false))
                             .on_click(move |_, _, cx| {
                                 call_hangup.update(cx, |store, cx| store.hangup(cx));
                             }),
@@ -935,7 +931,7 @@ fn video_tile(
                 .when(!mic_on, |el| {
                     el.child(
                         Icon::new(IconName::VoiceMicDisabledIcon)
-                            .size(gpui::px(16.))
+                            .size(px(16.))
                             .text_color(rgb(0xffffff)),
                     )
                 })

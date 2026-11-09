@@ -1014,7 +1014,7 @@ impl OnboardingSettingPage {
                     .when(show_arrow, |button| {
                         button.child(
                             Icon::new(IconName::LongArrowRight)
-                                .size(gpui::px(16.))
+                                .size(px(16.))
                                 .text_color(gpui::white()),
                         )
                     })
@@ -1131,7 +1131,7 @@ impl OnboardingSettingPage {
                                     )
                                     .child(
                                         Icon::new(IconName::ArrowRight)
-                                            .size(gpui::px(16.))
+                                            .size(px(16.))
                                             .selected(false)
                                             .when(self.channels_expanded, |icon| {
                                                 icon.with_transformation(
@@ -1202,7 +1202,7 @@ impl OnboardingSettingPage {
                             .font_weight(FontWeight::BOLD)
                             .child(
                                 Icon::new(IconName::AddCircle)
-                                    .size(gpui::px(20.))
+                                    .size(px(20.))
                                     .text_color(rgb(0x949cf7)),
                             )
                             .child(mezon_i18n::t(
@@ -1266,7 +1266,7 @@ impl OnboardingSettingPage {
                                     .hover(|style| style.text_color(theme.danger_text))
                                     .child(
                                         Icon::new(IconName::TrashIcon)
-                                            .size(gpui::px(16.))
+                                            .size(px(16.))
                                             .selected(false)
                                             .group_hover(trash_group, |style| {
                                                 style.text_color(theme.danger_text)
@@ -1291,7 +1291,7 @@ impl OnboardingSettingPage {
                                     .text_color(theme.text_secondary)
                                     .child(
                                         Icon::new(IconName::ArrowRight)
-                                            .size(gpui::px(16.))
+                                            .size(px(16.))
                                             .selected(false)
                                             .when(question.expanded, |icon| {
                                                 icon.with_transformation(
@@ -1382,7 +1382,7 @@ impl OnboardingSettingPage {
                                 .gap_2()
                                 .child(
                                     Icon::new(IconName::AddCircle)
-                                        .size(gpui::px(20.))
+                                        .size(px(20.))
                                         .text_color(theme.text_primary),
                                 )
                                 .child(mezon_i18n::t(
@@ -1594,7 +1594,7 @@ impl OnboardingSettingPage {
                                             .child(owner_name)
                                             .child(
                                                 Icon::new(IconName::OwnerIcon)
-                                                    .size(gpui::px(16.))
+                                                    .size(px(16.))
                                                     .text_color(rgb(0xfacc15)),
                                             ),
                                     ),
@@ -1648,7 +1648,7 @@ impl OnboardingSettingPage {
                             .font_weight(FontWeight::BOLD)
                             .child(
                                 Icon::new(IconName::AddCircle)
-                                    .size(gpui::px(20.))
+                                    .size(px(20.))
                                     .text_color(rgb(0x949cf7)),
                             )
                             .child(mezon_i18n::t(
@@ -1721,7 +1721,7 @@ impl OnboardingSettingPage {
                             .font_weight(FontWeight::BOLD)
                             .child(
                                 Icon::new(IconName::AddCircle)
-                                    .size(gpui::px(20.))
+                                    .size(px(20.))
                                     .text_color(rgb(0x949cf7)),
                             )
                             .child(mezon_i18n::t(
@@ -1825,7 +1825,7 @@ impl OnboardingSettingPage {
                         .hover(|style| style.bg(rgb(0x4752c4)))
                         .child(
                             Icon::new(IconName::PenEdit)
-                                .size(gpui::px(20.))
+                                .size(px(20.))
                                 .text_color(rgb(0xffffff)),
                         )
                         .on_click(move |_, window, cx| {
@@ -1850,11 +1850,7 @@ impl OnboardingSettingPage {
             .border_2()
             .border_color(theme.border)
             .bg(theme.bg_secondary)
-            .child(
-                Icon::new(IconName::Close)
-                    .size(gpui::px(20.))
-                    .selected(false),
-            )
+            .child(Icon::new(IconName::Close).size(px(20.)).selected(false))
             .child(
                 v_flex()
                     .child(div().font_weight(FontWeight::BOLD).child(mezon_i18n::t(
@@ -2114,7 +2110,7 @@ impl OnboardingSettingPage {
                             .justify_between()
                             .cursor_pointer()
                             .child(selected)
-                            .child(Icon::new(IconName::CaretDown).size(gpui::px(16.)))
+                            .child(Icon::new(IconName::CaretDown).size(px(16.)))
                             .on_click(move |_, _, cx| {
                                 let _ = toggle.update(cx, |this, cx| {
                                     if let Some(Editor::Mission { channels_open, .. }) =

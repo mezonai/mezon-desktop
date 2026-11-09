@@ -634,7 +634,7 @@ impl PdfViewer {
                 .gap_3()
                 .child(
                     Icon::new(IconName::TriangleAlert)
-                        .size(gpui::px(32.))
+                        .size(px(32.))
                         .text_color(theme.danger_text),
                 )
                 .child(

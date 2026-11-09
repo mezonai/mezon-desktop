@@ -109,7 +109,7 @@ impl Render for ChannelTyping {
             Some(TypingContent::One { name, suffix }) => bar
                 .child(
                     Icon::new(IconName::TypingIndicator)
-                        .size(gpui::px(16.))
+                        .size(px(16.))
                         .flex_none()
                         .text_color(primary),
                 )

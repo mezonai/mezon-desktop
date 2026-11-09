@@ -379,7 +379,7 @@ impl TransactionHistoryModal {
         let locale = self.locale.clone();
         let tk = |key: &'static str| mezon_i18n::t(&locale, key).to_string();
         let reload = Icon::new(IconName::ReloadIcon)
-            .size(gpui::px(20.))
+            .size(px(20.))
             .text_color(theme.tokens.text_theme_primary);
         let reload = if self.loading && window.is_window_active() {
             reload
@@ -427,7 +427,7 @@ impl TransactionHistoryModal {
                             ))
                             .child(
                                 Icon::new(IconName::History)
-                                    .size(gpui::px(40.))
+                                    .size(px(40.))
                                     .text_color(rgb(HEADER_ICON_COLOR)),
                             ),
                     )
@@ -478,7 +478,7 @@ impl TransactionHistoryModal {
                             .on_click(|_: &ClickEvent, _window, cx| Self::close(cx))
                             .child(
                                 Icon::new(IconName::Close)
-                                    .size(gpui::px(20.))
+                                    .size(px(20.))
                                     .text_color(theme.tokens.text_theme_primary),
                             ),
                     ),
@@ -618,11 +618,7 @@ impl TransactionHistoryModal {
                     ),
             );
         } else if self.has_more {
-            content = content.child(
-                Icon::new(IconName::ArrowDown)
-                    .size(gpui::px(16.))
-                    .selected(false),
-            );
+            content = content.child(Icon::new(IconName::ArrowDown).size(px(16.)).selected(false));
         } else if !self.rows.is_empty() {
             content = content.child(
                 mezon_i18n::t(&locale, "transactionHistory.footers.noti")
@@ -943,7 +939,7 @@ fn detail_field(
                 })
                 .child(
                     Icon::new(IconName::CopyIcon)
-                        .size(gpui::px(16.))
+                        .size(px(16.))
                         .text_color(theme.tokens.text_theme_primary),
                 ),
         );
@@ -1061,7 +1057,7 @@ fn render_placeholder(
                 .justify_center()
                 .child(
                     Icon::new(IconName::FileIcon)
-                        .size(gpui::px(40.))
+                        .size(px(40.))
                         .selected(false)
                         .flex_none(),
                 ),

@@ -315,7 +315,7 @@ impl Render for DatePicker {
                     )
                     .child(
                         Icon::new(IconName::DatePickerIndicator)
-                            .size(gpui::px(16.))
+                            .size(px(16.))
                             .flex_none()
                             .selected(false),
                     ),
@@ -425,11 +425,7 @@ fn render_calendar(
                     .font_weight(FontWeight::SEMIBOLD)
                     .text_color(theme.text_primary)
                     .child(header_label)
-                    .child(
-                        Icon::new(IconName::ArrowDown)
-                            .size(gpui::px(16.))
-                            .selected(false),
-                    )
+                    .child(Icon::new(IconName::ArrowDown).size(px(16.)).selected(false))
                     .on_mouse_down(MouseButton::Left, {
                         let entity = entity.clone();
                         move |_: &MouseDownEvent, _window, cx: &mut App| {

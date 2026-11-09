@@ -35,7 +35,7 @@ fn gallery_thumb_placeholder(bg: gpui::Rgba, muted: gpui::Rgba) -> gpui::AnyElem
         .bg(bg)
         .child(
             Icon::new(IconName::ImageThumbnail)
-                .size(gpui::px(20.))
+                .size(px(20.))
                 .text_color(muted),
         )
         .into_any()
@@ -541,7 +541,7 @@ impl GalleryModal {
                                         .bg(gpui::hsla(0., 0., 0., 0.6))
                                         .child(
                                             Icon::new(IconName::AudioPlay)
-                                                .size(gpui::px(20.))
+                                                .size(px(20.))
                                                 .text_color(gpui::white()),
                                         ),
                                 ),
@@ -781,7 +781,7 @@ fn render_modal_header(
                 .gap_4()
                 .child(
                     Icon::new(IconName::ImageThumbnail)
-                        .size(gpui::px(20.))
+                        .size(px(20.))
                         .text_color(theme.text_primary),
                 )
                 .child(
@@ -802,11 +802,7 @@ fn render_modal_header(
                 .rounded(px(6.))
                 .cursor_pointer()
                 .hover(|el| el.bg(theme.bg_hover))
-                .child(
-                    Icon::new(IconName::Close)
-                        .size(gpui::px(16.))
-                        .selected(false),
-                )
+                .child(Icon::new(IconName::Close).size(px(16.)).selected(false))
                 .on_mouse_down(MouseButton::Left, move |_: &MouseDownEvent, window, cx| {
                     entity.update(cx, |this, cx| this.dismiss(window, cx));
                 }),
@@ -823,7 +819,7 @@ fn render_filter_tabs(
 ) -> impl IntoElement {
     let entity_toggle = entity.clone();
     let mut chevron = Icon::new(IconName::CaretDown)
-        .size(gpui::px(16.))
+        .size(px(16.))
         .text_color(theme.text_primary);
     if date_filter_open {
         chevron = chevron.with_transformation(gpui::Transformation::rotate(gpui::radians(

@@ -293,7 +293,7 @@ impl EmojiSettingPage {
             .bg(theme.tokens.theme_setting_nav)
             .child(
                 Icon::new(IconName::Smile)
-                    .size(gpui::px(40.))
+                    .size(px(40.))
                     .text_color(theme.tokens.text_theme_primary)
                     .mb(px(8.0)),
             )
@@ -441,7 +441,7 @@ fn render_emoji_row(
                     .when(row.is_for_sale, |actions| {
                         actions.child(
                             Icon::new(IconName::MarketIcons)
-                                .size(gpui::px(16.))
+                                .size(px(16.))
                                 .text_color(gpui::rgb(0xfacc15)),
                         )
                     })
@@ -464,7 +464,7 @@ fn render_emoji_row(
                                     .cursor_pointer()
                                     .child(
                                         Icon::new(IconName::Close)
-                                            .size(gpui::px(16.))
+                                            .size(px(16.))
                                             .text_color(theme.danger_text),
                                     )
                                     .on_click(move |_, window, cx| {

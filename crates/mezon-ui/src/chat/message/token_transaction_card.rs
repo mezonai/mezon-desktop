@@ -34,7 +34,7 @@ pub fn render_token_transaction_card(
         .child(
             div().w(px(50.)).child(
                 Icon::new(IconName::Transaction)
-                    .size(gpui::px(48.))
+                    .size(px(48.))
                     .size(px(50.0))
                     .text_color(rgb(GREEN_600)),
             ),

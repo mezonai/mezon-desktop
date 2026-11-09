@@ -2066,7 +2066,7 @@ fn render_canvas_chip(title: SharedString) -> AnyElement {
         })
         .child(
             Icon::new(IconName::CanvasIcon)
-                .size(gpui::px(16.))
+                .size(px(16.))
                 .text_color(rgb(CANVAS_TEXT)),
         )
         .child(div().min_w_0().child(title))
@@ -2164,7 +2164,7 @@ fn render_social_poster(poster: SocialPoster, cache: Entity<LruImageCache>) -> A
                         })
                         .child(
                             Icon::new(IconName::AudioPlay)
-                                .size(gpui::px(20.))
+                                .size(px(20.))
                                 .text_color(gpui::white()),
                         ),
                 ),

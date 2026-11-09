@@ -1482,7 +1482,7 @@ impl CreateEventModal {
                                         .max_w_full()
                                         .child(
                                             Icon::new(IconName::SpeakerLocked)
-                                                .size(gpui::px(16.))
+                                                .size(px(16.))
                                                 .text_color(theme.brand),
                                         )
                                         .child(
@@ -1743,7 +1743,7 @@ impl CreateEventModal {
                                     .gap_2()
                                     .child(
                                         Icon::new(IconName::IconEvents)
-                                            .size(gpui::px(24.))
+                                            .size(px(24.))
                                             .selected(false),
                                     )
                                     .child(div().font_weight(FontWeight::SEMIBOLD).child(start))
@@ -1797,12 +1797,12 @@ impl CreateEventModal {
                             .gap_2()
                             .child(if self.location_kind == Some(LocationKind::Somewhere) {
                                 Icon::new(IconName::Location)
-                                    .size(gpui::px(20.))
+                                    .size(px(20.))
                                     .selected(false)
                                     .into_any_element()
                             } else {
                                 Icon::new(IconName::LoudVolume)
-                                    .size(gpui::px(20.))
+                                    .size(px(20.))
                                     .selected(false)
                                     .into_any_element()
                             })

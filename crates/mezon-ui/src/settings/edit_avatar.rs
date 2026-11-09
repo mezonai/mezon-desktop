@@ -165,11 +165,7 @@ impl Render for EditAvatar {
                             .rounded_md()
                             .cursor_pointer()
                             .hover(|el| el.bg(theme.bg_hover))
-                            .child(
-                                Icon::new(IconName::Close)
-                                    .size(gpui::px(24.))
-                                    .selected(false),
-                            )
+                            .child(Icon::new(IconName::Close).size(px(24.)).selected(false))
                             .on_click(|_, _, cx| Self::close(cx)),
                     ),
             )
@@ -267,13 +263,13 @@ impl Render for EditAvatar {
                             .justify_center()
                             .child(
                                 Icon::new(IconName::ImageThumbnail)
-                                    .size(gpui::px(16.))
+                                    .size(px(16.))
                                     .selected(false),
                             )
                             .child(div().w(px(190.)).child(Slider::new(&self.slider)))
                             .child(
                                 Icon::new(IconName::ImageThumbnail)
-                                    .size(gpui::px(24.))
+                                    .size(px(24.))
                                     .text_color(theme.text_primary),
                             )
                             .child(
@@ -289,7 +285,7 @@ impl Render for EditAvatar {
                                     .hover(|el| el.bg(theme.bg_hover))
                                     .child(
                                         Icon::new(IconName::RotateRightIcon)
-                                            .size(gpui::px(24.))
+                                            .size(px(24.))
                                             .selected(false),
                                     )
                                     .on_click(cx.listener(|this, _, _, cx| {

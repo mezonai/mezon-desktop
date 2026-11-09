@@ -129,7 +129,7 @@ fn filter_chip(
         )
         .child(
             Icon::new(IconName::ArrowDownFill)
-                .size(gpui::px(16.))
+                .size(px(16.))
                 .flex_shrink_0()
                 .selected(false),
         );
@@ -194,7 +194,7 @@ fn filter_menu_row(
     if selected {
         row = row.child(
             Icon::new(IconName::Check)
-                .size(gpui::px(16.))
+                .size(px(16.))
                 .text_color(theme.tokens.text_theme_primary),
         );
     }
@@ -812,11 +812,7 @@ impl AuditLogSettingPage {
                     v_flex()
                         .items_center()
                         .gap_2()
-                        .child(
-                            Icon::new(IconName::Search)
-                                .size(gpui::px(32.))
-                                .selected(false),
-                        )
+                        .child(Icon::new(IconName::Search).size(px(32.)).selected(false))
                         .child(
                             div()
                                 .text_sm()

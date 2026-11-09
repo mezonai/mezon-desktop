@@ -802,7 +802,7 @@ impl DirectSidebar {
             .on_click(|_, _window, cx| navigate(cx, Route::Friends))
             .child(
                 Icon::new(IconName::IconFriends)
-                    .size(gpui::px(20.))
+                    .size(px(20.))
                     .text_color(theme.tokens.text_theme_primary)
                     .flex_none(),
             )
@@ -872,11 +872,7 @@ impl DirectSidebar {
                                 .update(cx, |shell, cx| shell.show_modal(modal.into(), cx));
                         }
                     })
-                    .child(
-                        Icon::new(IconName::Plus)
-                            .size(gpui::px(16.))
-                            .selected(false),
-                    ),
+                    .child(Icon::new(IconName::Plus).size(px(16.)).selected(false)),
             )
     }
 }

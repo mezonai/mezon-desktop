@@ -44,7 +44,7 @@ fn modal_title(locale: &str, theme: &crate::theme::Theme) -> gpui::Div {
         .gap_2()
         .child(
             Icon::new(IconName::VoiceBreakoutIcon)
-                .size(gpui::px(20.))
+                .size(px(20.))
                 .text_color(theme.tokens.text_theme_primary),
         )
         .child(
@@ -1661,7 +1661,7 @@ impl BreakoutRoomsModal {
                                 .hover(move |s| s.bg(colors.bg_hover))
                                 .child(
                                     Icon::new(IconName::Close)
-                                        .size(gpui::px(16.))
+                                        .size(px(16.))
                                         .text_color(colors.danger),
                                 )
                                 .child(
@@ -1773,7 +1773,7 @@ impl BreakoutRoomsModal {
                                     .cursor_pointer()
                                     .child(
                                         Icon::new(IconName::ArrowRight)
-                                            .size(gpui::px(16.))
+                                            .size(px(16.))
                                             .text_color(colors.text_secondary),
                                     )
                                     .child(
@@ -1800,7 +1800,7 @@ impl BreakoutRoomsModal {
                                     .cursor_pointer()
                                     .child(
                                         Icon::new(IconName::ConvertAccount)
-                                            .size(gpui::px(16.))
+                                            .size(px(16.))
                                             .text_color(colors.text_secondary),
                                     )
                                     .child(
@@ -1950,7 +1950,7 @@ impl BreakoutRoomsModal {
                                 .min_w_0()
                                 .child(
                                     Icon::new(IconName::VoiceBreakoutIcon)
-                                        .size(gpui::px(16.))
+                                        .size(px(16.))
                                         .text_color(colors.text_secondary),
                                 )
                                 .child(
@@ -2139,7 +2139,7 @@ impl Render for BreakoutRoomsModal {
                             .gap_2()
                             .child(
                                 Icon::new(IconName::VoiceBreakoutIcon)
-                                    .size(gpui::px(20.))
+                                    .size(px(20.))
                                     .text_color(accent_color),
                             )
                             .child(
@@ -2165,7 +2165,7 @@ impl Render for BreakoutRoomsModal {
                             .hover(move |s| s.bg(bg_hover))
                             .child(
                                 Icon::new(IconName::Close)
-                                    .size(gpui::px(16.))
+                                    .size(px(16.))
                                     .text_color(text_secondary),
                             )
                             .on_click(|_, _, cx| close(cx)),
@@ -2325,7 +2325,7 @@ impl Render for BreakoutInviteModal {
                         .bg(bg_secondary)
                         .child(
                             Icon::new(IconName::VoiceBreakoutIcon)
-                                .size(gpui::px(16.))
+                                .size(px(16.))
                                 .text_color(accent),
                         )
                         .child(

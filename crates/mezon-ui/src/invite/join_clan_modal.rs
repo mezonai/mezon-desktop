@@ -327,7 +327,7 @@ impl Render for JoinClanModal {
                             .hover(move |s| s.bg(close_hover))
                             .child(
                                 Icon::new(IconName::Close)
-                                    .size(gpui::px(20.))
+                                    .size(px(20.))
                                     .text_color(theme.tokens.text_theme_primary),
                             )
                             .on_click(|_: &ClickEvent, _window, cx| Self::close(cx)),

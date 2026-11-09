@@ -142,7 +142,7 @@ fn theme_swatch(
                     .p(px(2.0))
                     .child(
                         Icon::new(IconName::Check)
-                            .size(gpui::px(16.))
+                            .size(px(16.))
                             .text_color(rgba(255, 255, 255, 1.0)),
                     ),
             )

@@ -34,7 +34,7 @@ pub fn render_events_header(
                 .on_click(move |_, window, cx| on_back(window, cx))
                 .child(
                     Icon::new(IconName::ArrowLeft)
-                        .size(gpui::px(20.))
+                        .size(px(20.))
                         .text_color(theme.text_primary),
                 ),
         )
@@ -227,11 +227,7 @@ pub fn render_events_list_card(
                             .mt_2()
                             .text_xs()
                             .text_color(theme.text_muted)
-                            .child(
-                                Icon::new(IconName::History)
-                                    .size(gpui::px(16.))
-                                    .selected(false),
-                            )
+                            .child(Icon::new(IconName::History).size(px(16.)).selected(false))
                             .child(date.clone()),
                     )
                 })

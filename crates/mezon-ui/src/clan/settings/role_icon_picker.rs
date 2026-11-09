@@ -255,7 +255,7 @@ impl RoleSettingPage {
             .when(!has_icon, |el| {
                 el.child(
                     Icon::new(IconName::ImageUploadIcon)
-                        .size(gpui::px(20.))
+                        .size(px(20.))
                         .text_color(theme.tokens.text_theme_primary),
                 )
             })
@@ -493,7 +493,7 @@ fn render_role_icon_upload_panel(
                 .hover(|s| s.bg(theme.bg_hover))
                 .child(
                     Icon::new(IconName::ImageUploadIcon)
-                        .size(gpui::px(48.))
+                        .size(px(48.))
                         .size(px(70.0))
                         .text_color(theme.tokens.text_theme_primary),
                 )

@@ -148,7 +148,7 @@ impl CategoryTab {
             )
             .child(
                 Icon::new(IconName::ArrowDownFill)
-                    .size(gpui::px(16.))
+                    .size(px(16.))
                     .text_color(theme.tokens.text_theme_message),
             );
 

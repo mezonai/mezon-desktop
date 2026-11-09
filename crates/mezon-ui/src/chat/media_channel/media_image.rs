@@ -1,4 +1,5 @@
 use crate::components::primitives::{Icon, IconName};
+use gpui::px;
 
 use gpui::{AnyElement, Entity, Hsla, ObjectFit, Pixels, Rgba, SharedString, div, img, prelude::*};
 
@@ -73,7 +74,7 @@ fn image_placeholder_fill(bg: Rgba, muted: Rgba) -> AnyElement {
         .bg(bg)
         .child(
             Icon::new(IconName::ImageThumbnail)
-                .size(gpui::px(32.))
+                .size(px(32.))
                 .text_color(muted),
         )
         .into_any()
@@ -89,7 +90,7 @@ pub fn image_placeholder(bg: Rgba, muted: Rgba, width: Pixels, height: Pixels) -
         .bg(bg)
         .child(
             Icon::new(IconName::ImageThumbnail)
-                .size(gpui::px(32.))
+                .size(px(32.))
                 .text_color(muted),
         )
         .into_any()
@@ -112,7 +113,7 @@ fn image_placeholder_rounded_top(
         .bg(bg)
         .child(
             Icon::new(IconName::ImageThumbnail)
-                .size(gpui::px(32.))
+                .size(px(32.))
                 .text_color(muted),
         )
         .into_any()

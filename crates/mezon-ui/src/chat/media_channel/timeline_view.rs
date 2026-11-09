@@ -69,7 +69,7 @@ pub fn render_timeline_header(
                     .on_click(move |_, window, cx| handler(window, cx))
                     .child(
                         Icon::new(IconName::BulletListIcon)
-                            .size(gpui::px(20.))
+                            .size(px(20.))
                             .selected(false)
                             .flex_none(),
                     ),

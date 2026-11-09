@@ -348,7 +348,7 @@ impl SoundSettingPage {
             .bg(theme.tokens.theme_setting_nav)
             .child(
                 Icon::new(IconName::LoudVolume)
-                    .size(gpui::px(40.))
+                    .size(px(40.))
                     .text_color(theme.tokens.text_theme_primary)
                     .mb(px(8.0)),
             )
@@ -409,7 +409,7 @@ impl SoundSettingPage {
                     .gap(px(8.0))
                     .child(
                         Icon::new(IconName::LoudVolume)
-                            .size(gpui::px(20.))
+                            .size(px(20.))
                             .text_color(theme.tokens.text_theme_primary),
                     )
                     .child(
@@ -514,7 +514,7 @@ fn render_playbar(
                 .hover(|s| s.opacity(0.8))
                 .child(
                     Icon::new(IconName::Download)
-                        .size(gpui::px(16.))
+                        .size(px(16.))
                         .text_color(theme.tokens.text_theme_primary),
                 )
                 .on_click(move |_, _, cx| {
@@ -578,7 +578,7 @@ fn render_sound_card(
                             .with_size(Size::XSmall)
                             .icon(
                                 Icon::new(IconName::PenEdit)
-                                    .size(gpui::px(16.))
+                                    .size(px(16.))
                                     .text_color(theme.tokens.text_theme_message),
                             )
                             .on_click(move |_, window, cx| {
@@ -611,7 +611,7 @@ fn render_sound_card(
                             .with_size(Size::XSmall)
                             .icon(
                                 Icon::new(IconName::Close)
-                                    .size(gpui::px(16.))
+                                    .size(px(16.))
                                     .text_color(theme.danger_text),
                             )
                             .on_click(move |_, window, cx| {
@@ -789,7 +789,7 @@ impl Render for SoundSettingPage {
                                         .gap(px(8.0))
                                         .child(
                                             Icon::new(IconName::LoudVolume)
-                                                .size(gpui::px(20.))
+                                                .size(px(20.))
                                                 .text_color(theme.tokens.text_theme_primary),
                                         )
                                         .child(

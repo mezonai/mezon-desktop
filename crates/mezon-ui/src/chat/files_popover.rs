@@ -511,7 +511,7 @@ fn render_header(
                 .border_color(tokens.border_theme_primary)
                 .child(
                     Icon::new(IconName::FileIcon)
-                        .size(gpui::px(20.))
+                        .size(px(20.))
                         .text_color(tokens.bg_icon_theme),
                 )
                 .child(
@@ -553,7 +553,7 @@ fn render_header(
                         .pl_1()
                         .child(
                             Icon::new(IconName::Search)
-                                .size(gpui::px(16.))
+                                .size(px(16.))
                                 .text_color(tokens.text_theme_primary),
                         ),
                 ),
@@ -564,7 +564,7 @@ fn render_header(
                 .with_size(Size::Small)
                 .icon(
                     Icon::new(IconName::Close)
-                        .size(gpui::px(16.))
+                        .size(px(16.))
                         .text_color(tokens.text_theme_primary),
                 )
                 .on_click(cx.listener(|_, _: &ClickEvent, _window, cx| {
@@ -699,7 +699,7 @@ fn render_empty_body(locale: &str, theme: &Theme) -> impl IntoElement {
                 .bg(tokens.bg_item_theme_hover)
                 .child(
                     Icon::new(IconName::FileIcon)
-                        .size(gpui::px(40.))
+                        .size(px(40.))
                         .text_color(tokens.text_theme_primary),
                 )
                 .child(
@@ -842,7 +842,7 @@ fn file_row(
                     .justify_center()
                     .child(
                         Icon::new(IconName::FileIcon)
-                            .size(gpui::px(40.))
+                            .size(px(40.))
                             .text_color(tokens.text_secondary)
                             .flex_none(),
                     ),
@@ -985,7 +985,7 @@ fn file_row(
                         })
                         .child(
                             Icon::new(IconName::Download)
-                                .size(gpui::px(16.))
+                                .size(px(16.))
                                 .text_color(tokens.text_theme_primary),
                         ),
                 ),
@@ -1016,7 +1016,7 @@ fn file_audio_thumb(
         .justify_center()
         .child(
             Icon::new(IconName::FileIcon)
-                .size(gpui::px(40.))
+                .size(px(40.))
                 .text_color(icon_color)
                 .flex_none(),
         )

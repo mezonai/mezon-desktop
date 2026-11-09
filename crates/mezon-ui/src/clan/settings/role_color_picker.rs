@@ -242,7 +242,7 @@ impl RoleSettingPage {
                 .child(
                     div().absolute().top_1().right_1().child(
                         Icon::new(IconName::PenEdit)
-                            .size(gpui::px(16.))
+                            .size(px(16.))
                             .text_color(gpui::rgb(0x000000)),
                     ),
                 )

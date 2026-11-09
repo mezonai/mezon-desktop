@@ -97,7 +97,7 @@ pub fn render_user_message(
                 .opacity(0.6)
                 .child(
                     Icon::new(IconName::ForwardRightClick)
-                        .size(gpui::px(16.))
+                        .size(px(16.))
                         .text_color(theme.tokens.text_theme_primary),
                 )
                 .child(mezon_i18n::t(ctx.locale, "chat.forwarded")),
@@ -341,7 +341,7 @@ fn render_ephemeral_notice(msg: &Message, ctx: &RowCtx) -> AnyElement {
         .opacity(0.6)
         .child(
             Icon::new(IconName::EyeClose)
-                .size(gpui::px(16.))
+                .size(px(16.))
                 .text_color(ctx.theme.tokens.text_theme_primary),
         )
         .child(mezon_i18n::t(ctx.locale, "message.onlyVisibleToRecipient"))
@@ -397,14 +397,14 @@ fn render_go_to_topic_footer(msg: &Message, ctx: &RowCtx) -> AnyElement {
                 .opacity(0.75)
                 .child(
                     Icon::new(IconName::Chat)
-                        .size(gpui::px(20.))
+                        .size(px(20.))
                         .text_color(theme.tokens.text_theme_primary),
                 )
                 .child(mezon_i18n::t(ctx.locale, "message.goToTopic")),
         )
         .child(
             Icon::new(IconName::ArrowRight)
-                .size(gpui::px(16.))
+                .size(px(16.))
                 .text_color(theme.tokens.text_theme_primary)
                 .opacity(0.5),
         )

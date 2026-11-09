@@ -394,7 +394,7 @@ impl UserProfilePopover {
                         .cursor_pointer()
                         .child(
                             Icon::new(IconName::Close)
-                                .size(gpui::px(16.))
+                                .size(px(16.))
                                 .text_color(color)
                                 .group_hover(group.clone(), |style| {
                                     style.text_color(gpui::black())
@@ -457,7 +457,7 @@ impl UserProfilePopover {
                     .text_color(theme.tokens.text_theme_primary)
                     .child(
                         Icon::new(IconName::Plus)
-                            .size(gpui::px(20.))
+                            .size(px(20.))
                             .text_color(theme.tokens.text_theme_primary),
                     )
                     .child(
@@ -542,7 +542,7 @@ impl UserProfilePopover {
                     .child(
                         div().absolute().right(px(8.)).top(px(8.)).child(
                             Icon::new(IconName::Search)
-                                .size(gpui::px(20.))
+                                .size(px(20.))
                                 .text_color(theme.tokens.text_theme_primary),
                         ),
                     ),
@@ -1087,7 +1087,7 @@ fn render_banner_actions(
             SendTokenModal::open(locale, Some((recipient_id, username)), window, cx);
         }),
         Icon::new(IconName::Transaction)
-            .size(gpui::px(16.))
+            .size(px(16.))
             .text_color(gpui::white())
             .into_any_element(),
     ));
@@ -1429,7 +1429,7 @@ fn render_voice_button(
         })
         .child(
             Icon::new(IconName::LoudVolume)
-                .size(gpui::px(16.))
+                .size(px(16.))
                 .text_color(crate::util::user_status::in_voice_icon_color(theme)),
         )
         .into_any_element()

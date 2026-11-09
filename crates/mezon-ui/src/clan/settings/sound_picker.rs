@@ -1122,7 +1122,7 @@ impl Render for SoundPicker {
                             .hover(|s| s.bg(theme.bg_hover))
                             .child(
                                 Icon::new(IconName::Close)
-                                    .size(gpui::px(16.))
+                                    .size(px(16.))
                                     .text_color(theme.tokens.text_theme_primary),
                             )
                             .on_click(cx.listener(|this, _, _, cx| this.close(cx))),
@@ -1258,7 +1258,7 @@ impl Render for SoundPicker {
                                 .justify_center()
                                 .child(
                                     Icon::new(IconName::FileThumbAudio)
-                                        .size(gpui::px(48.))
+                                        .size(px(48.))
                                         .text_color(theme.tokens.text_theme_primary),
                                 ),
                         )

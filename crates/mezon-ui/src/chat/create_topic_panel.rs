@@ -277,7 +277,7 @@ impl Render for TopicPanel {
                     .gap_2()
                     .child(
                         Icon::new(IconName::TopicIcon)
-                            .size(gpui::px(20.))
+                            .size(px(20.))
                             .text_color(tokens.text_theme_primary),
                     )
                     .child(
@@ -294,7 +294,7 @@ impl Render for TopicPanel {
                     .cursor_pointer()
                     .child(
                         Icon::new(IconName::Close)
-                            .size(gpui::px(20.))
+                            .size(px(20.))
                             .text_color(tokens.text_theme_primary_hover),
                     )
                     .on_click(cx.listener(|_this, _: &ClickEvent, _window, cx| {

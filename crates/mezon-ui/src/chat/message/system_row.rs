@@ -687,7 +687,7 @@ pub fn render_onboard_welcome(ctx: &RowCtx) -> AnyElement {
             hover_bg,
             title_color,
             Icon::new(IconName::AddPerson)
-                .size(gpui::px(20.))
+                .size(px(20.))
                 .text_color(title_color),
             mezon_i18n::t(locale, "chatWelcome.onboard.inviteFriends"),
             onboarding.members_invited,
@@ -717,7 +717,7 @@ pub fn render_onboard_welcome(ctx: &RowCtx) -> AnyElement {
             hover_bg,
             title_color,
             Icon::new(IconName::Check)
-                .size(gpui::px(20.))
+                .size(px(20.))
                 .text_color(title_color),
             mezon_i18n::t(locale, "chatWelcome.onboard.sendFirstMessage"),
             onboarding.sent_message,
@@ -728,7 +728,7 @@ pub fn render_onboard_welcome(ctx: &RowCtx) -> AnyElement {
             hover_bg,
             title_color,
             Icon::new(IconName::Download)
-                .size(gpui::px(20.))
+                .size(px(20.))
                 .text_color(title_color),
             mezon_i18n::t(locale, "chatWelcome.onboard.downloadApp"),
             onboarding.downloaded_app,
@@ -739,7 +739,7 @@ pub fn render_onboard_welcome(ctx: &RowCtx) -> AnyElement {
             hover_bg,
             title_color,
             Icon::new(IconName::Hashtag)
-                .size(gpui::px(20.))
+                .size(px(20.))
                 .text_color(title_color),
             mezon_i18n::t(locale, "chatWelcome.onboard.createChannel"),
             onboarding.created_channel,
@@ -815,13 +815,13 @@ fn onboard_item(
                 .justify_center()
                 .child(
                     Icon::new(IconName::Check)
-                        .size(gpui::px(16.))
+                        .size(px(16.))
                         .text_color(gpui::rgb(0xff_ff_ff)),
                 )
                 .into_any_element()
         } else {
             Icon::new(IconName::ArrowRight)
-                .size(gpui::px(20.))
+                .size(px(20.))
                 .text_color(title_color)
                 .into_any_element()
         })
@@ -908,19 +908,19 @@ pub fn render_welcome(_msg: &Message, ctx: &RowCtx) -> AnyElement {
                 .child(welcome_icon_circle(
                     if is_stream {
                         Icon::new(IconName::Stream)
-                            .size(gpui::px(40.))
+                            .size(px(40.))
                             .text_color(icon_fill)
                     } else if mezon_store::is_age_restricted(age_restricted) {
                         Icon::new(IconName::HashtagWarning)
-                            .size(gpui::px(40.))
+                            .size(px(40.))
                             .text_color(icon_fill)
                     } else if private {
                         Icon::new(IconName::HashtagLocked)
-                            .size(gpui::px(40.))
+                            .size(px(40.))
                             .text_color(icon_fill)
                     } else {
                         Icon::new(IconName::Hashtag)
-                            .size(gpui::px(40.))
+                            .size(px(40.))
                             .text_color(icon_fill)
                     },
                     if is_stream {

@@ -638,7 +638,7 @@ fn render_pagination_nav_button(
         theme.tokens.text_theme_primary
     };
     let mut icon = Icon::new(IconName::ArrowRight)
-        .size(gpui::px(20.))
+        .size(px(20.))
         .text_color(icon_color);
     if previous {
         icon = icon.with_transformation(Transformation::rotate(radians(std::f32::consts::PI)));
@@ -1736,7 +1736,7 @@ pub fn render_header_search_bar(
                         .when(!has_query, |el| {
                             el.child(
                                 Icon::new(IconName::Search)
-                                    .size(gpui::px(16.))
+                                    .size(px(16.))
                                     .mt(px(1.))
                                     .text_color(theme.tokens.text_theme_primary),
                             )
@@ -1759,7 +1759,7 @@ pub fn render_header_search_bar(
                                 })
                                 .child(
                                     Icon::new(IconName::Close)
-                                        .size(gpui::px(16.))
+                                        .size(px(16.))
                                         .text_color(theme.tokens.text_theme_primary),
                                 )
                         }),

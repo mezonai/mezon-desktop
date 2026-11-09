@@ -719,7 +719,7 @@ impl RoleSettingPage {
                             )
                             .child(
                                 Icon::new(IconName::ArrowRight)
-                                    .size(gpui::px(20.))
+                                    .size(px(20.))
                                     .selected(false),
                             ),
                     )
@@ -978,7 +978,7 @@ impl RoleSettingPage {
                                 .group_hover(row_group.clone(), |s| s.opacity(1.))
                                 .child(
                                     Icon::new(IconName::PenEdit)
-                                        .size(gpui::px(20.))
+                                        .size(px(20.))
                                         .text_color(theme.text_primary),
                                 )
                                 .on_click(move |_, _, cx| {
@@ -1011,7 +1011,7 @@ impl RoleSettingPage {
                                         .bg(theme.danger_text)
                                         .child(
                                             Icon::new(IconName::TrashIcon)
-                                                .size(gpui::px(20.))
+                                                .size(px(20.))
                                                 .text_color(theme.text_primary),
                                         )
                                         .on_click({

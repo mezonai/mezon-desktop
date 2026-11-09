@@ -813,7 +813,7 @@ impl PermissionOverrides {
                 )
                 .child(
                     Icon::new(IconName::ArrowDown)
-                        .size(gpui::px(20.))
+                        .size(px(20.))
                         .text_color(theme.tokens.text_theme_primary)
                         .when(!expanded, |icon| {
                             icon.with_transformation(Transformation::rotate(radians(-FRAC_PI_2)))
@@ -916,7 +916,7 @@ impl PermissionOverrides {
                 h_flex()
                     .gap_2()
                     .p_2()
-                    .child(Icon::new(IconName::Search).size(gpui::px(16.)))
+                    .child(Icon::new(IconName::Search).size(px(16.)))
                     .when_some(self.add_input.clone(), |el, input| {
                         el.child(div().flex_1().min_w_0().child(Input::new(&input)))
                     }),
@@ -1031,7 +1031,7 @@ impl PermissionOverrides {
                         .gap_2()
                         .rounded_lg()
                         .bg(theme.tokens.bg_input_secondary)
-                        .child(Icon::new(IconName::Search).size(gpui::px(16.)))
+                        .child(Icon::new(IconName::Search).size(px(16.)))
                         .child(div().flex_1().min_w_0().child(Input::new(&input))),
                 )
             })

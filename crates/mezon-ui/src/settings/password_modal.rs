@@ -385,7 +385,7 @@ impl Render for PasswordModal {
                             .hover(|style| style.bg(theme.tokens.bg_item_hover))
                             .child(
                                 Icon::new(IconName::Close)
-                                    .size(gpui::px(20.))
+                                    .size(px(20.))
                                     .text_color(theme.tokens.text_theme_primary),
                             )
                             .on_click(|_, _, cx| {

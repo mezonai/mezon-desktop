@@ -359,7 +359,7 @@ impl StreamingPage {
                             .gap_2()
                             .child(
                                 Icon::new(IconName::Stream)
-                                    .size(gpui::px(16.))
+                                    .size(px(16.))
                                     .text_color(theme.text_primary),
                             )
                             .child(
@@ -442,7 +442,7 @@ impl StreamingPage {
                                 .when(!is_selected, |el| el.hover(|s| s.bg(theme.bg_hover)))
                                 .child(
                                     Icon::new(IconName::Stream)
-                                        .size(gpui::px(16.))
+                                        .size(px(16.))
                                         .text_color(theme.text_primary),
                                 )
                                 .child(

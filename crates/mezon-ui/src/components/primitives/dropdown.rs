@@ -207,7 +207,7 @@ impl RenderOnce for Dropdown {
             )
             .child(
                 Icon::new(IconName::ArrowDown)
-                    .size(gpui::px(16.))
+                    .size(px(16.))
                     .flex_shrink_0()
                     .selected(false),
             );
@@ -332,7 +332,7 @@ impl RenderOnce for Dropdown {
                                                 .when(selected, |el| {
                                                     el.child(
                                                         Icon::new(IconName::Check)
-                                                            .size(gpui::px(16.))
+                                                            .size(px(16.))
                                                             .flex_shrink_0()
                                                             .text_color(theme.brand),
                                                     )

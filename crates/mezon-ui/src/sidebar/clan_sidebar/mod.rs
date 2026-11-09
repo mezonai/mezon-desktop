@@ -796,7 +796,7 @@ fn render_clan_footer(
                 })
                 .child(
                     Icon::new(IconName::CompassIcon)
-                        .size(gpui::px(20.))
+                        .size(px(20.))
                         .text_color(theme.tokens.text_theme_primary),
                 ),
         )

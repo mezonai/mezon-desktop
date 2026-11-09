@@ -714,7 +714,7 @@ impl OverviewTab {
                     )
                     .child(
                         Icon::new(IconName::ArrowDownFill)
-                            .size(gpui::px(16.))
+                            .size(px(16.))
                             .flex_shrink_0()
                             .selected(false),
                     ),

@@ -374,7 +374,7 @@ impl Render for SoundPanel {
                         .opacity(0.5)
                         .child(
                             Icon::new(IconName::LoudVolume)
-                                .size(gpui::px(32.))
+                                .size(px(32.))
                                 .text_color(theme.tokens.text_theme_primary),
                         )
                         .child(
@@ -592,7 +592,7 @@ fn render_sound_cell(
                 .cursor_pointer()
                 .child(
                     Icon::new(IconName::ResendMessageRightClick)
-                        .size(gpui::px(20.))
+                        .size(px(20.))
                         .text_color(theme.tokens.text_theme_primary),
                 )
                 .on_click(move |_, _, cx| {

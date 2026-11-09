@@ -125,7 +125,7 @@ pub fn render_friend_pick_row(
                         .when(selected, |el| {
                             el.child(
                                 Icon::new(IconName::Check)
-                                    .size(gpui::px(16.))
+                                    .size(px(16.))
                                     .flex_none()
                                     .text_color(theme.brand),
                             )

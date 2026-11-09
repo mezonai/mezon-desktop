@@ -203,7 +203,7 @@ impl Render for CustomStatusModal {
                     .child(div().text_sm().child(selected_label))
                     .child(
                         Icon::new(IconName::ArrowDown)
-                            .size(gpui::px(16.))
+                            .size(px(16.))
                             .text_color(text_secondary),
                     ),
             );
@@ -252,7 +252,7 @@ impl Render for CustomStatusModal {
                         .when(is_selected, |d| {
                             d.child(
                                 Icon::new(IconName::Check)
-                                    .size(gpui::px(16.))
+                                    .size(px(16.))
                                     .text_color(text_secondary),
                             )
                         }),

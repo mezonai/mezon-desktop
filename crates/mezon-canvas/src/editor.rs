@@ -3415,12 +3415,12 @@ fn render_bubble_menu(
                         .gap_1()
                         .child(
                             Icon::new(IconName::ParagraphIcon)
-                                .size(gpui::px(16.))
+                                .size(px(16.))
                                 .text_color(icon_color),
                         )
                         .child(
                             Icon::new(IconName::ArrowDown)
-                                .size(gpui::px(16.))
+                                .size(px(16.))
                                 .text_color(icon_color),
                         ),
                 )
@@ -3512,7 +3512,7 @@ fn render_bubble_menu(
                     .tooltip(TooltipView::text(remove_link_tooltip))
                     .child(
                         Icon::new(IconName::Close)
-                            .size(gpui::px(16.))
+                            .size(px(16.))
                             .text_color(icon_color),
                     )
                     .on_mouse_down(MouseButton::Left, {
@@ -3652,7 +3652,7 @@ fn block_menu_items(
                         .when(active, |el| {
                             el.child(
                                 Icon::new(IconName::Check)
-                                    .size(gpui::px(16.))
+                                    .size(px(16.))
                                     .text_color(active_color),
                             )
                         }),

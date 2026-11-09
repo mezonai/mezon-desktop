@@ -1202,7 +1202,7 @@ impl VideoPlayerView {
             .when(!compact, |card| {
                 card.child(
                     Icon::new(IconName::TriangleAlert)
-                        .size(gpui::px(24.))
+                        .size(px(24.))
                         .text_color(body_color),
                 )
                 .child(
@@ -1317,7 +1317,7 @@ impl VideoPlayerView {
             }))
             .child(
                 Icon::new(IconName::Download)
-                    .size(gpui::px(16.))
+                    .size(px(16.))
                     .text_color(icon_color),
             )
     }

@@ -93,7 +93,7 @@ impl Render for ScreenSharePipView {
                 .object_fit(ObjectFit::Contain)
                 .into_any_element(),
             None => Icon::new(IconName::VoiceScreenShareIcon)
-                .size(gpui::px(40.))
+                .size(px(40.))
                 .text_color(rgb(0x9a9a9a))
                 .into_any_element(),
         };
@@ -117,7 +117,7 @@ impl Render for ScreenSharePipView {
             })
             .child(
                 Icon::new(IconName::Close)
-                    .size(gpui::px(16.))
+                    .size(px(16.))
                     .text_color(rgb(0xffffff)),
             )
             .on_mouse_down(MouseButton::Left, |_, window, cx| {

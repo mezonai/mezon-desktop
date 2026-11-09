@@ -221,7 +221,7 @@ impl Render for GifPanel {
                 .cursor_pointer()
                 .child(
                     Icon::new(IconName::BackToCategoriesGif)
-                        .size(gpui::px(20.))
+                        .size(px(20.))
                         .text_color(theme.tokens.text_theme_primary),
                 )
                 .child(
@@ -428,7 +428,7 @@ fn render_category_tile(theme: &Theme, cell: &CatCell, entity: &Entity<GifPanel>
     if matches!(cell, CatCell::Trending { .. }) {
         label_row = label_row.child(
             Icon::new(IconName::TrendingGifs)
-                .size(gpui::px(20.))
+                .size(px(20.))
                 .text_color(gpui::white()),
         );
     }

@@ -614,7 +614,7 @@ impl ChannelHeader {
             .occlude()
             .child(
                 Icon::new(IconName::AddPerson)
-                    .size(gpui::px(20.))
+                    .size(px(20.))
                     .text_color(icon_color),
             )
             .on_click(move |_, window, cx| {
@@ -1004,7 +1004,7 @@ impl ChannelHeader {
                 .hover(|s| s.bg(theme.bg_hover))
                 .child(
                     Icon::new(IconName::EmptyUnread)
-                        .size(gpui::px(20.))
+                        .size(px(20.))
                         .selected(false),
                 )
                 .into_any_element();
@@ -1762,7 +1762,7 @@ fn render_stream_chat_sidebar_header(
                 .p_1()
                 .child(
                     Icon::new(IconName::Close)
-                        .size(gpui::px(20.))
+                        .size(px(20.))
                         .text_color(theme.text_primary),
                 )
                 .on_click(move |_, _, cx| {
@@ -1825,7 +1825,7 @@ impl RenderOnce for AddFriendsPopoverTrigger {
             .tooltip(Tooltip::text(self.tooltip))
             .child(
                 Icon::new(IconName::AddPerson)
-                    .size(gpui::px(20.))
+                    .size(px(20.))
                     .text_color(self.icon_color),
             )
             .when_some(self.on_click, |el, handler| el.on_click(handler))
@@ -1894,7 +1894,7 @@ impl RenderOnce for ThreadPopoverTrigger {
             .occlude()
             .child(
                 Icon::new(IconName::ThreadEmpty)
-                    .size(gpui::px(20.))
+                    .size(px(20.))
                     .text_color(tint),
             );
         if self.open {
@@ -1975,7 +1975,7 @@ impl RenderOnce for InboxPopoverTrigger {
                     .relative()
                     .child(
                         Icon::new(IconName::EmptyUnread)
-                            .size(gpui::px(20.))
+                            .size(px(20.))
                             .text_color(tint),
                     )
                     .when(self.show_badge, |d| {
@@ -2065,11 +2065,7 @@ impl RenderOnce for PinPopoverTrigger {
             .child(
                 div()
                     .relative()
-                    .child(
-                        Icon::new(IconName::PinList)
-                            .size(gpui::px(20.))
-                            .text_color(tint),
-                    )
+                    .child(Icon::new(IconName::PinList).size(px(20.)).text_color(tint))
                     .when(self.show_badge, |d| {
                         d.child(
                             div()
@@ -2135,7 +2131,7 @@ impl RenderOnce for CanvasPopoverTrigger {
             .with_size(Size::Small)
             .icon(
                 Icon::new(IconName::CanvasIcon)
-                    .size(gpui::px(20.))
+                    .size(px(20.))
                     .text_color(self.icon_color),
             );
         button = if self.open {

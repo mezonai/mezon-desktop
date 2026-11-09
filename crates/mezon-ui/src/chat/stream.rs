@@ -320,7 +320,7 @@ pub fn render_stream_connected_bar(
                                     .gap_1()
                                     .child(
                                         Icon::new(IconName::NetworkStatus)
-                                            .size(gpui::px(16.))
+                                            .size(px(16.))
                                             .text_color(theme.status_online),
                                     )
                                     .child(
@@ -361,7 +361,7 @@ pub fn render_stream_connected_bar(
                             .hover(move |s| s.bg(leave_hover_bg))
                             .child(
                                 Icon::new(IconName::EndCall)
-                                    .size(gpui::px(20.))
+                                    .size(px(20.))
                                     .text_color(leave_icon_color),
                             )
                             .on_click(move |_, _, cx| {
@@ -413,7 +413,7 @@ fn stream_header(
                 .gap_2()
                 .child(
                     Icon::new(IconName::Stream)
-                        .size(gpui::px(20.))
+                        .size(px(20.))
                         .text_color(stream_icon_color),
                 )
                 .child(
@@ -595,7 +595,7 @@ fn render_pre_join(
             .bg(circle_bg)
             .child(
                 Icon::new(IconName::Stream)
-                    .size(gpui::px(40.))
+                    .size(px(40.))
                     .text_color(theme.text_primary),
             )
             .into_any_element(),
@@ -786,7 +786,7 @@ fn render_members_toggle_button(
 ) -> AnyElement {
     let stream_toggle = stream;
     let mut chevron = Icon::new(IconName::CaretDown)
-        .size(gpui::px(24.))
+        .size(px(24.))
         .text_color(gpui::rgb(0xffffff));
     if !show_members {
         chevron = chevron.with_transformation(gpui::Transformation::rotate(gpui::radians(
@@ -809,7 +809,7 @@ fn render_members_toggle_button(
         .child(chevron)
         .child(
             Icon::new(IconName::MemberIcon)
-                .size(gpui::px(24.))
+                .size(px(24.))
                 .text_color(gpui::rgb(0xffffff)),
         )
         .on_click(move |_, _, cx| {
@@ -971,11 +971,7 @@ fn render_viewer_count(locale: &str, count: u32, color: Hsla) -> AnyElement {
         .gap_1()
         .text_sm()
         .text_color(color)
-        .child(
-            Icon::new(IconName::EyeOpen)
-                .size(gpui::px(16.))
-                .text_color(color),
-        )
+        .child(Icon::new(IconName::EyeOpen).size(px(16.)).text_color(color))
         .child(text)
         .into_any_element()
 }
@@ -1093,7 +1089,7 @@ fn render_controls_bar(
                 .hover(|s| s.bg(gpui::rgb(0xa12829)))
                 .child(
                     Icon::new(IconName::EndCall)
-                        .size(gpui::px(24.))
+                        .size(px(24.))
                         .text_color(gpui::rgb(0xffffff)),
                 )
                 .on_click(move |_, _, cx| {
@@ -1286,7 +1282,7 @@ impl Render for StreamQualityMenu {
                     .justify_center()
                     .child(
                         Icon::new(IconName::Check)
-                            .size(gpui::px(16.))
+                            .size(px(16.))
                             .text_color(check_color),
                     )
                     .into_any_element()
@@ -1430,7 +1426,7 @@ impl RenderOnce for StreamOutputTrigger {
             .when(!self.open, |el| el.tooltip(Tooltip::text(self.label)))
             .child(
                 Icon::new(IconName::CallSetting)
-                    .size(gpui::px(20.))
+                    .size(px(20.))
                     .text_color(self.icon_color),
             );
         match self.on_click {

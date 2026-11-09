@@ -181,11 +181,7 @@ fn ogp_remove_button(bucket: ChannelId, message_id: MessageId, theme: &Theme) ->
         .occlude()
         .bg(theme.tokens.theme_setting_primary)
         .hover(|s| s.bg(theme.bg_hover))
-        .child(
-            Icon::new(IconName::Close)
-                .size(gpui::px(16.))
-                .selected(false),
-        )
+        .child(Icon::new(IconName::Close).size(px(16.)).selected(false))
         .on_click(move |_, _, cx| {
             MessagesStore::global(cx).update(cx, |store, cx| {
                 store.remove_message_ogp(bucket, message_id, cx);
@@ -225,7 +221,7 @@ fn ogp_image_fallback(fallback_fg: gpui::Rgba) -> AnyElement {
         .opacity(0.3)
         .child(
             Icon::new(IconName::ImageThumbnail)
-                .size(gpui::px(32.))
+                .size(px(32.))
                 .text_color(fallback_fg),
         )
         .into_any_element()

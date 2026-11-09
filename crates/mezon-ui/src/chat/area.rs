@@ -97,7 +97,7 @@ fn banned_notice(locale: &str, remaining: Option<i64>, cx: &App) -> gpui::AnyEle
         .overflow_hidden()
         .child(
             Icon::new(IconName::TriangleAlert)
-                .size(gpui::px(24.))
+                .size(px(24.))
                 .flex_none()
                 .text_color(theme.danger_text),
         )
@@ -181,7 +181,7 @@ fn onboarding_mission_banner(locale: &str, cx: &mut App) -> Option<gpui::AnyElem
                     .hover(|style| style.bg(theme.tokens.bg_item_hover))
                     .child(
                         Icon::new(IconName::Hashtag)
-                            .size(gpui::px(20.))
+                            .size(px(20.))
                             .text_color(theme.tokens.text_theme_primary),
                     )
                     .child(
@@ -857,11 +857,7 @@ fn latest_activity_strip(
                 .items_center()
                 .justify_center()
                 .size(px(28.))
-                .child(
-                    Icon::new(IconName::TopicIcon)
-                        .size(gpui::px(24.))
-                        .selected(true),
-                )
+                .child(Icon::new(IconName::TopicIcon).size(px(24.)).selected(true))
                 .when(topic_unread, |icon| {
                     icon.child(unread_dot().absolute().top_0().right_0())
                 }),
@@ -1097,7 +1093,7 @@ fn latest_activity_strip(
         })
         .child(pin_avatar.unwrap_or_else(|| {
             Icon::new(IconName::PinList)
-                .size(gpui::px(20.))
+                .size(px(20.))
                 .selected(false)
                 .into_any_element()
         }))
@@ -1166,11 +1162,7 @@ fn latest_activity_strip(
         mezon_i18n::t(locale, "chat.activityStrip.hideAction").into();
     let dismiss_locale = locale.to_string();
     let dismiss_button = Button::new("hide-channel-activity-strip")
-        .icon(
-            Icon::new(IconName::PinOff)
-                .size(gpui::px(24.))
-                .selected(false),
-        )
+        .icon(Icon::new(IconName::PinOff).size(px(24.)).selected(false))
         .with_size(Size::Small)
         .ghost()
         .on_click(move |_, window, cx| {

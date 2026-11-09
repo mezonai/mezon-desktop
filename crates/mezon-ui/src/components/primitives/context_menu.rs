@@ -620,7 +620,7 @@ impl RenderOnce for ContextMenu {
                                     .justify_center()
                                     .child(
                                         Icon::new(IconName::ImageThumbnail)
-                                            .size(gpui::px(16.))
+                                            .size(px(16.))
                                             .text_color(fallback_color),
                                     )
                                     .into_any_element()
@@ -766,7 +766,7 @@ impl RenderOnce for ContextMenu {
                                     .when(option.selected, |el| {
                                         el.child(
                                             Icon::new(IconName::Check)
-                                                .size(gpui::px(16.))
+                                                .size(px(16.))
                                                 .text_color(text),
                                         )
                                     })
@@ -849,7 +849,7 @@ impl RenderOnce for ContextMenu {
                             .child(label_col)
                             .child(
                                 Icon::new(IconName::ArrowRight)
-                                    .size(gpui::px(16.))
+                                    .size(px(16.))
                                     .text_color(muted),
                             )
                             .children(submenu),
@@ -897,7 +897,7 @@ impl RenderOnce for ContextMenu {
                                     .when(checked, |d| {
                                         d.child(
                                             Icon::new(IconName::Check)
-                                                .size(gpui::px(16.))
+                                                .size(px(16.))
                                                 .text_color(gpui::white()),
                                         )
                                     }),
@@ -978,7 +978,7 @@ impl RenderOnce for ContextMenu {
                                                 .justify_center()
                                                 .child(
                                                     Icon::new(IconName::ImageThumbnail)
-                                                        .size(gpui::px(16.))
+                                                        .size(px(16.))
                                                         .text_color(muted),
                                                 )
                                                 .into_any_element()
@@ -1045,7 +1045,7 @@ impl RenderOnce for ContextMenu {
                             .child(div().flex_1().child(label))
                             .child(
                                 Icon::new(IconName::ArrowRight)
-                                    .size(gpui::px(16.))
+                                    .size(px(16.))
                                     .text_color(muted),
                             )
                             .children(submenu),

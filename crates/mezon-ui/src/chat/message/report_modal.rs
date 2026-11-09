@@ -469,11 +469,7 @@ impl Render for ReportMessageModal {
                         .child(label),
                 )
                 .when(selected, |el| {
-                    el.child(
-                        Icon::new(IconName::Check)
-                            .size(gpui::px(16.))
-                            .selected(false),
-                    )
+                    el.child(Icon::new(IconName::Check).size(px(16.)).selected(false))
                 })
                 .on_click(move |_: &ClickEvent, _window, cx| {
                     ent.update(cx, |this, cx| {
