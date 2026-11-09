@@ -4922,5 +4922,13 @@
   "chat.activityStrip.messageFrom": "{{name}} кулланучысыннан хәбәр: {{message}}",
   "chat.activityStrip.hideAction": "Беркетмәләр һәм темалар панелен яшерү",
   "chat.activityStrip.hideConfirm.title": "Беркетмәләр һәм темалар панелен яшерү",
-  "chat.activityStrip.hideConfirm.description": "Бу канал өчен беркетмәләр һәм темалар панелен яшерергәме? Яңа беркетмә яки тема булганда ул автоматик рәвештә яңадан күренәчәк."
+  "chat.activityStrip.hideConfirm.description": "Бу канал өчен беркетмәләр һәм темалар панелен яшерергәме? Яңа беркетмә яки тема булганда ул автоматик рәвештә яңадан күренәчәк.",
+  "setting.account.qrProfile.centerLogo": "QR уртасындагы логотип",
+  "setting.account.qrProfile.chooseFromDevice": "Җайланмадан сайлау",
+  "setting.account.qrProfile.resetDefaultLogo": "Mezon логотибын кайтару",
+  "setting.account.qrProfile.qrDownloaded": "QR рәсеме йөкләнде",
+  "setting.account.qrProfile.brandName": "MEZON",
+  "setting.account.qrProfile.verifiedByMezon": "VERIFIED BY MEZON",
+  "setting.account.qrProfile.errorExport": "Профиль QR-кодын экспортлап булмый",
+  "setting.account.qrProfile.errorImage": "Рәсемне йөкләп булмый"
 }
