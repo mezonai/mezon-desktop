@@ -1461,6 +1461,7 @@ fn pin_spans_canonical_text(spans: &[MessageSpan]) -> SharedString {
         match span {
             MessageSpan::Text(value)
             | MessageSpan::Bold(value)
+            | MessageSpan::Styled { text: value, .. }
             | MessageSpan::Code(value)
             | MessageSpan::CodeBlock { text: value, .. }
             | MessageSpan::Link { text: value, .. }
@@ -1853,6 +1854,23 @@ fn render_pin_spans(
                         .text_sm()
                         .line_height(rems(1.25))
                         .font_weight(FontWeight::BOLD)
+                        .text_color(body_color)
+                        .child(styled),
+                );
+                base = end;
+            }
+            MessageSpan::Styled { text, style } => {
+                has_inline = true;
+                let end = base + text.len();
+                let styled = pin_selectable_segment(text, base, selected.as_ref());
+                push_pin_text_segment(&mut segments, &styled, base..end);
+                row = row.child(
+                    div()
+                        .text_sm()
+                        .line_height(rems(1.25))
+                        .when(style.bold, |d| d.font_weight(FontWeight::BOLD))
+                        .when(style.italic, |d| d.italic())
+                        .when(style.strike, |d| d.line_through())
                         .text_color(body_color)
                         .child(styled),
                 );
@@ -2309,9 +2327,10 @@ fn render_pin_embeds(
                 .description_spans
                 .iter()
                 .filter_map(|span| match span {
-                    MessageSpan::Text(text) | MessageSpan::Bold(text) | MessageSpan::Code(text) => {
-                        Some(text.as_ref())
-                    }
+                    MessageSpan::Text(text)
+                    | MessageSpan::Bold(text)
+                    | MessageSpan::Styled { text, .. }
+                    | MessageSpan::Code(text) => Some(text.as_ref()),
                     MessageSpan::Link { text, .. }
                     | MessageSpan::Mention { display: text, .. }
                     | MessageSpan::Hashtag { display: text, .. } => Some(text.as_ref()),
