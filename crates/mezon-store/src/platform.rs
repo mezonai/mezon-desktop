@@ -1,6 +1,7 @@
 use crate::dialog::{DialogOutcome, classify_dialog};
 use gpui::{App, AppContext, ClipboardItem, Entity, Global, Image, ImageFormat, SharedString};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 pub enum DownloadEvent {
     Started,
@@ -22,6 +23,27 @@ thread_local! {
     /// real downloads folder; a test must never write into the user's own.
     static TEST_DOWNLOAD_DIR: std::cell::RefCell<Option<std::path::PathBuf>> =
         const { std::cell::RefCell::new(None) };
+}
+
+static DOWNLOADS_IN_FLIGHT: AtomicUsize = AtomicUsize::new(0);
+
+struct DownloadInFlight;
+
+impl DownloadInFlight {
+    fn start() -> Self {
+        DOWNLOADS_IN_FLIGHT.fetch_add(1, Ordering::Relaxed);
+        Self
+    }
+}
+
+impl Drop for DownloadInFlight {
+    fn drop(&mut self) {
+        DOWNLOADS_IN_FLIGHT.fetch_sub(1, Ordering::Relaxed);
+    }
+}
+
+pub(crate) fn downloads_in_flight() -> bool {
+    DOWNLOADS_IN_FLIGHT.load(Ordering::Relaxed) > 0
 }
 
 /// Where a download goes when the user could not be asked.
@@ -86,6 +108,7 @@ pub fn download_url_with_dialog(
             }
         };
         let finished_path = path.clone();
+        let _in_flight = DownloadInFlight::start();
         cx.update(|cx| on_event(DownloadEvent::Started, cx));
         let (tx, rx) = flume::unbounded::<(u64, Option<u64>)>();
         let download = cx.background_executor().spawn(async move {
@@ -591,6 +614,18 @@ mod tests {
     use gpui::TestAppContext;
     use std::cell::RefCell;
     use std::rc::Rc;
+
+    #[test]
+    fn a_download_counts_as_in_flight_until_its_guard_drops() {
+        assert!(!downloads_in_flight());
+        let first = DownloadInFlight::start();
+        let second = DownloadInFlight::start();
+        assert!(downloads_in_flight());
+        drop(first);
+        assert!(downloads_in_flight());
+        drop(second);
+        assert!(!downloads_in_flight());
+    }
 
     const PORTAL_MISSING: &str =
         "Couldn't open file picker due to missing xdg-desktop-portal implementation.";

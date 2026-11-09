@@ -130,6 +130,9 @@ fn app_busy(cx: &App) -> bool {
     if call_busy {
         return true;
     }
+    if crate::platform::downloads_in_flight() {
+        return true;
+    }
     crate::messages::MessagesStore::try_global(cx)
         .is_some_and(|store| store.read(cx).has_running_uploads())
 }
