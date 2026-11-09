@@ -23,7 +23,7 @@ const STALL_RECOVERY_INTERVAL: Duration = Duration::from_secs(15);
 const HEARTBEAT_INTERVAL: Duration = Duration::from_millis(50);
 const HEARTBEAT_STALE: Duration = Duration::from_secs(2);
 const HEARTBEAT_STARTUP_GRACE: Duration = Duration::from_secs(5);
-const OUTPUT_OPEN_WAIT: Duration = Duration::from_millis(500);
+const OUTPUT_OPEN_WAIT: Duration = Duration::from_secs(2);
 const NO_HEARTBEAT: u64 = u64::MAX;
 
 static PREFERRED_OUTPUT: Mutex<Option<String>> = Mutex::new(None);
@@ -31,6 +31,7 @@ static PREFERRED_OUTPUT: Mutex<Option<String>> = Mutex::new(None);
 thread_local! {
     static SHARED_SINK: RefCell<Weak<SharedSink>> = const { RefCell::new(Weak::new()) };
     static OUTPUT_OPENING: RefCell<Option<OutputOpening>> = const { RefCell::new(None) };
+    static SLOW_OUTPUT: RefCell<Option<String>> = const { RefCell::new(None) };
 }
 
 pub fn set_output_device(device_id: Option<String>) {
@@ -349,9 +350,17 @@ enum OutputOpenKind {
 }
 
 struct OutputOpening {
+    requested: String,
+    kind: OutputOpenKind,
     deadline: Instant,
     opened: flume::Receiver<Result<SharedSink, AudioError>>,
-    reported_slow: bool,
+}
+
+impl OutputOpening {
+    fn superseded(&self, has_usable_sink: bool, requested: &str) -> bool {
+        self.requested != requested
+            || (!has_usable_sink && matches!(self.kind, OutputOpenKind::RestorePreferred))
+    }
 }
 
 fn open_output(kind: OutputOpenKind, requested: String) -> Result<OpenedOutput, AudioError> {
@@ -382,18 +391,19 @@ fn run_output_owner(
 }
 
 fn start_output_opening(kind: OutputOpenKind, requested: &str) -> OutputOpening {
-    let requested = requested.to_string();
+    let owner_requested = requested.to_string();
     let (opened_tx, opened) = flume::bounded(1);
     if let Err(err) = std::thread::Builder::new()
         .name("mezon-sound-output".into())
-        .spawn(move || run_output_owner(kind, requested, opened_tx))
+        .spawn(move || run_output_owner(kind, owner_requested, opened_tx))
     {
         tracing::warn!("sound output thread failed to start: {err}");
     }
     OutputOpening {
+        requested: requested.to_string(),
+        kind,
         deadline: Instant::now() + OUTPUT_OPEN_WAIT,
         opened,
-        reported_slow: false,
     }
 }
 
@@ -410,12 +420,22 @@ fn wait_for_opening<T>(
     }
 }
 
+fn output_known_slow(requested: &str) -> bool {
+    SLOW_OUTPUT.with_borrow(|slow| slow.as_deref() == Some(requested))
+}
+
 fn next_opened_output(
     current: Option<&Rc<SharedSink>>,
     requested: &str,
 ) -> Result<Option<Rc<SharedSink>>, AudioError> {
     OUTPUT_OPENING.with(|cell| {
         let mut opening = cell.borrow_mut();
+        if opening
+            .as_ref()
+            .is_some_and(|in_flight| in_flight.superseded(current.is_some(), requested))
+        {
+            *opening = None;
+        }
         if opening.is_none() {
             let kind = match current {
                 None => Some(OutputOpenKind::Replace),
@@ -426,24 +446,28 @@ fn next_opened_output(
             };
             *opening = kind.map(|kind| start_output_opening(kind, requested));
         }
-        let Some(in_flight) = opening.as_mut() else {
+        let Some(in_flight) = opening.as_ref() else {
             return Ok(None);
         };
-        let deadline = if current.is_some() {
-            Instant::now()
-        } else {
+        let should_wait = current.is_none() && !output_known_slow(requested);
+        let deadline = if should_wait {
             in_flight.deadline
+        } else {
+            Instant::now()
         };
         let Some(result) = wait_for_opening(&in_flight.opened, deadline) else {
-            if current.is_none() && !in_flight.reported_slow {
-                in_flight.reported_slow = true;
+            if should_wait {
+                SLOW_OUTPUT.set(Some(requested.to_string()));
                 tracing::warn!("sound output is slow to open, continuing without it");
             }
             return Ok(None);
         };
         *opening = None;
         match result {
-            Ok(sink) if sink.requested == requested => Ok(Some(Rc::new(sink))),
+            Ok(sink) if sink.usable() => {
+                SLOW_OUTPUT.set(None);
+                Ok(Some(Rc::new(sink)))
+            }
             Ok(_) => Ok(None),
             Err(_) if current.is_some() => Ok(None),
             Err(err) => Err(err),
@@ -1194,6 +1218,50 @@ mod tests {
         assert!(!output_stalled(Duration::from_secs(60), 58_500));
         assert!(output_stalled(Duration::from_secs(60), 58_000));
         assert!(output_stalled(Duration::from_secs(9 * 3600), 1_000));
+    }
+
+    fn opening_for(kind: OutputOpenKind, requested: &str) -> OutputOpening {
+        OutputOpening {
+            requested: requested.to_string(),
+            kind,
+            deadline: Instant::now(),
+            opened: flume::bounded(1).1,
+        }
+    }
+
+    #[test]
+    fn only_the_device_that_proved_slow_skips_the_wait() {
+        SLOW_OUTPUT.set(Some("device-a".to_string()));
+
+        assert!(output_known_slow("device-a"));
+        assert!(!output_known_slow("device-b"));
+
+        SLOW_OUTPUT.set(None);
+        assert!(!output_known_slow("device-a"));
+    }
+
+    #[test]
+    fn an_open_for_another_device_is_abandoned() {
+        let opening = opening_for(OutputOpenKind::Replace, "device-a");
+
+        assert!(opening.superseded(false, "device-b"));
+        assert!(opening.superseded(true, "device-b"));
+    }
+
+    #[test]
+    fn a_restore_probe_gives_way_when_no_sink_is_usable() {
+        let opening = opening_for(OutputOpenKind::RestorePreferred, "device-a");
+
+        assert!(opening.superseded(false, "device-a"));
+        assert!(!opening.superseded(true, "device-a"));
+    }
+
+    #[test]
+    fn a_replacement_open_keeps_running_for_the_same_device() {
+        let opening = opening_for(OutputOpenKind::Replace, "device-a");
+
+        assert!(!opening.superseded(false, "device-a"));
+        assert!(!opening.superseded(true, "device-a"));
     }
 
     #[test]
