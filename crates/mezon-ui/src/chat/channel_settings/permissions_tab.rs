@@ -143,7 +143,7 @@ pub(super) fn member_avatar(row: &MemberRow, size: gpui::Pixels) -> Avatar {
 pub(super) fn role_glyph(row: &RoleRow, cx: &mut App) -> gpui::AnyElement {
     if row.icon.is_empty() {
         Icon::new(IconName::RoleIcon)
-            .size(px(20.))
+            .size(px(20.0))
             .flex_shrink_0()
             .text_color(row.color)
             .into_any_element()
@@ -1150,7 +1150,7 @@ impl PermissionsTab {
                     .items_start()
                     .child(
                         Icon::new(IconName::SyncIcon)
-                            .size(px(20.))
+                            .size(px(20.0))
                             .flex_shrink_0()
                             .mr_2()
                             .text_color(rgb(SYNC_ICON_COLOR)),
@@ -1254,7 +1254,7 @@ impl PermissionsTab {
                             .items_center()
                             .child(
                                 Icon::new(IconName::HashtagLock)
-                                    .size(px(20.))
+                                    .size(px(20.0))
                                     .flex_shrink_0()
                                     .selected(false),
                             )
@@ -1423,7 +1423,7 @@ impl PermissionsTab {
                         el.child(
                             h_flex()
                                 .gap_2()
-                                .child(Icon::new(IconName::Search).size(px(16.)))
+                                .child(Icon::new(IconName::Search).size(px(16.0)))
                                 .child(div().flex_1().min_w_0().child(Input::new(&input)))
                                 .flex_shrink_0()
                                 .w(px(MEMBER_SEARCH_WIDTH))
@@ -1529,7 +1529,7 @@ impl PermissionsTab {
                 .text_color(theme.tokens.text_theme_primary)
                 .child(
                     Icon::new(IconName::RoleIcon)
-                        .size(px(20.))
+                        .size(px(20.0))
                         .flex_shrink_0()
                         .text_color(theme.tokens.text_theme_primary),
                 )

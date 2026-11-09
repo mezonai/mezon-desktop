@@ -1188,7 +1188,7 @@ impl Render for ClanEventsModal {
                                 div().absolute().left(px(10.)).top(px(10.)).child(
                                     Icon::new(IconName::IconEvents)
                                         .size(px(48.))
-                                        .size(px(64.0))
+                                        .size(px(64.))
                                         .selected(false),
                                 ),
                             )

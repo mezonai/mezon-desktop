@@ -472,7 +472,7 @@ fn render_sticker_card(
         card = card.child(
             div().absolute().top_1().left_1().child(
                 Icon::new(IconName::MarketIcons)
-                    .size(px(16.))
+                    .size(px(16.0))
                     .text_color(gpui::rgb(0xfacc15)),
             ),
         );
@@ -511,7 +511,7 @@ fn render_sticker_card(
                         })
                         .child(
                             Icon::new(IconName::Close)
-                                .size(px(16.))
+                                .size(px(16.0))
                                 .text_color(theme.danger_text),
                         ),
                 ),
@@ -555,7 +555,7 @@ fn render_add_card(theme: &Theme, entity: Entity<StickerSettingPage>) -> impl In
                         .child(
                             div().absolute().top(px(3.0)).left(px(3.0)).child(
                                 Icon::new(IconName::EmojiCatStar)
-                                    .size(px(16.))
+                                    .size(px(16.0))
                                     .text_color(gpui::white()),
                             ),
                         ),
@@ -575,7 +575,7 @@ fn render_add_card(theme: &Theme, entity: Entity<StickerSettingPage>) -> impl In
                         .justify_center()
                         .child(
                             Icon::new(IconName::Plus)
-                                .size(px(16.))
+                                .size(px(16.0))
                                 .text_color(gpui::white()),
                         ),
                 ),

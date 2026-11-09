@@ -474,7 +474,7 @@ impl ArchivedChannelPage {
             .child(
                 div().opacity(0.6).child(
                     Icon::new(IconName::Hashtag)
-                        .size(px(48.))
+                        .size(px(48.0))
                         .text_color(theme.text_primary),
                 ),
             )

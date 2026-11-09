@@ -739,7 +739,7 @@ impl IntegrationsTab {
             .when(on_webhooks, |el| {
                 el.child(
                     Icon::new(IconName::ArrowRight)
-                        .size(px(20.))
+                        .size(px(20.0))
                         .text_color(theme.text_primary),
                 )
                 .child(
@@ -795,7 +795,7 @@ impl IntegrationsTab {
                             .min_w_0()
                             .child(
                                 Icon::new(IconName::WebhooksIcon)
-                                    .size(px(20.))
+                                    .size(px(20.0))
                                     .flex_shrink_0()
                                     .text_color(theme.tokens.text_theme_primary),
                             )
@@ -834,7 +834,7 @@ impl IntegrationsTab {
                             .child(mezon_i18n::t(locale, "integrations.viewWebhook"))
                             .child(
                                 Icon::new(IconName::ArrowRight)
-                                    .size(px(16.))
+                                    .size(px(16.0))
                                     .text_color(theme.tokens.text_theme_primary),
                             )
                             .into_any_element()
@@ -895,7 +895,7 @@ impl IntegrationsTab {
                     )
                     .child(
                         Icon::new(IconName::ArrowDownFill)
-                            .size(px(16.))
+                            .size(px(16.0))
                             .flex_shrink_0()
                             .text_color(theme.tokens.text_theme_primary),
                     ),
@@ -951,7 +951,7 @@ impl IntegrationsTab {
                                         })
                                         .child(
                                             Icon::new(IconName::Hashtag)
-                                                .size(px(16.))
+                                                .size(px(16.0))
                                                 .flex_shrink_0()
                                                 .selected(false),
                                         )
@@ -1358,7 +1358,7 @@ fn render_webhook_row(
                                         .gap_1()
                                         .child(
                                             Icon::new(IconName::ClockIcon)
-                                                .size(px(16.))
+                                                .size(px(16.0))
                                                 .flex_shrink_0()
                                                 .text_color(theme.tokens.text_theme_primary),
                                         )

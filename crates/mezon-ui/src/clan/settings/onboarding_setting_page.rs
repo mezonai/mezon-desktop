@@ -1202,7 +1202,7 @@ impl OnboardingSettingPage {
                             .font_weight(FontWeight::BOLD)
                             .child(
                                 Icon::new(IconName::AddCircle)
-                                    .size(px(20.))
+                                    .size(px(20.0))
                                     .text_color(rgb(0x949cf7)),
                             )
                             .child(mezon_i18n::t(
@@ -1382,7 +1382,7 @@ impl OnboardingSettingPage {
                                 .gap_2()
                                 .child(
                                     Icon::new(IconName::AddCircle)
-                                        .size(px(20.))
+                                        .size(px(20.0))
                                         .text_color(theme.text_primary),
                                 )
                                 .child(mezon_i18n::t(
@@ -1648,7 +1648,7 @@ impl OnboardingSettingPage {
                             .font_weight(FontWeight::BOLD)
                             .child(
                                 Icon::new(IconName::AddCircle)
-                                    .size(px(20.))
+                                    .size(px(20.0))
                                     .text_color(rgb(0x949cf7)),
                             )
                             .child(mezon_i18n::t(
@@ -1721,7 +1721,7 @@ impl OnboardingSettingPage {
                             .font_weight(FontWeight::BOLD)
                             .child(
                                 Icon::new(IconName::AddCircle)
-                                    .size(px(20.))
+                                    .size(px(20.0))
                                     .text_color(rgb(0x949cf7)),
                             )
                             .child(mezon_i18n::t(
@@ -1825,7 +1825,7 @@ impl OnboardingSettingPage {
                         .hover(|style| style.bg(rgb(0x4752c4)))
                         .child(
                             Icon::new(IconName::PenEdit)
-                                .size(px(20.))
+                                .size(px(20.0))
                                 .text_color(rgb(0xffffff)),
                         )
                         .on_click(move |_, window, cx| {

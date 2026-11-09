@@ -710,7 +710,7 @@ impl OverviewSettingPage {
             .when(!has_logo, |el| {
                 el.child(
                     Icon::new(IconName::UploadImage)
-                        .size(px(32.))
+                        .size(px(32.0))
                         .selected(false),
                 )
             })
@@ -825,7 +825,7 @@ impl OverviewSettingPage {
             .when(!has_banner, |el| {
                 el.flex().items_center().justify_center().child(
                     Icon::new(IconName::UploadImage)
-                        .size(px(32.))
+                        .size(px(32.0))
                         .selected(false),
                 )
             })
@@ -874,7 +874,7 @@ impl OverviewSettingPage {
             .overflow_hidden()
             .child(
                 Icon::new(IconName::Hashtag)
-                    .size(px(16.))
+                    .size(px(16.0))
                     .flex_shrink_0()
                     .selected(false),
             )
@@ -931,7 +931,7 @@ impl OverviewSettingPage {
             )
             .child(
                 Icon::new(IconName::ArrowDownFill)
-                    .size(px(16.))
+                    .size(px(16.0))
                     .flex_shrink_0()
                     .selected(false),
             );

@@ -154,7 +154,7 @@ fn render_webhook_dashed_box(
                     .gap_1()
                     .child(
                         Icon::new(IconName::WebhooksIcon)
-                            .size(px(20.))
+                            .size(px(20.0))
                             .text_color(theme.tokens.text_theme_primary),
                     )
                     .child(

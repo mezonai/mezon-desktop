@@ -2282,7 +2282,7 @@ pub(crate) fn render_screen_fullscreen_overlay(
         Some(frame) => render_voice_frame(frame, ObjectFit::Contain),
         None => Icon::new(IconName::VoiceScreenShareIcon)
             .size(px(48.))
-            .size(px(64.0))
+            .size(px(64.))
             .selected(false)
             .into_any_element(),
     };

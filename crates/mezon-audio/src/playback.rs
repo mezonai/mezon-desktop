@@ -6,6 +6,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use parking_lot::Mutex;
 use rodio::cpal;
 use rodio::cpal::traits::{DeviceTrait, HostTrait};
+use rodio::mixer::Mixer;
 use rodio::{DeviceSinkBuilder, MixerDeviceSink, Player, Source};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -22,12 +23,15 @@ const STALL_RECOVERY_INTERVAL: Duration = Duration::from_secs(15);
 const HEARTBEAT_INTERVAL: Duration = Duration::from_millis(50);
 const HEARTBEAT_STALE: Duration = Duration::from_secs(2);
 const HEARTBEAT_STARTUP_GRACE: Duration = Duration::from_secs(5);
+const OUTPUT_OPEN_WAIT: Duration = Duration::from_secs(2);
 const NO_HEARTBEAT: u64 = u64::MAX;
 
 static PREFERRED_OUTPUT: Mutex<Option<String>> = Mutex::new(None);
 
 thread_local! {
     static SHARED_SINK: RefCell<Weak<SharedSink>> = const { RefCell::new(Weak::new()) };
+    static OUTPUT_OPENING: RefCell<Option<OutputOpening>> = const { RefCell::new(None) };
+    static SLOW_OUTPUT: RefCell<Option<String>> = const { RefCell::new(None) };
 }
 
 pub fn set_output_device(device_id: Option<String>) {
@@ -38,32 +42,45 @@ pub fn set_output_device(device_id: Option<String>) {
     }
 }
 
-struct SharedSink {
+struct OpenedOutput {
     sink: MixerDeviceSink,
+    requested: String,
+    broken: Arc<AtomicBool>,
+    actual_id: Option<String>,
+}
+
+struct SharedSink {
+    mixer: Mixer,
     requested: String,
     broken: Arc<AtomicBool>,
     actual_id: Option<String>,
     heartbeat: OutputHeartbeat,
     last_preferred_probe: Cell<Instant>,
+    _owner_release: flume::Sender<()>,
 }
 
 impl SharedSink {
-    fn new(
-        mut sink: MixerDeviceSink,
-        requested: String,
-        broken: Arc<AtomicBool>,
-        actual_id: Option<String>,
-    ) -> Self {
-        sink.log_on_drop(false);
-        let heartbeat = OutputHeartbeat::attach(&sink);
+    fn new(output: &OpenedOutput, owner_release: flume::Sender<()>) -> Self {
         Self {
-            sink,
-            requested,
-            broken,
-            actual_id,
-            heartbeat,
+            mixer: output.sink.mixer().clone(),
+            requested: output.requested.clone(),
+            broken: Arc::clone(&output.broken),
+            actual_id: output.actual_id.clone(),
+            heartbeat: OutputHeartbeat::attach(&output.sink),
             last_preferred_probe: Cell::new(Instant::now()),
+            _owner_release: owner_release,
         }
+    }
+
+    fn preferred_probe_due(&self, requested: &str) -> bool {
+        if requested.is_empty()
+            || self.actual_id.as_deref() == Some(requested)
+            || self.last_preferred_probe.get().elapsed() < OUTPUT_RETRY_INTERVAL
+        {
+            return false;
+        }
+        self.last_preferred_probe.set(Instant::now());
+        true
     }
 
     fn usable(&self) -> bool {
@@ -258,7 +275,7 @@ fn open_any_output(
     Err(last_error)
 }
 
-fn open_shared_sink(host: &cpal::Host, requested: String) -> Result<SharedSink, AudioError> {
+fn open_shared_sink(host: &cpal::Host, requested: String) -> Result<OpenedOutput, AudioError> {
     let preferred = PREFERRED_OUTPUT.lock().clone();
     let device = preferred
         .as_deref()
@@ -298,10 +315,15 @@ fn open_shared_sink(host: &cpal::Host, requested: String) -> Result<SharedSink, 
         channels = ?sink.config().channel_count(),
         "sound output opened"
     );
-    Ok(SharedSink::new(sink, requested, broken, actual_id))
+    Ok(OpenedOutput {
+        sink,
+        requested,
+        broken,
+        actual_id,
+    })
 }
 
-fn restore_preferred_output(host: &cpal::Host, requested: &str) -> Option<Rc<SharedSink>> {
+fn restore_preferred_output(host: &cpal::Host, requested: &str) -> Option<OpenedOutput> {
     let device = find_output(host, requested)?;
     let device_name = device
         .description()
@@ -313,12 +335,144 @@ fn restore_preferred_output(host: &cpal::Host, requested: &str) -> Option<Rc<Sha
         device = ?device_name,
         "sound output preference restored"
     );
-    Some(Rc::new(SharedSink::new(
+    Some(OpenedOutput {
         sink,
-        requested.to_string(),
+        requested: requested.to_string(),
         broken,
-        Some(requested.to_string()),
-    )))
+        actual_id: Some(requested.to_string()),
+    })
+}
+
+#[derive(Clone, Copy)]
+enum OutputOpenKind {
+    Replace,
+    RestorePreferred,
+}
+
+struct OutputOpening {
+    requested: String,
+    kind: OutputOpenKind,
+    deadline: Instant,
+    opened: flume::Receiver<Result<SharedSink, AudioError>>,
+}
+
+impl OutputOpening {
+    fn superseded(&self, has_usable_sink: bool, requested: &str) -> bool {
+        self.requested != requested
+            || (!has_usable_sink && matches!(self.kind, OutputOpenKind::RestorePreferred))
+    }
+}
+
+fn open_output(kind: OutputOpenKind, requested: String) -> Result<OpenedOutput, AudioError> {
+    let host = cpal::default_host();
+    match kind {
+        OutputOpenKind::Replace => open_shared_sink(&host, requested),
+        OutputOpenKind::RestorePreferred => restore_preferred_output(&host, &requested)
+            .ok_or_else(|| AudioError::Output("preferred output is unavailable".to_string())),
+    }
+}
+
+fn run_output_owner(
+    kind: OutputOpenKind,
+    requested: String,
+    opened: flume::Sender<Result<SharedSink, AudioError>>,
+) {
+    match open_output(kind, requested) {
+        Ok(mut output) => {
+            output.sink.log_on_drop(false);
+            let (release, released) = flume::bounded::<()>(0);
+            let _ = opened.send(Ok(SharedSink::new(&output, release)));
+            let _ = released.recv();
+        }
+        Err(err) => {
+            let _ = opened.send(Err(err));
+        }
+    }
+}
+
+fn start_output_opening(kind: OutputOpenKind, requested: &str) -> OutputOpening {
+    let owner_requested = requested.to_string();
+    let (opened_tx, opened) = flume::bounded(1);
+    if let Err(err) = std::thread::Builder::new()
+        .name("mezon-sound-output".into())
+        .spawn(move || run_output_owner(kind, owner_requested, opened_tx))
+    {
+        tracing::warn!("sound output thread failed to start: {err}");
+    }
+    OutputOpening {
+        requested: requested.to_string(),
+        kind,
+        deadline: Instant::now() + OUTPUT_OPEN_WAIT,
+        opened,
+    }
+}
+
+fn wait_for_opening<T>(
+    opened: &flume::Receiver<Result<T, AudioError>>,
+    deadline: Instant,
+) -> Option<Result<T, AudioError>> {
+    match opened.recv_deadline(deadline) {
+        Ok(result) => Some(result),
+        Err(flume::RecvTimeoutError::Timeout) => None,
+        Err(flume::RecvTimeoutError::Disconnected) => Some(Err(AudioError::Output(
+            "sound output opener stopped".to_string(),
+        ))),
+    }
+}
+
+fn output_known_slow(requested: &str) -> bool {
+    SLOW_OUTPUT.with_borrow(|slow| slow.as_deref() == Some(requested))
+}
+
+fn next_opened_output(
+    current: Option<&Rc<SharedSink>>,
+    requested: &str,
+) -> Result<Option<Rc<SharedSink>>, AudioError> {
+    OUTPUT_OPENING.with(|cell| {
+        let mut opening = cell.borrow_mut();
+        if opening
+            .as_ref()
+            .is_some_and(|in_flight| in_flight.superseded(current.is_some(), requested))
+        {
+            *opening = None;
+        }
+        if opening.is_none() {
+            let kind = match current {
+                None => Some(OutputOpenKind::Replace),
+                Some(sink) if sink.preferred_probe_due(requested) => {
+                    Some(OutputOpenKind::RestorePreferred)
+                }
+                Some(_) => None,
+            };
+            *opening = kind.map(|kind| start_output_opening(kind, requested));
+        }
+        let Some(in_flight) = opening.as_ref() else {
+            return Ok(None);
+        };
+        let should_wait = current.is_none() && !output_known_slow(requested);
+        let deadline = if should_wait {
+            in_flight.deadline
+        } else {
+            Instant::now()
+        };
+        let Some(result) = wait_for_opening(&in_flight.opened, deadline) else {
+            if should_wait {
+                SLOW_OUTPUT.set(Some(requested.to_string()));
+                tracing::warn!("sound output is slow to open, continuing without it");
+            }
+            return Ok(None);
+        };
+        *opening = None;
+        match result {
+            Ok(sink) if sink.usable() => {
+                SLOW_OUTPUT.set(None);
+                Ok(Some(Rc::new(sink)))
+            }
+            Ok(_) => Ok(None),
+            Err(_) if current.is_some() => Ok(None),
+            Err(err) => Err(err),
+        }
+    })
 }
 
 fn replacement_opened(sink: &Rc<SharedSink>) -> bool {
@@ -334,25 +488,14 @@ fn shared_sink() -> Result<Rc<SharedSink>, AudioError> {
     let requested = requested_output(&host);
     SHARED_SINK.with(|cell| {
         let mut slot = cell.borrow_mut();
-        if let Some(existing) = slot.upgrade()
-            && existing.requested == requested
-            && existing.usable()
-        {
-            if !requested.is_empty()
-                && existing.actual_id.as_deref() != Some(requested.as_str())
-                && existing.last_preferred_probe.get().elapsed() >= OUTPUT_RETRY_INTERVAL
-            {
-                existing.last_preferred_probe.set(Instant::now());
-                if let Some(sink) = restore_preferred_output(&host, &requested) {
-                    *slot = Rc::downgrade(&sink);
-                    return Ok(sink);
-                }
-            }
-            return Ok(existing);
+        let current = slot
+            .upgrade()
+            .filter(|sink| sink.requested == requested && sink.usable());
+        if let Some(sink) = next_opened_output(current.as_ref(), &requested)? {
+            *slot = Rc::downgrade(&sink);
+            return Ok(sink);
         }
-        let sink = Rc::new(open_shared_sink(&host, requested)?);
-        *slot = Rc::downgrade(&sink);
-        Ok(sink)
+        current.ok_or_else(|| AudioError::Output("sound output is still opening".to_string()))
     })
 }
 
@@ -690,7 +833,7 @@ pub struct AudioPlayer {
 impl AudioPlayer {
     pub fn new() -> Result<Self, AudioError> {
         let sink = shared_sink()?;
-        let player = Player::connect_new(sink.sink.mixer());
+        let player = Player::connect_new(&sink.mixer);
         Ok(Self {
             sink: RefCell::new(sink),
             player: RefCell::new(player),
@@ -721,7 +864,7 @@ impl AudioPlayer {
         if had_source && prepared.is_none() {
             return;
         }
-        let player = Player::connect_new(sink.sink.mixer());
+        let player = Player::connect_new(&sink.mixer);
         player.set_volume(self.volume.get());
         if !playing {
             player.pause();
@@ -916,7 +1059,7 @@ impl AudioPlayer {
         };
         let player = {
             let sink = self.sink.borrow();
-            let player = Player::connect_new(sink.sink.mixer());
+            let player = Player::connect_new(&sink.mixer);
             player.set_volume(self.volume.get());
             if !playing {
                 player.pause();
@@ -1075,6 +1218,95 @@ mod tests {
         assert!(!output_stalled(Duration::from_secs(60), 58_500));
         assert!(output_stalled(Duration::from_secs(60), 58_000));
         assert!(output_stalled(Duration::from_secs(9 * 3600), 1_000));
+    }
+
+    fn opening_for(kind: OutputOpenKind, requested: &str) -> OutputOpening {
+        OutputOpening {
+            requested: requested.to_string(),
+            kind,
+            deadline: Instant::now(),
+            opened: flume::bounded(1).1,
+        }
+    }
+
+    #[test]
+    fn only_the_device_that_proved_slow_skips_the_wait() {
+        SLOW_OUTPUT.set(Some("device-a".to_string()));
+
+        assert!(output_known_slow("device-a"));
+        assert!(!output_known_slow("device-b"));
+
+        SLOW_OUTPUT.set(None);
+        assert!(!output_known_slow("device-a"));
+    }
+
+    #[test]
+    fn an_open_for_another_device_is_abandoned() {
+        let opening = opening_for(OutputOpenKind::Replace, "device-a");
+
+        assert!(opening.superseded(false, "device-b"));
+        assert!(opening.superseded(true, "device-b"));
+    }
+
+    #[test]
+    fn a_restore_probe_gives_way_when_no_sink_is_usable() {
+        let opening = opening_for(OutputOpenKind::RestorePreferred, "device-a");
+
+        assert!(opening.superseded(false, "device-a"));
+        assert!(!opening.superseded(true, "device-a"));
+    }
+
+    #[test]
+    fn a_replacement_open_keeps_running_for_the_same_device() {
+        let opening = opening_for(OutputOpenKind::Replace, "device-a");
+
+        assert!(!opening.superseded(false, "device-a"));
+        assert!(!opening.superseded(true, "device-a"));
+    }
+
+    #[test]
+    fn a_hung_output_open_stops_waiting_at_the_deadline() {
+        let (_opener, opened) = flume::bounded::<Result<(), AudioError>>(1);
+        let started = Instant::now();
+
+        let result = wait_for_opening(&opened, started + Duration::from_millis(50));
+
+        assert!(result.is_none());
+        assert!(started.elapsed() >= Duration::from_millis(50));
+        assert!(started.elapsed() < Duration::from_secs(2));
+    }
+
+    #[test]
+    fn a_hung_output_open_is_not_waited_on_again_after_the_deadline() {
+        let (_opener, opened) = flume::bounded::<Result<(), AudioError>>(1);
+        let expired = Instant::now();
+        std::thread::sleep(Duration::from_millis(5));
+        let started = Instant::now();
+
+        assert!(wait_for_opening(&opened, expired).is_none());
+        assert!(started.elapsed() < Duration::from_millis(100));
+    }
+
+    #[test]
+    fn a_late_output_open_is_collected_after_the_deadline() {
+        let (opener, opened) = flume::bounded::<Result<u8, AudioError>>(1);
+        let expired = Instant::now();
+        assert!(wait_for_opening(&opened, expired).is_none());
+
+        opener.send(Ok(7)).unwrap();
+
+        assert!(matches!(wait_for_opening(&opened, expired), Some(Ok(7))));
+    }
+
+    #[test]
+    fn a_stopped_output_opener_reports_a_failure() {
+        let (opener, opened) = flume::bounded::<Result<(), AudioError>>(1);
+        drop(opener);
+
+        assert!(matches!(
+            wait_for_opening(&opened, Instant::now() + Duration::from_secs(5)),
+            Some(Err(AudioError::Output(_)))
+        ));
     }
 
     #[test]

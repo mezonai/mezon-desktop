@@ -397,7 +397,7 @@ fn render_empty(
         .child(
             Icon::new(IconName::CanvasIcon)
                 .size(px(48.))
-                .size(px(56.0))
+                .size(px(56.))
                 .text_color(tokens.bg_icon_theme),
         )
         .child(

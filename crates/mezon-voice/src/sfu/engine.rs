@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use std::net::{IpAddr, Ipv6Addr, SocketAddr, UdpSocket};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context as _, Result};
@@ -18,6 +19,7 @@ use libwebrtc::rtp_parameters::{DegradationPreference, Priority};
 use libwebrtc::rtp_transceiver::RtpTransceiverDirection;
 use libwebrtc::session_description::{SdpType, SessionDescription};
 use libwebrtc::stats::RtcStats;
+use libwebrtc::video_source::native::NativeVideoSource;
 use libwebrtc::video_stream::native::NativeVideoStream;
 use libwebrtc::video_track::RtcVideoTrack;
 use tokio_tungstenite::connect_async;
@@ -136,6 +138,15 @@ fn screen_profile(mode: ScreenShareMode) -> &'static ScreenProfile {
     }
 }
 
+fn screen_encode_fps(mode: ScreenShareMode, tier: usize) -> f64 {
+    mode.encode_max_fps()
+        .min(screen_profile(mode)[tier].fps_cap)
+}
+
+fn screen_repeat_fps(mode: ScreenShareMode, capture_fps: u32, tier: usize) -> f64 {
+    f64::from(capture_fps).min(screen_encode_fps(mode, tier))
+}
+
 const SCREEN_CODEC: &str = "vp9";
 const SCREEN_MAX_ENCODE_WIDTH: f64 = 1920.0;
 const UPLINK_START_KBPS: u32 = 2_500;
@@ -210,7 +221,39 @@ pub struct ScreenTrack {
     pub track: RtcVideoTrack,
     pub width: u32,
     pub mode: ScreenShareMode,
+    pub repeat: Option<ScreenRepeat>,
     pub(crate) send_pace: ScreenSendPace,
+}
+
+#[derive(Clone)]
+pub struct ScreenRepeat {
+    source: NativeVideoSource,
+    fixed_capture_fps: Option<u32>,
+    applied_fps: Arc<AtomicU64>,
+}
+
+impl ScreenRepeat {
+    pub fn new(source: NativeVideoSource, fixed_capture_fps: Option<u32>) -> Self {
+        Self {
+            source,
+            fixed_capture_fps,
+            applied_fps: Arc::default(),
+        }
+    }
+
+    fn apply(&self, mode: ScreenShareMode, tier: usize) {
+        let capture_fps = self.fixed_capture_fps.unwrap_or_else(|| mode.capture_fps());
+        let fps = screen_repeat_fps(mode, capture_fps, tier);
+        if self.applied_fps.swap(fps.to_bits(), Ordering::Relaxed) != fps.to_bits() {
+            self.source.set_frame_rate_constraints(Some(0.0), Some(fps));
+        }
+    }
+
+    fn stop(&self) {
+        if self.applied_fps.swap(0, Ordering::Relaxed) != 0 {
+            self.source.set_frame_rate_constraints(None, None);
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1808,6 +1851,11 @@ async fn session_loop(
                         }
                     }
                     EngineCommand::SetLocalScreen(track) => {
+                        if let Some(old) = &local.screen
+                            && let Some(repeat) = &old.repeat
+                        {
+                            repeat.stop();
+                        }
                         local.screen = track;
                         tiers.screen = 0;
                         screen_adaptation = ScreenAdaptation::default();
@@ -2690,6 +2738,11 @@ fn screen_scale_down(width: u32) -> f64 {
 }
 
 fn tune_uplinks(pc: &PeerConnection, local: &LocalTracks, tiers: PublishTiers) {
+    if let Some(screen) = &local.screen
+        && let Some(repeat) = &screen.repeat
+    {
+        repeat.apply(screen.mode, tiers.screen);
+    }
     for transceiver in pc.transceivers() {
         let Some(mid) = transceiver.mid() else {
             continue;
@@ -2720,7 +2773,7 @@ fn tune_uplinks(pc: &PeerConnection, local: &LocalTracks, tiers: PublishTiers) {
                         * tier.scale_down;
                     (
                         mode.max_bitrate_bps(),
-                        mode.encode_max_fps().min(tier.fps_cap),
+                        screen_encode_fps(mode, tiers.screen),
                         Some(SCREEN_SCALABILITY_MODE.to_owned()),
                         mode.degradation(),
                         scale,
@@ -3729,5 +3782,18 @@ mod tests {
         }
         assert_eq!(refreshes, MEET_TOKEN_RETRY_LIMIT);
         assert_eq!(calls(), MEET_TOKEN_RETRY_LIMIT);
+    }
+
+    #[test]
+    fn text_share_repeat_rate_follows_the_capture_rate_and_tier_cap() {
+        let text = ScreenShareMode::Text;
+        let repeat = |capture_fps| -> Vec<f64> {
+            (0..TEXT_TIERS.len())
+                .map(|tier| screen_repeat_fps(text, capture_fps, tier))
+                .collect()
+        };
+        assert_eq!(repeat(text.capture_fps()), [15.0, 12.0, 8.0, 5.0]);
+        let portal_started_in_video_mode = ScreenShareMode::Video.capture_fps();
+        assert_eq!(repeat(portal_started_in_video_mode), [20.0, 12.0, 8.0, 5.0]);
     }
 }

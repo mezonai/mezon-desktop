@@ -1258,7 +1258,7 @@ impl Render for SoundPicker {
                                 .justify_center()
                                 .child(
                                     Icon::new(IconName::FileThumbAudio)
-                                        .size(px(48.))
+                                        .size(px(48.0))
                                         .text_color(theme.tokens.text_theme_primary),
                                 ),
                         )

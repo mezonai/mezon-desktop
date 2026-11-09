@@ -96,7 +96,7 @@ pub fn pagination_button(
             |element| {
                 element.child(
                     Icon::new(IconName::ArrowRight)
-                        .size(px(20.))
+                        .size(px(20.0))
                         .text_color(gpui::white())
                         .when(button == PaginationButton::Previous, |icon| {
                             icon.with_transformation(gpui::Transformation::rotate(gpui::radians(

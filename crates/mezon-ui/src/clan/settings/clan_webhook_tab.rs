@@ -586,7 +586,7 @@ impl Render for ClanWebhookTab {
                                     Icon::new(IconName::CaretDown).size(px(20.)).selected(false)
                                 } else {
                                     Icon::new(IconName::ArrowRight)
-                                        .size(px(20.))
+                                        .size(px(20.0))
                                         .selected(false)
                                 })
                             })

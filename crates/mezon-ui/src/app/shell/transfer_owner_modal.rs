@@ -166,7 +166,7 @@ impl Render for TransferOwnerModal {
                                 div().mt(px(24.)).child(
                                     Icon::new(IconName::TransferOwner)
                                         .size(px(48.))
-                                        .size(px(60.0))
+                                        .size(px(60.))
                                         .text_color(theme.text_primary),
                                 ),
                             )

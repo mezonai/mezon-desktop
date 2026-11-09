@@ -129,7 +129,7 @@ fn filter_chip(
         )
         .child(
             Icon::new(IconName::ArrowDownFill)
-                .size(px(16.))
+                .size(px(16.0))
                 .flex_shrink_0()
                 .selected(false),
         );
@@ -194,7 +194,7 @@ fn filter_menu_row(
     if selected {
         row = row.child(
             Icon::new(IconName::Check)
-                .size(px(16.))
+                .size(px(16.0))
                 .text_color(theme.tokens.text_theme_primary),
         );
     }

@@ -1,6 +1,8 @@
 use libwebrtc::rtp_parameters::DegradationPreference;
 use libwebrtc::video_track::ContentHint;
 
+pub(crate) const PACES_TEXT_FRAMES: bool = cfg!(target_os = "windows");
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ScreenShareMode {
     #[default]
@@ -25,7 +27,7 @@ impl ScreenShareMode {
 
     pub(crate) fn paced_send_fps(self, encode_fps: f64) -> u32 {
         match self {
-            Self::Text if cfg!(target_os = "windows") => self.capture_fps().min(encode_fps as u32),
+            Self::Text if PACES_TEXT_FRAMES => self.capture_fps().min(encode_fps as u32),
             Self::Text | Self::Video => 0,
         }
     }

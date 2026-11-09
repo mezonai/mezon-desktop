@@ -1802,7 +1802,7 @@ impl Render for ChatLayout {
                     .on_click(|_, _, cx| mezon_store::update_restart_clicked(cx))
                     .child(
                         Icon::new(IconName::ReloadIcon)
-                            .size(px(16.))
+                            .size(px(16.0))
                             .text_color(gpui::white()),
                     )
                     .child(
@@ -1838,7 +1838,7 @@ impl Render for ChatLayout {
                     .on_click(|_, _, cx| mezon_store::update_available_clicked(cx))
                     .child(
                         Icon::new(IconName::Download)
-                            .size(px(16.))
+                            .size(px(16.0))
                             .text_color(gpui::white()),
                     )
                     .child(
@@ -1881,7 +1881,7 @@ impl Render for ChatLayout {
                     })
                     .child(
                         Icon::new(IconName::Download)
-                            .size(px(16.))
+                            .size(px(16.0))
                             .text_color(gpui::white()),
                     )
                     .child(

@@ -746,7 +746,7 @@ fn preview_image(
             .into_any_element(),
         None => Icon::new(IconName::UploadImage)
             .size(px(48.))
-            .size(px(50.0))
+            .size(px(50.))
             .text_color(placeholder_color)
             .into_any_element(),
     }

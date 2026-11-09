@@ -808,7 +808,7 @@ impl CommunitySettingPage {
             .when(!has_banner, |el| {
                 el.flex().items_center().justify_center().child(
                     Icon::new(IconName::UploadImage)
-                        .size(px(32.))
+                        .size(px(32.0))
                         .selected(false),
                 )
             })

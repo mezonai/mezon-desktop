@@ -113,3 +113,49 @@ fn test_neural_model_called_after_pipeline_for_final_spelling_result() {
     );
     assert!(res.corrected.contains("trao đổi") || res.corrected.contains("ở đây"));
 }
+
+#[test]
+fn test_model2_precision_collocations() {
+    let client = MezonGrammarClient::new();
+    let res1 = client.correct("tho lanh nghe cung duoc sang loc ky hon").corrected;
+    assert!(res1.to_lowercase().contains("thợ lành nghề"));
+
+    let res2 = client.correct("cac tu lieu hoc tap: phieu hoc tap").corrected;
+    assert!(res2.to_lowercase().contains("tư liệu học tập"));
+
+    let res3 = client.correct("doanh nghiep co gang dam phan de co loi nhat").corrected;
+    assert!(res3.to_lowercase().contains("cố gắng đàm phán"));
+
+    let res4 = client.correct("goc giua chung bang 90 do").corrected;
+    assert!(res4.to_lowercase().contains("góc giữa chúng") && res4.contains("90 độ"));
+}
+
+#[test]
+fn test_restore_sentence_tab_prediction() {
+    let client = MezonGrammarClient::new();
+
+    // 1. Homophone sentence with start capitalization
+    let s1 = "tuoi tac tang len dong nghia voi viec the luc dang di xuong.";
+    let res1 = client.restore_sentence(s1);
+    assert!(res1.contains("thể lực đang đi xuống"));
+    assert!(res1.starts_with("Tuổi tác"));
+
+    // 2. Chat question with 'còn bạn ở đâu?'
+    let s2 = "toi o ha noi, con ban o dau?";
+    let res2 = client.restore_sentence(s2);
+    assert!(res2.contains("còn bạn ở đâu?"));
+    assert!(res2.starts_with("Tôi"));
+
+    // 3. Proverb with teencode: 'ko co viec j kho, chi so long khong ben.'
+    let s3 = "ko co viec j kho, chi so long khong ben.";
+    let res3 = client.restore_sentence(s3);
+    assert!(res3.contains("Không có việc gì khó") || res3.contains("không có việc gì khó"));
+    assert!(res3.contains("chỉ sợ lòng không bền"));
+
+    // 4. Ultra-long sentence (> 150 characters) without truncation
+    let s4 = "tuoi tac tang len dong nghia voi viec the luc dang di xuong va chung ta can phai tap luyen the duc the thao thuong xuyen de duy tri suc khoe tot nhat cho ban than";
+    let res4 = client.restore_sentence(s4);
+    assert!(res4.contains("thể lực đang đi xuống"));
+    assert!(res4.contains("cho bạn thân") || res4.contains("cho bản thân"));
+    assert!(res4.starts_with("Tuổi tác"));
+}
