@@ -559,6 +559,8 @@ pub struct Settings {
     pub stream_default_quality: StreamQuality,
     #[serde(default)]
     pub voice_user_volumes: HashMap<String, u16>,
+    #[serde(default)]
+    pub last_download_dir: Option<std::path::PathBuf>,
 }
 
 impl Default for Settings {
@@ -597,6 +599,7 @@ impl Default for Settings {
             grammar_correction_enabled: false,
             stream_default_quality: StreamQuality::default(),
             voice_user_volumes: HashMap::new(),
+            last_download_dir: None,
         }
     }
 }
