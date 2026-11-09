@@ -10,6 +10,7 @@ pub mod channel_app_launch;
 pub mod data_image;
 pub mod endpoint_health;
 pub mod file_ingest;
+mod fmp4_index;
 pub mod gotify;
 pub mod image_disk_cache;
 pub mod inbox;
