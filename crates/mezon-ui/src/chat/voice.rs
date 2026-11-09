@@ -1289,19 +1289,36 @@ fn render_pre_join(
         .items_center()
         .justify_center()
         .gap_4()
+        .px_4()
         .bg(theme.bg_tertiary)
+        .child(
+            div()
+                .size(px(80.))
+                .rounded_full()
+                .flex()
+                .items_center()
+                .justify_center()
+                .bg(theme.bg_secondary)
+                .child(
+                    Icon::new(IconName::Speaker)
+                        .size(px(40.))
+                        .text_color(theme.text_primary),
+                ),
+        )
         .children(avatars)
         .child(
             div()
                 .text_color(theme.text_primary)
-                .text_xl()
+                .text_3xl()
+                .max_w(px(420.))
+                .truncate()
                 .font_weight(FontWeight::BOLD)
                 .child(channel.name.clone()),
         )
         .child(
             div()
-                .text_color(theme.text_secondary)
-                .text_sm()
+                .text_color(theme.text_primary)
+                .text_center()
                 .child(subtitle.to_string()),
         )
         .when_some(error, |this, message| {
