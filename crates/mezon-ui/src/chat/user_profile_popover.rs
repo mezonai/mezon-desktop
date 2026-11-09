@@ -807,7 +807,11 @@ impl Render for UserProfilePopover {
                 }))
             })
             .when(self.embedded, |el| {
-                el.w_full().h_full().rounded_none().overflow_hidden()
+                el.w_full()
+                    .h_full()
+                    .rounded_none()
+                    .overflow_hidden()
+                    .bg(theme.surfaces.direct_message.ramp())
             })
             .child(
                 div()
@@ -838,6 +842,11 @@ impl Render for UserProfilePopover {
                 )),
                 custom_status,
                 theme,
+                if self.embedded {
+                    theme.surfaces.direct_message.solid
+                } else {
+                    theme.tokens.theme_setting_primary
+                },
             ))
             .child(
                 div().px(px(16.)).child(
@@ -1405,6 +1414,7 @@ fn render_avatar_row(
     status: Option<(mezon_store::UserPresence, gpui::Rgba)>,
     custom_status: String,
     theme: &Theme,
+    avatar_ring_color: gpui::Rgba,
 ) -> AnyElement {
     div()
         .flex()
@@ -1420,7 +1430,7 @@ fn render_avatar_row(
                 .child(
                     div()
                         .border(px(AVATAR_BORDER))
-                        .border_color(theme.bg_floating)
+                        .border_color(avatar_ring_color)
                         .rounded_full()
                         .child(avatar),
                 )
