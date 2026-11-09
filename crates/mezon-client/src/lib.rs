@@ -13,6 +13,7 @@ pub mod file_ingest;
 pub mod gotify;
 pub mod image_disk_cache;
 pub mod inbox;
+mod ingest_probe;
 pub mod keychain;
 pub mod network_monitor;
 pub mod notification_setting;
