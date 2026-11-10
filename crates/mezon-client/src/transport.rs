@@ -3607,10 +3607,10 @@ fn url_body_len_without_unbalanced_close_parens(body: &[char]) -> usize {
     len
 }
 
-fn style_run_end(chars: &[char], pos: usize, end: usize) -> usize {
+fn style_run_end(chars: &[char], pos: usize, end: usize, prot_end: &[usize]) -> usize {
     let ch = chars[pos];
     let mut k = pos;
-    while k < end && chars[k] == ch {
+    while k < end && chars[k] == ch && prot_end[k] == 0 {
         k += 1;
     }
     k
@@ -3653,16 +3653,30 @@ fn can_close_style(chars: &[char], open_end: usize, close: usize, close_end: usi
     true
 }
 
-fn find_style_close(chars: &[char], open: usize, len: usize, end: usize) -> Option<usize> {
+fn find_style_close(
+    chars: &[char],
+    open: usize,
+    len: usize,
+    end: usize,
+    prot_end: &[usize],
+    depth: u8,
+) -> Option<usize> {
+    if depth >= 16 {
+        return None;
+    }
     let ch = chars[open];
     let open_end = open + len;
     let mut j = open_end;
     while j < end {
+        if prot_end[j] != 0 {
+            j = prot_end[j].min(end);
+            continue;
+        }
         if chars[j] != ch {
             j += 1;
             continue;
         }
-        let k_end = style_run_end(chars, j, end);
+        let k_end = style_run_end(chars, j, end, prot_end);
         let k_len = k_end - j;
         if k_len == len {
             if can_close_style(chars, open_end, j, k_end) {
@@ -3674,7 +3688,7 @@ fn find_style_close(chars: &[char], open: usize, len: usize, end: usize) -> Opti
             j = k_end;
         } else if ch == '*'
             && can_open_style(chars, j, k_end, end)
-            && let Some(nested_close) = find_style_close(chars, j, k_len, end)
+            && let Some(nested_close) = find_style_close(chars, j, k_len, end, prot_end, depth + 1)
         {
             j = nested_close + k_len;
         } else if ch == '*' {
@@ -3686,18 +3700,32 @@ fn find_style_close(chars: &[char], open: usize, len: usize, end: usize) -> Opti
     None
 }
 
-fn scan_styles(chars: &[char], start: usize, end: usize, out: &mut Vec<MarkdownMatch>) {
+fn scan_styles(
+    chars: &[char],
+    start: usize,
+    end: usize,
+    prot_end: &[usize],
+    depth: u8,
+    out: &mut Vec<MarkdownMatch>,
+) {
+    if depth >= 16 {
+        return;
+    }
     let mut i = start;
     while i < end {
+        if prot_end[i] != 0 {
+            i = prot_end[i].min(end);
+            continue;
+        }
         let ch = chars[i];
         if !matches!(ch, '*' | '_' | '~') {
             i += 1;
             continue;
         }
-        let run_end = style_run_end(chars, i, end);
+        let run_end = style_run_end(chars, i, end, prot_end);
         let len = run_end - i;
         if can_open_style(chars, i, run_end, end)
-            && let Some(close) = find_style_close(chars, i, len, end)
+            && let Some(close) = find_style_close(chars, i, len, end, prot_end, depth)
         {
             let match_end = close + len;
             match (ch, len) {
@@ -3735,7 +3763,7 @@ fn scan_styles(chars: &[char], start: usize, end: usize, out: &mut Vec<MarkdownM
                 }),
                 _ => {}
             }
-            scan_styles(chars, run_end, close, out);
+            scan_styles(chars, run_end, close, prot_end, depth + 1, out);
             i = match_end;
             continue;
         }
@@ -3743,7 +3771,7 @@ fn scan_styles(chars: &[char], start: usize, end: usize, out: &mut Vec<MarkdownM
     }
 }
 
-fn scan_markdown(chars: &[char]) -> Vec<MarkdownMatch> {
+fn scan_markdown(chars: &[char], extra_protected: &[(usize, usize)]) -> Vec<MarkdownMatch> {
     let n = chars.len();
     let is_triple =
         |k: usize| k + 2 < n && chars[k] == '`' && chars[k + 1] == '`' && chars[k + 2] == '`';
@@ -3819,19 +3847,41 @@ fn scan_markdown(chars: &[char]) -> Vec<MarkdownMatch> {
         if let Some(m) = match_non_style(i) {
             i = m.end;
             out.push(m);
-            continue;
-        }
-        if chars[i] == '\n' {
+        } else {
             i += 1;
-            continue;
         }
-        let mut limit = i + 1;
-        while limit < n && chars[limit] != '\n' && match_non_style(limit).is_none() {
-            limit += 1;
-        }
-        scan_styles(chars, i, limit, &mut out);
-        i = limit;
     }
+
+    let mut prot_end = vec![0usize; n];
+    for m in &out {
+        let s = m.start.min(n);
+        let e = m.end.min(n);
+        for slot in &mut prot_end[s..e] {
+            *slot = (*slot).max(e);
+        }
+    }
+    for &(s, e) in extra_protected {
+        let s = s.min(n);
+        let e = e.min(n);
+        if s < e {
+            for slot in &mut prot_end[s..e] {
+                *slot = (*slot).max(e);
+            }
+        }
+    }
+
+    let mut line_start = 0;
+    while line_start < n {
+        let mut line_end = line_start;
+        while line_end < n && chars[line_end] != '\n' {
+            line_end += 1;
+        }
+        if line_end > line_start && line_end - line_start <= 10_000 {
+            scan_styles(chars, line_start, line_end, &prot_end, 0, &mut out);
+        }
+        line_start = line_end + 1;
+    }
+    out.sort_by_key(|m| m.start);
     out
 }
 
@@ -3849,7 +3899,7 @@ fn utf16_prefix_offsets(chars: &[char]) -> Vec<i32> {
 pub fn detect_markdown(text: &str) -> Vec<OutgoingMarkdown> {
     let chars: Vec<char> = text.chars().collect();
     let u16_at = utf16_prefix_offsets(&chars);
-    scan_markdown(&chars)
+    scan_markdown(&chars, &[])
         .into_iter()
         .map(|m| OutgoingMarkdown {
             kind: m.kind.into(),
@@ -3876,9 +3926,25 @@ impl StrippedContent {
 }
 
 pub fn strip_markdown(text: &str) -> StrippedContent {
+    strip_markdown_protected(text, &[])
+}
+
+pub fn strip_markdown_protected(text: &str, protected_utf16: &[(i32, i32)]) -> StrippedContent {
     let chars: Vec<char> = text.chars().collect();
-    let matches = scan_markdown(&chars);
     let u16_at = utf16_prefix_offsets(&chars);
+    let char_at = |u16_off: i32| -> usize {
+        let clamped = u16_off.max(0);
+        u16_at
+            .binary_search(&clamped)
+            .unwrap_or_else(|idx| idx.saturating_sub(1))
+            .min(chars.len())
+    };
+    let extra_protected: Vec<(usize, usize)> = protected_utf16
+        .iter()
+        .filter(|&&(s, e)| e > s && e > 0)
+        .map(|&(s, e)| (char_at(s), char_at(e)))
+        .collect();
+    let matches = scan_markdown(&chars, &extra_protected);
 
     let mut removed = vec![false; chars.len()];
     for m in &matches {
@@ -3991,7 +4057,11 @@ pub fn build_send_content(
     emojis: &[OutgoingEmoji],
 ) -> SendContent {
     let channels = hashtags;
-    let stripped = strip_markdown(text);
+    let mut protected = Vec::with_capacity(mentions.len() + hashtags.len() + emojis.len());
+    protected.extend(mentions.iter().map(|m| (m.s, m.e)));
+    protected.extend(hashtags.iter().map(|h| (h.s, h.e)));
+    protected.extend(emojis.iter().map(|e| (e.s, e.e)));
+    let stripped = strip_markdown_protected(text, &protected);
     let mentions: Vec<OutgoingMention> = mentions
         .iter()
         .map(|m| OutgoingMention {
@@ -12488,6 +12558,68 @@ mod tests {
         let out = strip_markdown("😀 **b**");
         assert_eq!(out.text, "😀 b");
         assert_eq!(out.markdowns, vec![md("b", 3, 4)]);
+    }
+
+    #[test]
+    fn strip_markdown_styles_wrap_inline_code_and_links() {
+        let code = strip_markdown("**run `x` first**");
+        assert_eq!(code.text, "run x first");
+        assert!(code.markdowns.contains(&md("b", 0, 11)));
+        assert!(code.markdowns.contains(&md("c", 4, 5)));
+        assert_eq!(code.markdowns.len(), 2);
+
+        let after_code = strip_markdown("**a `b` c**");
+        assert_eq!(after_code.text, "a b c");
+        assert!(after_code.markdowns.contains(&md("b", 0, 5)));
+        assert!(after_code.markdowns.contains(&md("c", 2, 3)));
+        assert_eq!(after_code.markdowns.len(), 2);
+
+        let link = strip_markdown("**see https://a.b now**");
+        assert_eq!(link.text, "see https://a.b now");
+        assert!(link.markdowns.contains(&md("b", 0, 19)));
+        assert!(link.markdowns.contains(&md("lk", 4, 15)));
+        assert_eq!(link.markdowns.len(), 2);
+    }
+
+    #[test]
+    fn strip_markdown_protects_mention_with_underscores() {
+        let sent = build_send_content(
+            "_hi_ @_bob_",
+            &[OutgoingMention {
+                user_id: "7".into(),
+                username: "_bob_".into(),
+                s: 5,
+                e: 11,
+                ..Default::default()
+            }],
+            &OutgoingHashtags::default(),
+            &[],
+        );
+        assert_eq!(sent.text, "hi @_bob_");
+        assert_eq!(sent.markdowns, vec![md("i", 0, 2)]);
+        assert_eq!(sent.mentions[0].s, 3);
+        assert_eq!(sent.mentions[0].e, 9);
+
+        let direct = strip_markdown_protected("@_bob_", &[(0, 6)]);
+        assert_eq!(direct.text, "@_bob_");
+        assert!(direct.markdowns.is_empty());
+    }
+
+    #[test]
+    fn strip_markdown_bounds_long_lines_and_deep_nesting() {
+        let long_line = "*a ".repeat(7_000);
+        assert!(long_line.len() > 20_000);
+        let out = strip_markdown(&long_line);
+        assert_eq!(out.text, long_line);
+        assert!(out.markdowns.is_empty());
+
+        let mut nested = String::from("x");
+        for level in 0..60 {
+            let marker = if level % 2 == 0 { "*" } else { "**" };
+            nested = format!("{marker}a {nested} b{marker}");
+        }
+        let nested_out = strip_markdown(&nested);
+        assert!(!nested_out.text.is_empty());
     }
 
     #[test]

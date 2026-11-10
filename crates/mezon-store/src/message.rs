@@ -1639,8 +1639,229 @@ pub fn spans_only_emoji(spans: &[MessageSpan]) -> bool {
     has_emoji
 }
 
-pub fn composer_edit_source(content: &str, spans: &[MessageSpan]) -> String {
+pub fn composer_edit_source(
+    content: &str,
+    spans: &[MessageSpan],
+    raw_content: Option<&str>,
+) -> String {
+    if let Some(raw) = raw_content
+        && let Ok(parsed) = serde_json::from_str::<ApiMessageContent>(raw)
+        && let Some(out) = position_edit_source(content, &parsed)
+    {
+        return out;
+    }
     markdown_edit_source(content, spans).unwrap_or_else(|| content.to_string())
+}
+
+fn position_edit_source(content: &str, parsed: &ApiMessageContent) -> Option<String> {
+    if parsed.t != content {
+        return None;
+    }
+    let units: Vec<u16> = content.encode_utf16().collect();
+    let total = units.len();
+
+    let mut original_set: Vec<(&'static str, i32, i32)> = Vec::new();
+    let mut style_ranges: Vec<(usize, usize, bool, bool, bool)> = Vec::new();
+    let mut code_spans: Vec<(usize, usize, &'static str, u8)> = Vec::new();
+
+    for tok in &parsed.mk {
+        let s = tok.s.unwrap_or(0).clamp(0, total as i64) as usize;
+        let e = tok.e.unwrap_or(0).clamp(0, total as i64) as usize;
+        if e <= s {
+            continue;
+        }
+        let canonical = match tok.kind.as_deref() {
+            Some("b") => {
+                if let Some(entry) = style_ranges.iter_mut().find(|r| r.0 == s && r.1 == e) {
+                    entry.2 = true;
+                } else {
+                    style_ranges.push((s, e, true, false, false));
+                }
+                "b"
+            }
+            Some("i") => {
+                if let Some(entry) = style_ranges.iter_mut().find(|r| r.0 == s && r.1 == e) {
+                    entry.3 = true;
+                } else {
+                    style_ranges.push((s, e, false, true, false));
+                }
+                "i"
+            }
+            Some("st") => {
+                if let Some(entry) = style_ranges.iter_mut().find(|r| r.0 == s && r.1 == e) {
+                    entry.4 = true;
+                } else {
+                    style_ranges.push((s, e, false, false, true));
+                }
+                "st"
+            }
+            Some("c" | "s") => {
+                code_spans.push((s, e, "`", 0));
+                "c"
+            }
+            Some("pre" | "t") => {
+                code_spans.push((s, e, "```", 1));
+                "pre"
+            }
+            _ => continue,
+        };
+        original_set.push((canonical, s as i32, e as i32));
+    }
+
+    if original_set.is_empty() {
+        return None;
+    }
+    original_set.sort_unstable();
+    original_set.dedup();
+
+    #[derive(Clone, Copy)]
+    struct PosMarker {
+        s: usize,
+        e: usize,
+        marker: &'static str,
+        rank: u8,
+    }
+
+    let raw_protected: Vec<(usize, usize)> = parsed
+        .mentions
+        .iter()
+        .chain(&parsed.hg)
+        .chain(&parsed.ej)
+        .filter_map(|tok| {
+            let s = tok.s.unwrap_or(0).clamp(0, total as i64) as usize;
+            let e = tok.e.unwrap_or(0).clamp(0, total as i64) as usize;
+            (e > s).then_some((s, e))
+        })
+        .collect();
+
+    for italic_marker in ["*", "_"] {
+        let mut markers: Vec<PosMarker> = Vec::with_capacity(style_ranges.len() + code_spans.len());
+        for &(s, e, bold, italic, strike) in &style_ranges {
+            if strike {
+                markers.push(PosMarker {
+                    s,
+                    e,
+                    marker: "~~",
+                    rank: 5,
+                });
+            }
+            if bold && italic {
+                markers.push(PosMarker {
+                    s,
+                    e,
+                    marker: "***",
+                    rank: 4,
+                });
+            } else if bold {
+                markers.push(PosMarker {
+                    s,
+                    e,
+                    marker: "**",
+                    rank: 3,
+                });
+            } else if italic {
+                markers.push(PosMarker {
+                    s,
+                    e,
+                    marker: italic_marker,
+                    rank: 2,
+                });
+            }
+        }
+        for &(s, e, marker, rank) in &code_spans {
+            markers.push(PosMarker { s, e, marker, rank });
+        }
+        markers.sort_by_key(|m| (m.s, std::cmp::Reverse(m.e), std::cmp::Reverse(m.rank)));
+
+        let mut points: Vec<usize> = Vec::with_capacity(2 + markers.len() * 2);
+        points.push(0);
+        points.push(total);
+        for m in &markers {
+            points.push(m.s);
+            points.push(m.e);
+        }
+        points.sort_unstable();
+        points.dedup();
+
+        let mut out = String::with_capacity(content.len() + markers.len() * 4);
+        for (idx, &cursor) in points.iter().enumerate() {
+            if cursor > 0 {
+                for m in markers.iter().rev().filter(|m| m.e == cursor) {
+                    out.push_str(m.marker);
+                }
+            }
+            let Some(&next_pos) = points.get(idx + 1) else {
+                break;
+            };
+            for m in markers.iter().filter(|m| m.s == cursor) {
+                out.push_str(m.marker);
+            }
+            out.push_str(&String::from_utf16_lossy(&units[cursor..next_pos]));
+        }
+
+        let shift_start = |pos: usize| -> i32 {
+            let inserted: usize = markers
+                .iter()
+                .map(|m| {
+                    let mut n = 0;
+                    if m.s <= pos {
+                        n += m.marker.len();
+                    }
+                    if m.e <= pos {
+                        n += m.marker.len();
+                    }
+                    n
+                })
+                .sum();
+            (pos + inserted) as i32
+        };
+        let shift_end = |pos: usize| -> i32 {
+            let inserted: usize = markers
+                .iter()
+                .map(|m| {
+                    let mut n = 0;
+                    if m.s < pos {
+                        n += m.marker.len();
+                    }
+                    if m.e < pos {
+                        n += m.marker.len();
+                    }
+                    n
+                })
+                .sum();
+            (pos + inserted) as i32
+        };
+        let protected: Vec<(i32, i32)> = raw_protected
+            .iter()
+            .map(|&(s, e)| (shift_start(s), shift_end(e)))
+            .collect();
+
+        let stripped = mezon_client::transport::strip_markdown_protected(&out, &protected);
+        if stripped.text != content {
+            continue;
+        }
+        let mut stripped_set: Vec<(&'static str, i32, i32)> = stripped
+            .markdowns
+            .iter()
+            .filter_map(|m| {
+                let canonical = match m.kind.as_str() {
+                    "b" => "b",
+                    "i" => "i",
+                    "st" => "st",
+                    "c" | "s" => "c",
+                    "pre" | "t" => "pre",
+                    _ => return None,
+                };
+                Some((canonical, m.s, m.e))
+            })
+            .collect();
+        stripped_set.sort_unstable();
+        stripped_set.dedup();
+        if stripped_set == original_set {
+            return Some(out);
+        }
+    }
+    None
 }
 
 fn span_inline_style(span: &MessageSpan) -> Option<(&str, InlineStyle)> {
@@ -2996,7 +3217,15 @@ mod tests {
             serde_json::from_str(&sent.json).expect("send content json");
         let spans = parse_spans(&content);
         assert_ne!(content.t.as_str(), raw);
-        assert_eq!(composer_edit_source(&content.t, &spans), raw);
+        assert_eq!(
+            composer_edit_source(&content.t, &spans, Some(&sent.json)),
+            raw
+        );
+        assert_eq!(composer_edit_source(&content.t, &spans, None), raw);
+        assert_eq!(
+            composer_edit_source(&content.t, &spans, Some(r#"{"t":"other"}"#)),
+            raw
+        );
     }
 
     #[test]
@@ -3605,6 +3834,66 @@ mod tests {
                 "markdowns mismatch for {raw:?}"
             );
         }
+    }
+
+    #[test]
+    fn composer_edit_source_position_builder_round_trips_nested_and_protected() {
+        let style_set = |mds: &[mezon_client::transport::OutgoingMarkdown]| {
+            let mut set: Vec<(String, i32, i32)> = mds
+                .iter()
+                .filter(|m| matches!(m.kind.as_str(), "b" | "i" | "st" | "c" | "s" | "pre" | "t"))
+                .map(|m| (m.kind.clone(), m.s, m.e))
+                .collect();
+            set.sort();
+            set.dedup();
+            set
+        };
+
+        for raw in [
+            "_a **b**_",
+            "**run `x` first**",
+            "~~**a** b~~",
+            "***bi***",
+            "**a ~~b~~ c**",
+            "mid*word*s",
+        ] {
+            let sent =
+                mezon_client::transport::build_send_content(raw, &[], &Default::default(), &[]);
+            let content: ApiMessageContent =
+                serde_json::from_str(&sent.json).expect("send content json");
+            let spans = parse_spans(&content);
+            let edited = composer_edit_source(&content.t, &spans, Some(&sent.json));
+            let stripped = mezon_client::transport::strip_markdown(&edited);
+            assert_eq!(stripped.text, sent.text, "text mismatch for {raw:?}");
+            assert_eq!(
+                style_set(&stripped.markdowns),
+                style_set(&sent.markdowns),
+                "style set mismatch for {raw:?}"
+            );
+        }
+
+        let mention_raw = "**a @bob c**";
+        let mention = mezon_client::transport::OutgoingMention {
+            user_id: "42".into(),
+            username: "bob".into(),
+            s: 4,
+            e: 8,
+            ..Default::default()
+        };
+        let sent = mezon_client::transport::build_send_content(
+            mention_raw,
+            std::slice::from_ref(&mention),
+            &Default::default(),
+            &[],
+        );
+        let content: ApiMessageContent =
+            serde_json::from_str(&sent.json).expect("send content json");
+        let spans = parse_spans(&content);
+        let edited = composer_edit_source(&content.t, &spans, Some(&sent.json));
+        assert_eq!(edited, mention_raw);
+        let stripped = mezon_client::transport::strip_markdown_protected(&edited, &[(4, 8)]);
+        assert_eq!(stripped.text, sent.text);
+        assert_eq!(style_set(&stripped.markdowns), style_set(&sent.markdowns));
     }
 
     #[test]
