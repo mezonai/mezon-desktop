@@ -6,6 +6,7 @@
 )]
 
 pub mod accent;
+pub mod assets;
 pub mod client;
 pub mod grammar_checker;
 pub mod neural;
@@ -15,12 +16,13 @@ pub mod rules;
 pub mod tokenizer;
 pub mod trie;
 
+pub use assets::{is_download_enabled, prefetch_all_assets, set_download_enabled};
 pub use client::{KeystrokeEvent, MAX_CORRECTION_CHAR_COUNT, MezonGrammarClient};
 pub use neural::restore_sentence;
 pub use pronoun::{
-    SUPPORTED_PRONOUNS, extract_mentioned_pronoun, extract_target_pronoun, generate_dynamic_replies,
-    is_unreplyable_or_ack_message, mask_non_pronouns, render_dynamic_template,
-    resolve_pronoun_pair, suggest_quick_replies,
+    SUPPORTED_PRONOUNS, extract_mentioned_pronoun, extract_target_pronoun,
+    generate_dynamic_replies, is_unreplyable_or_ack_message, mask_non_pronouns,
+    render_dynamic_template, resolve_pronoun_pair, suggest_quick_replies,
 };
 pub use rules::{CorrectionEdit, CorrectionResult};
 pub use tokenizer::VietnameseTokenizer;

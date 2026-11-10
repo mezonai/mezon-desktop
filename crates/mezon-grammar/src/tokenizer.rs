@@ -1,14 +1,16 @@
 //! Vietnamese Syllable and Subword Tokenizer with embedded 511-token vocabulary.
 //! Decodes and encodes text for TinyLM transformer inference on Desktop & Mobile.
 
+use crate::assets::{VOCAB_FILE, load_asset_str};
 use regex::Regex;
 use std::collections::HashMap;
 use std::sync::LazyLock;
 
-const EMBEDDED_VOCAB_JSON: &str = include_str!("../assets/vocab.json");
-
-pub static TOKEN_TO_ID: LazyLock<HashMap<String, i64>> =
-    LazyLock::new(|| serde_json::from_str(EMBEDDED_VOCAB_JSON).unwrap_or_else(|_| HashMap::new()));
+pub static TOKEN_TO_ID: LazyLock<HashMap<String, i64>> = LazyLock::new(|| {
+    load_asset_str(VOCAB_FILE)
+        .and_then(|json| serde_json::from_str(&json).ok())
+        .unwrap_or_default()
+});
 
 pub static ID_TO_TOKEN: LazyLock<HashMap<i64, String>> = LazyLock::new(|| {
     let mut m = HashMap::new();

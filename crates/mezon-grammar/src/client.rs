@@ -40,6 +40,7 @@ impl Default for MezonGrammarClient {
 
 impl MezonGrammarClient {
     pub fn new() -> Self {
+        crate::assets::prefetch_all_assets();
         Self {
             trie: WordTrie::new(),
             tokenizer: VietnameseTokenizer::new(),
