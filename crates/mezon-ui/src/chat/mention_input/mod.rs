@@ -2309,12 +2309,9 @@ impl MentionInput {
 
     fn on_enter(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.enter_pending = false;
-        if self.grammar_correction_open && self.grammar_suggestion.is_some() {
-            self.apply_grammar_correction(window, cx);
-            return;
-        }
         let waiting = self.active_at.is_some() && self.remote_searching();
         if self.popup_visible() || waiting {
+            self.clear_grammar_correction(cx);
             if self.active_sigil == Sigil::At && self.active_query.contains(' ') {
                 if self.accept_spaced(window, cx) {
                     return;
@@ -2329,6 +2326,10 @@ impl MentionInput {
                     return;
                 }
             }
+        }
+        if self.grammar_correction_open && self.grammar_suggestion.is_some() {
+            self.apply_grammar_correction(window, cx);
+            return;
         }
         cx.emit(MentionInputEvent::Submit);
     }
@@ -3673,6 +3674,10 @@ impl MentionInput {
     }
 
     fn schedule_grammar_correction(&mut self, content: &str, cx: &mut Context<Self>) {
+        if self.active_at.is_some() {
+            self.clear_grammar_correction(cx);
+            return;
+        }
         if !self.settings.read(cx).grammar_correction_enabled {
             self.clear_grammar_correction(cx);
             return;
@@ -5706,6 +5711,76 @@ mod mention_trigger_tests {
     #[test]
     fn a_trailing_separator_is_not_highlighted_as_a_space() {
         assert_eq!(highlight_word_ranges("Timeriel", "timer_"), vec![0..5]);
+    }
+}
+
+#[cfg(test)]
+mod autocomplete_enter_tests {
+    use super::*;
+    use std::sync::Arc;
+
+    #[gpui::test]
+    fn navigating_emoji_then_enter_beats_a_ready_grammar_correction(cx: &mut gpui::TestAppContext) {
+        let cx = cx.add_empty_window();
+        let composer = cx.update(|window, cx| {
+            let api = Arc::new(mezon_client::AppApi::new(
+                Arc::new(mezon_client::TransportClient::new(String::new())),
+                String::new(),
+            ));
+            mezon_store::RealtimeDispatch::init(api.clone(), cx);
+            let auth = cx.new(|_| AuthState::NotAuthenticated);
+            BadgeService::init(auth, cx);
+            ClanList::init(api.clone(), cx);
+            ChannelList::init(api.clone(), cx);
+            MessagesStore::init(api.clone(), cx);
+            DirectMessageStore::init(api.clone(), cx);
+            ClanMembersStore::init(api.clone(), cx);
+            ChannelMembersStore::init(api.clone(), cx);
+            GroupMembersStore::init(api, cx);
+            let settings = cx.new(|_| Settings::default());
+            cx.new(|cx| MentionInput::new("", settings, window, cx))
+        });
+        composer.update_in(cx, |composer, window, cx| {
+            composer
+                .input
+                .update(cx, |input, cx| input.set_value(":h", window, cx));
+            composer.active_at = Some(0);
+            composer.active_sigil = Sigil::Colon;
+            composer.active_query = "h".into();
+            composer.query_len = 2;
+            composer.suggestions = [":laugh:", ":ahaha:", ":laughing:"]
+                .into_iter()
+                .enumerate()
+                .map(|(index, name)| {
+                    Suggestion::Emoji(
+                        Rc::new(EmojiSuggestRaw {
+                            emoji_id: index.to_string(),
+                            shortname: name.into(),
+                            shortname_lc: name.into(),
+                        }),
+                        SharedString::default(),
+                    )
+                })
+                .collect();
+            composer.grammar_suggestion = Some(": h".into());
+            composer.grammar_correction_open = true;
+            composer.on_nav_down(cx);
+            composer.on_nav_down(cx);
+            composer.on_nav_up(cx);
+            assert_eq!(composer.selected, 1);
+            assert_eq!(composer.input.read(cx).value(), ":h");
+            composer.on_enter(window, cx);
+            assert_eq!(composer.input.read(cx).value(), ":ahaha: ");
+            assert_eq!(composer.committed.len(), 1);
+            assert!(!composer.popup_visible());
+            assert!(composer.grammar_suggestion.is_none());
+
+            composer.active_at = Some(0);
+            composer.schedule_grammar_correction(":h", cx);
+            assert!(composer.grammar_suggestion.is_none());
+            assert!(!composer.grammar_correction_open);
+            assert!(composer._grammar_task.is_none());
+        });
     }
 }
 
