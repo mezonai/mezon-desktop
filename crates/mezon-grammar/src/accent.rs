@@ -86,7 +86,8 @@ struct Collocations {
 }
 
 static COLLOCATIONS: LazyLock<Collocations> = LazyLock::new(|| {
-    let parsed: CollocationFile = serde_json::from_str(include_str!("../assets/collocations.json"))
+    let parsed: CollocationFile = crate::assets::load_asset_str(crate::assets::COLLOCATIONS_FILE)
+        .and_then(|json| serde_json::from_str(&json).ok())
         .unwrap_or(CollocationFile {
             trigram: Vec::new(),
             bigram: Vec::new(),
@@ -252,7 +253,9 @@ fn add_accents_chunk(text: &str, infer: &dyn Fn(&str) -> Option<Vec<f32>>) -> St
             let mut sub_res = Vec::new();
             let mut curr_buf = String::new();
             for sp in subparts {
-                if curr_buf.chars().count() + sp.chars().count() > ACCENT_MAX_CHARS && !curr_buf.is_empty() {
+                if curr_buf.chars().count() + sp.chars().count() > ACCENT_MAX_CHARS
+                    && !curr_buf.is_empty()
+                {
                     sub_res.push(add_accents_chunk(&curr_buf, infer));
                     curr_buf = sp.to_string();
                 } else {
@@ -283,7 +286,8 @@ fn add_accents_chunk(text: &str, infer: &dyn Fn(&str) -> Option<Vec<f32>>) -> St
                 chunks.push(curr_chunk.join(" "));
             }
             if chunks.len() > 1 {
-                let res_chunks: Vec<String> = chunks.iter().map(|c| add_accents_chunk(c, infer)).collect();
+                let res_chunks: Vec<String> =
+                    chunks.iter().map(|c| add_accents_chunk(c, infer)).collect();
                 return rescore_with_collocations(&res_chunks.join(" "), &text);
             } else {
                 // Single huge word with no spaces or clauses; chunk strictly by char length

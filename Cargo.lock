@@ -5668,11 +5668,16 @@ dependencies = [
 name = "mezon-grammar"
 version = "2.1.20"
 dependencies = [
+ "dirs 5.0.1",
  "openssl-sys",
  "ort",
+ "parking_lot",
  "regex",
  "serde",
  "serde_json",
+ "tokio",
+ "tracing",
+ "zed-reqwest",
 ]
 
 [[package]]

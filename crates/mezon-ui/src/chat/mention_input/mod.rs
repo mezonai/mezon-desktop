@@ -1264,10 +1264,17 @@ impl MentionInput {
                 }),
             );
         }
+        if settings.read(cx).grammar_correction_enabled {
+            mezon_grammar::set_download_enabled(true);
+            mezon_grammar::prefetch_all_assets();
+        }
         store_subs.push(cx.observe(&settings, |this, _, cx| {
-            if !this.settings.read(cx).grammar_correction_enabled {
+            let enabled = this.settings.read(cx).grammar_correction_enabled;
+            mezon_grammar::set_download_enabled(enabled);
+            if !enabled {
                 this.clear_grammar_correction(cx);
             } else {
+                mezon_grammar::prefetch_all_assets();
                 let content = this.input.read(cx).value_shared();
                 this.schedule_grammar_correction(content.as_ref(), cx);
             }

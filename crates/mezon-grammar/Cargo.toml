@@ -17,6 +17,11 @@ ort = { version = "=2.0.0-rc.10", default-features = false, features = [
 regex.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+dirs.workspace = true
+reqwest.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+parking_lot.workspace = true
 
 [target.'cfg(target_os = "linux")'.build-dependencies]
 openssl-sys = { version = "0.9", features = ["vendored"] }
