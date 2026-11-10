@@ -3401,7 +3401,8 @@ impl MessagesStore {
         };
         let sender = sender_user.0.to_string();
         let (receiver, receiver_username) = {
-            let Some(message) = self.viewport_message_by_id(message_id) else {
+            let bucket = self.bucket_of(target);
+            let Some(message) = self.message_in_channel(bucket, message_id) else {
                 return;
             };
             (message.sender_id.clone(), message.sender_name.to_string())
