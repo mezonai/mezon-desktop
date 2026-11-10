@@ -253,7 +253,7 @@ impl AnnotationToolbar {
             .bg(gpui::rgb(BUBBLE_ACCENT))
             .hover(|s| s.opacity(0.85))
             .child(
-                Icon::new(IconName::PenEdit)
+                Icon::new(IconName::Edit)
                     .size(px(BUBBLE_ICON_SIZE))
                     .text_color(gpui::rgb(0xffffff)),
             )
@@ -357,7 +357,7 @@ impl Render for AnnotationToolbar {
             .justify_center()
             .cursor(CursorStyle::OpenHand)
             .child(
-                Icon::new(IconName::AnnotateGrip)
+                Icon::new(IconName::Grip)
                     .size(px(16.))
                     .text_color(gpui::rgba(0xffffff99)),
             );

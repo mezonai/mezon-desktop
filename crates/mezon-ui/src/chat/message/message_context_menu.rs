@@ -362,7 +362,7 @@ fn build_failed_menu(
         .on_dismiss(dismiss)
         .item_trailing_icon(
             SharedString::from(t("contextMenu.resendMessage")),
-            IconName::ResendMessageRightClick,
+            IconName::Send,
             move |_, cx| {
                 MessagesStore::global(cx).update(cx, |store, cx| {
                     store.resend_message(target, cx);
@@ -380,7 +380,7 @@ fn build_failed_menu(
         )
         .danger_item_trailing_icon(
             SharedString::from(t("contextMenu.deleteMessage")),
-            IconName::DeleteMessageRightClick,
+            IconName::Trash,
             move |_, cx| {
                 MessagesStore::global(cx)
                     .update(cx, |store, cx| store.remove_failed_message(target, cx));
@@ -491,7 +491,7 @@ fn build_topic_menu(
         let target = msg.message_ref();
         menu = menu.item_trailing_icon(
             t("contextMenu.giveACoffee"),
-            IconName::DollarIconRightClick,
+            IconName::Coin,
             move |_, cx| {
                 MessagesStore::global(cx).update(cx, |store, cx| {
                     store.give_coffee_reaction(target, cx);
@@ -506,7 +506,7 @@ fn build_topic_menu(
         let message_id = msg.id;
         menu = menu.item_trailing_icon(
             t("contextMenu.editMessage"),
-            IconName::PenEdit,
+            IconName::Edit,
             move |window, cx| {
                 let _ = host.update(cx, |this, cx| {
                     this.begin_edit(message_id, window, cx);
@@ -519,13 +519,9 @@ fn build_topic_menu(
 
     {
         let target = msg.message_ref();
-        menu = menu.item_trailing_icon(
-            t("contextMenu.reply"),
-            IconName::ReplyRightClick,
-            move |_, cx| {
-                TopicsStore::global(cx).update(cx, |store, cx| store.set_reply_to(target, cx));
-            },
-        );
+        menu = menu.item_trailing_icon(t("contextMenu.reply"), IconName::Reply, move |_, cx| {
+            TopicsStore::global(cx).update(cx, |store, cx| store.set_reply_to(target, cx));
+        });
     }
 
     if !is_poll {
@@ -533,7 +529,7 @@ fn build_topic_menu(
         let target = msg.message_ref();
         menu = menu.item_trailing_icon(
             t("contextMenu.forwardMessage"),
-            IconName::ForwardRightClick,
+            IconName::Forward,
             move |window, cx| {
                 ForwardMessageModal::open(vec![target], locale_owned.clone().into(), window, cx);
             },
@@ -546,7 +542,7 @@ fn build_topic_menu(
         let sender_id = msg.sender_id.clone();
         menu = menu.item_trailing_icon(
             t("contextMenu.forwardAllMessage"),
-            IconName::ForwardAllRightClick,
+            IconName::ForwardAll,
             move |window, cx| {
                 let ids = ChannelMessages::resolve_topic_forward_group(message_id, &sender_id, cx);
                 ForwardMessageModal::open(ids, locale_owned.clone().into(), window, cx);
@@ -559,7 +555,7 @@ fn build_topic_menu(
         let targets = msg.mention_targets.clone();
         menu = menu.separator().item_trailing_icon(
             t("contextMenu.copyText"),
-            IconName::CopyTextRightClick,
+            IconName::Copy,
             move |_, cx| {
                 let mentions = copied_mentions_from_targets(&content, &targets);
                 cx.write_to_clipboard(clipboard_item_with_mentions(content.clone(), mentions));
@@ -570,7 +566,7 @@ fn build_topic_menu(
     if let Some((selected, mentions)) = selected_text.filter(|(text, _)| !text.is_empty()) {
         menu = menu.item_trailing_icon(
             t("contextMenu.copyTextSelected"),
-            IconName::CopyTextRightClick,
+            IconName::Copy,
             move |_, cx| {
                 cx.write_to_clipboard(clipboard_item_with_mentions(
                     selected.clone(),
@@ -584,7 +580,7 @@ fn build_topic_menu(
         let target = msg.message_ref();
         menu = menu.item_trailing_icon(
             t("contextMenu.addToInbox"),
-            IconName::AddToInboxIcon,
+            IconName::Inbox,
             move |_window, cx| {
                 MessagesStore::global(cx).update(cx, |store, cx| store.add_to_inbox(target, cx));
             },
@@ -607,7 +603,7 @@ fn build_topic_menu(
         let locale_owned = locale.to_string();
         menu = menu.danger_item_trailing_icon(
             t("contextMenu.reportMessage"),
-            IconName::ReportMessageRightClick,
+            IconName::Flag,
             move |window, cx| {
                 ReportMessageModal::open(
                     message_id,
@@ -626,7 +622,7 @@ fn build_topic_menu(
         let locale_owned = locale.to_string();
         menu = menu.separator().danger_item_trailing_icon(
             t("contextMenu.deleteMessage"),
-            IconName::DeleteMessageRightClick,
+            IconName::Trash,
             move |window, cx| {
                 let locale = locale_owned.clone();
                 Shell::global(cx).update(cx, |shell, cx| {
@@ -692,7 +688,7 @@ fn build_channel_menu(
         let target = msg.message_ref();
         menu = menu.item_trailing_icon(
             t("contextMenu.giveACoffee"),
-            IconName::DollarIconRightClick,
+            IconName::Coin,
             move |_, cx| {
                 MessagesStore::global(cx).update(cx, |store, cx| {
                     store.give_coffee_reaction(target, cx);
@@ -708,7 +704,7 @@ fn build_channel_menu(
         let message_id = msg.id;
         menu = menu.item_trailing_icon(
             t("contextMenu.editMessage"),
-            IconName::PenEdit,
+            IconName::Edit,
             move |window, cx| {
                 let _ = host.update(cx, |this, cx| {
                     this.begin_edit(message_id, window, cx);
@@ -721,7 +717,7 @@ fn build_channel_menu(
         let message_id = msg.id;
         menu = menu.item_trailing_icon(
             t("contextMenu.unpinMessage"),
-            IconName::PinMessageRightClick,
+            IconName::Pin,
             move |_window, cx| {
                 let message_id_str = message_id.to_string();
                 if let Some(pin_id) = PinnedMessagesStore::global(cx)
@@ -742,13 +738,9 @@ fn build_channel_menu(
 
     if can_send_message || MessagesStore::global(cx).read(cx).is_dm() {
         let target = msg.message_ref();
-        menu = menu.item_trailing_icon(
-            t("contextMenu.reply"),
-            IconName::ReplyRightClick,
-            move |_, cx| {
-                MessagesStore::global(cx).update(cx, |store, cx| store.set_reply_to(target, cx));
-            },
-        );
+        menu = menu.item_trailing_icon(t("contextMenu.reply"), IconName::Reply, move |_, cx| {
+            MessagesStore::global(cx).update(cx, |store, cx| store.set_reply_to(target, cx));
+        });
     }
 
     if !is_poll {
@@ -756,7 +748,7 @@ fn build_channel_menu(
         let target = msg.message_ref();
         menu = menu.item_trailing_icon(
             t("contextMenu.forwardMessage"),
-            IconName::ForwardRightClick,
+            IconName::Forward,
             move |window, cx| {
                 ForwardMessageModal::open(vec![target], locale_owned.clone().into(), window, cx);
             },
@@ -769,7 +761,7 @@ fn build_channel_menu(
         let sender_id = msg.sender_id.clone();
         menu = menu.item_trailing_icon(
             t("contextMenu.forwardAllMessage"),
-            IconName::ForwardAllRightClick,
+            IconName::ForwardAll,
             move |window, cx| {
                 let ids = resolve_forward_group(message_id, &sender_id, cx);
                 ForwardMessageModal::open(ids, locale_owned.clone().into(), window, cx);
@@ -780,7 +772,7 @@ fn build_channel_menu(
     if can_create_thread {
         menu = menu.item_trailing_icon(
             t("contextMenu.createThread"),
-            IconName::ThreadIcon,
+            IconName::Thread,
             move |_window, cx| {
                 ThreadsStore::global(cx).update(cx, |store, cx| store.start_create(cx));
             },
@@ -790,20 +782,16 @@ fn build_channel_menu(
     if !msg.content.is_empty() && !is_poll {
         let content = msg.content.clone();
         let targets = msg.mention_targets.clone();
-        menu = menu.item_trailing_icon(
-            t("contextMenu.copyText"),
-            IconName::CopyTextRightClick,
-            move |_, cx| {
-                let mentions = copied_mentions_from_targets(&content, &targets);
-                cx.write_to_clipboard(clipboard_item_with_mentions(content.clone(), mentions));
-            },
-        );
+        menu = menu.item_trailing_icon(t("contextMenu.copyText"), IconName::Copy, move |_, cx| {
+            let mentions = copied_mentions_from_targets(&content, &targets);
+            cx.write_to_clipboard(clipboard_item_with_mentions(content.clone(), mentions));
+        });
     }
 
     if let Some((selected, mentions)) = selected_text.filter(|(text, _)| !text.is_empty()) {
         menu = menu.item_trailing_icon(
             t("contextMenu.copyTextSelected"),
-            IconName::CopyTextRightClick,
+            IconName::Copy,
             move |_, cx| {
                 cx.write_to_clipboard(clipboard_item_with_mentions(
                     selected.clone(),
@@ -818,7 +806,7 @@ fn build_channel_menu(
         let locale_owned = locale.to_string();
         menu = menu.item_trailing_icon(
             t("contextMenu.pinMessage"),
-            IconName::PinMessageRightClick,
+            IconName::Pin,
             move |window, cx| {
                 ConfirmPinMessageModal::open(message_id, locale_owned.clone().into(), window, cx);
             },
@@ -830,7 +818,7 @@ fn build_channel_menu(
         let poll_id = msg.poll.as_ref().map(|p| p.poll_id).unwrap_or(0);
         menu = menu.item_trailing_icon(
             t("contextMenu.endPollNow"),
-            IconName::EndPollNowIcon,
+            IconName::CloseCircle,
             move |_window, cx| {
                 mezon_store::MessagesStore::global(cx)
                     .update(cx, |store, cx| store.close_poll(poll_id, message_id, cx));
@@ -842,7 +830,7 @@ fn build_channel_menu(
         let message_id = msg.id;
         menu = menu.item_trailing_icon(
             t("contextMenu.topicDiscussion"),
-            IconName::TopicIcon,
+            IconName::Topic,
             move |_window, cx| {
                 TopicsStore::global(cx).update(cx, |store, cx| {
                     store.start_create_for_message(message_id, cx)
@@ -857,7 +845,7 @@ fn build_channel_menu(
         let message_id = msg.id;
         menu = menu.item_trailing_icon(
             t("contextMenu.markUnread"),
-            IconName::MarkUnreadIcon,
+            IconName::MarkUnread,
             move |_window, cx| {
                 MessagesStore::global(cx).update(cx, |store, cx| store.mark_unread(message_id, cx));
             },
@@ -867,7 +855,7 @@ fn build_channel_menu(
         let target = msg.message_ref();
         menu = menu.item_trailing_icon(
             t("contextMenu.addToInbox"),
-            IconName::AddToInboxIcon,
+            IconName::Inbox,
             move |_window, cx| {
                 MessagesStore::global(cx).update(cx, |store, cx| store.add_to_inbox(target, cx));
             },
@@ -919,7 +907,7 @@ fn build_channel_menu(
         let locale_owned = locale.to_string();
         menu = menu.danger_item_trailing_icon(
             t("contextMenu.reportMessage"),
-            IconName::ReportMessageRightClick,
+            IconName::Flag,
             move |window, cx| {
                 ReportMessageModal::open(
                     message_id,
@@ -971,7 +959,7 @@ fn build_channel_menu(
         let locale_owned = locale.to_string();
         menu = menu.separator().danger_item_trailing_icon(
             t("contextMenu.deleteMessage"),
-            IconName::DeleteMessageRightClick,
+            IconName::Trash,
             move |window, cx| {
                 let locale = locale_owned.clone();
                 Shell::global(cx).update(cx, |shell, cx| {

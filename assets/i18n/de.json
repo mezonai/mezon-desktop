@@ -4924,5 +4924,7 @@
   "setting.account.qrProfile.brandName": "MEZON",
   "setting.account.qrProfile.verifiedByMezon": "VERIFIED BY MEZON",
   "setting.account.qrProfile.errorExport": "Profil-QR kann nicht exportiert werden",
-  "setting.account.qrProfile.errorImage": "Bild kann nicht geladen werden"
+  "setting.account.qrProfile.errorImage": "Bild kann nicht geladen werden",
+  "setting.appearance.iconAnimations": "Symbolanimationen",
+  "setting.appearance.iconAnimationsDescription": "Symbole animieren, wenn der Mauszeiger über Schaltflächen und Zeilen bewegt wird."
 }

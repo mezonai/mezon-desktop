@@ -4923,5 +4923,7 @@
   "setting.account.qrProfile.brandName": "MEZON",
   "setting.account.qrProfile.verifiedByMezon": "VERIFIED BY MEZON",
   "setting.account.qrProfile.errorExport": "Не вдалося експортувати QR-код профілю",
-  "setting.account.qrProfile.errorImage": "Не вдалося завантажити зображення"
+  "setting.account.qrProfile.errorImage": "Не вдалося завантажити зображення",
+  "setting.appearance.iconAnimations": "Анімація значків",
+  "setting.appearance.iconAnimationsDescription": "Анімувати значки під час наведення вказівника на кнопки та рядки."
 }

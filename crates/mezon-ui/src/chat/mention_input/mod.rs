@@ -13,10 +13,10 @@ use crate::router::{Route, Router};
 use gpui::{
     Animation, AnimationExt as _, AnyElement, AnyWindowHandle, App, Bounds, ClipboardEntry,
     ClipboardItem, Context, DismissEvent, Div, Entity, EventEmitter, Focusable, FontWeight,
-    HighlightStyle, Hsla, Image, ImageFormat, IntoElement, KeyBinding, MouseButton,
-    MouseMoveEvent, PathPromptOptions, Pixels, Rgba, ScrollStrategy, SharedString, Stateful,
-    StyledText, Subscription, Task, UniformListScrollHandle, Window, actions, canvas, deferred,
-    div, ease_out_quint, img, prelude::*, px, uniform_list,
+    HighlightStyle, Hsla, Image, ImageFormat, IntoElement, KeyBinding, MouseButton, MouseMoveEvent,
+    PathPromptOptions, Pixels, Rgba, ScrollStrategy, SharedString, Stateful, StyledText,
+    Subscription, Task, UniformListScrollHandle, Window, actions, canvas, deferred, div,
+    ease_out_quint, img, prelude::*, px, uniform_list,
 };
 use mezon_client::transport::QUICK_MENU_TYPE_FLASH;
 use mezon_grammar::client::{MAX_CORRECTION_CHAR_COUNT, MezonGrammarClient};
@@ -173,7 +173,7 @@ pub(crate) fn grammar_correction_bar(
                     .on_click(on_dismiss)
                     .child(
                         Icon::new(IconName::Close)
-                            .size_4()
+                            .size(px(16.))
                             .text_color(theme.tokens.text_theme_primary),
                     ),
             )
@@ -1651,15 +1651,16 @@ impl MentionInput {
                         }),
                     )
                     .child(
-                        Icon::new(IconName::SelectFileIcon)
-                            .size_5()
+                        Icon::new(IconName::ImageAdd)
+                            .size(px(20.))
                             .flex_none()
                             .text_color(text_color)
                             .hover(|s| s.text_color(text_hover)),
                     )
                     .child(div().text_sm().font_weight(FontWeight::MEDIUM).child(
                         mezon_i18n::t(&locale, "message.fileSelection.uploadFile").to_string(),
-                    )),
+                    ))
+                    .map(|element| Icon::motion_scope(element, true)),
             );
         if show_location {
             menu =
@@ -1682,14 +1683,15 @@ impl MentionInput {
                         )
                         .child(
                             Icon::new(IconName::Location)
-                                .size_5()
+                                .size(px(20.))
                                 .flex_none()
                                 .text_color(text_color)
                                 .hover(|s| s.text_color(text_hover)),
                         )
                         .child(div().text_sm().font_weight(FontWeight::MEDIUM).child(
                             mezon_i18n::t(&locale, "message.attachments.location").to_string(),
-                        )),
+                        ))
+                        .map(|element| Icon::motion_scope(element, true)),
                 );
         }
         if show_poll {
@@ -1710,10 +1712,11 @@ impl MentionInput {
                         MouseButton::Left,
                         cx.listener(|this, _, window, cx| this.open_create_poll(window, cx)),
                     )
-                    .child(img("icons/check-list-icon.svg").size(px(20.)).flex_none())
+                    .child(Icon::new(IconName::ListCheck).size(px(20.)).flex_none())
                     .child(div().text_sm().font_weight(FontWeight::MEDIUM).child(
                         mezon_i18n::t(&locale, "message.fileSelection.createPoll").to_string(),
-                    )),
+                    ))
+                    .map(|element| Icon::motion_scope(element, true)),
             );
         }
         menu.into_any_element()
@@ -2186,9 +2189,9 @@ impl MentionInput {
                     .into_any_element()
             } else {
                 let icon = if att.is_video {
-                    IconName::PlayButton
+                    IconName::Play
                 } else {
-                    IconName::FileIcon
+                    IconName::File
                 };
                 div()
                     .size(px(64.))
@@ -2216,7 +2219,7 @@ impl MentionInput {
                         .items_center()
                         .justify_center()
                         .cursor_pointer()
-                        .child(Icon::new(IconName::Close).size_3().text_color(muted))
+                        .child(Icon::new(IconName::Close).size(px(16.)).text_color(muted))
                         .on_click(cx.listener(move |this, _event, _window, cx| {
                             this.remove_attachment(index, cx)
                         })),
@@ -3926,7 +3929,7 @@ impl MentionInput {
                 Suggestion::Role(role) => {
                     display_color = role.color;
                     let leading = if role.icon_src.is_empty() {
-                        Icon::new(IconName::RoleIcon)
+                        Icon::new(IconName::Role)
                             .size(px(20.))
                             .flex_shrink_0()
                             .text_color(role.color)
@@ -4543,9 +4546,9 @@ impl Render for MentionInput {
                             .cursor_pointer()
                             .hover(|s| s.bg(icon_bg_hover))
                             .child(
-                                Icon::new(IconName::AddCircle)
-                                    .size_5()
-                                    .text_color(theme.text_muted)
+                                Icon::new(IconName::PlusCircle)
+                                    .size(px(20.))
+                                    .selected(false)
                                     .hover(|s| s.text_color(icon_hover)),
                             )
                             .on_click(
@@ -4584,13 +4587,13 @@ impl Render for MentionInput {
                         cx.listener(|this, _event, _window, cx| this.stop_recording(cx)),
                     )
                     .child(if self.recording.is_some() {
-                        Icon::new(IconName::MicEnable)
-                            .size_5()
+                        Icon::new(IconName::Mic)
+                            .size(px(20.))
                             .text_color(RECORDING_COLOR)
                     } else {
-                        Icon::new(IconName::MicEnable)
-                            .size_5()
-                            .text_color(theme.text_muted)
+                        Icon::new(IconName::Mic)
+                            .size(px(20.))
+                            .selected(false)
                             .hover(|s| s.text_color(icon_hover))
                     }),
             )
@@ -4642,7 +4645,7 @@ impl Render for MentionInput {
                     .child(
                         self.picker_toggle(
                             "emoji-toggle",
-                            IconName::Smile,
+                            IconName::Emoji,
                             toggle_color,
                             icon_bg_hover,
                             icon_hover,
@@ -4792,14 +4795,14 @@ mod channel_suggest_tests {
     #[test]
     fn pool_entry_keeps_the_type_that_picks_the_row_icon() {
         for (channel_type, private, age_restricted, icon) in [
-            (ChannelType::Text, false, 0, IconName::Hashtag),
-            (ChannelType::Text, true, 0, IconName::HashtagLocked),
-            (ChannelType::Text, false, 1, IconName::HashtagWarning),
+            (ChannelType::Text, false, 0, IconName::Channel),
+            (ChannelType::Text, true, 0, IconName::ChannelPrivate),
+            (ChannelType::Text, false, 1, IconName::ChannelWarning),
             (ChannelType::Voice, false, 0, IconName::Speaker),
-            (ChannelType::Voice, true, 0, IconName::SpeakerLocked),
-            (ChannelType::Stream, false, 0, IconName::Stream),
-            (ChannelType::Thread, false, 0, IconName::ThreadIcon),
-            (ChannelType::App, false, 0, IconName::AppChannelIcon),
+            (ChannelType::Voice, true, 0, IconName::SpeakerLock),
+            (ChannelType::Stream, false, 0, IconName::Live),
+            (ChannelType::Thread, false, 0, IconName::Thread),
+            (ChannelType::App, false, 0, IconName::ChannelApp),
         ] {
             let mut ch = channel(channel_type, private);
             ch.age_restricted = age_restricted;

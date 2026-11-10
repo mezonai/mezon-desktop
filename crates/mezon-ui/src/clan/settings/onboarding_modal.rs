@@ -131,9 +131,9 @@ pub(super) fn setup_modal(
                         .cursor_pointer()
                         .hover(|style| style.bg(theme.bg_hover).text_color(theme.text_primary))
                         .child(
-                            Icon::new(IconName::CloseIcon)
-                                .size(px(20.0))
-                                .text_color(theme.text_secondary),
+                            Icon::new(IconName::CloseCircle)
+                                .size(px(20.))
+                                .selected(false),
                         )
                         .on_click(on_close),
                 ),
@@ -177,9 +177,9 @@ pub(super) fn editor_modal(
                             .cursor_pointer()
                             .hover(|style| style.bg(theme.bg_hover))
                             .child(
-                                Icon::new(IconName::CloseIcon)
-                                    .size(px(20.0))
-                                    .text_color(theme.text_secondary),
+                                Icon::new(IconName::CloseCircle)
+                                    .size(px(20.))
+                                    .selected(false),
                             )
                             .on_click(on_close),
                     ),

@@ -392,7 +392,7 @@ impl ArchivedChannelPage {
                 .child(self.page_size.to_string())
                 .child(
                     Icon::new(IconName::ChevronDown)
-                        .size(px(14.0))
+                        .size(px(16.))
                         .text_color(cx.theme().text_secondary)
                         .with_transformation(gpui::Transformation::rotate(gpui::radians(
                             chevron_angle,
@@ -473,7 +473,7 @@ impl ArchivedChannelPage {
             .py(px(48.0))
             .child(
                 div().opacity(0.6).child(
-                    Icon::new(IconName::Hashtag)
+                    Icon::new(IconName::Channel)
                         .size(px(48.0))
                         .text_color(theme.text_primary),
                 ),
@@ -682,11 +682,7 @@ impl Render for ArchivedChannelPage {
                                 .bottom_0()
                                 .flex()
                                 .items_center()
-                                .child(
-                                    Icon::new(IconName::Search)
-                                        .size(px(18.0))
-                                        .text_color(theme.text_secondary),
-                                ),
+                                .child(Icon::new(IconName::Search).size(px(20.)).selected(false)),
                         ),
                 )
             })

@@ -1104,18 +1104,18 @@ fn palette_channel_icon(
     use mezon_store::is_age_restricted;
 
     match (channel_type.unwrap_or(ChannelType::Text), private) {
-        (ChannelType::Text, _) if is_age_restricted(age_restricted) => IconName::HashtagWarning,
-        (ChannelType::Thread, true) => IconName::ThreadIconLocker,
-        (ChannelType::Thread, false) => IconName::ThreadIcon,
-        (ChannelType::Voice, true) => IconName::SpeakerLocked,
+        (ChannelType::Text, _) if is_age_restricted(age_restricted) => IconName::ChannelWarning,
+        (ChannelType::Thread, true) => IconName::ThreadPrivate,
+        (ChannelType::Thread, false) => IconName::Thread,
+        (ChannelType::Voice, true) => IconName::SpeakerLock,
         (ChannelType::Voice, false) => IconName::Speaker,
-        (ChannelType::Stream, _) => IconName::Stream,
-        (ChannelType::App, true) => IconName::PrivateAppChannelIcon,
-        (ChannelType::App, false) => IconName::AppChannelIcon,
+        (ChannelType::Stream, _) => IconName::Live,
+        (ChannelType::App, true) => IconName::ChannelAppPrivate,
+        (ChannelType::App, false) => IconName::ChannelApp,
         (ChannelType::Forum, _) => IconName::Forum,
         (ChannelType::Announcement, _) => IconName::Announcement,
-        (_, true) => IconName::HashtagLocked,
-        (_, false) => IconName::Hashtag,
+        (_, true) => IconName::ChannelPrivate,
+        (_, false) => IconName::Channel,
     }
 }
 

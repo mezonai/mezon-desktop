@@ -1331,7 +1331,7 @@ fn render_member(
     let dot = match crate::util::user_status::presence_badge_color(member.presence) {
         None => RowDot::None,
         Some(color) if member.presence == DmAvatarPresence::Idle => RowDot::Icon {
-            icon: IconName::DarkModeIcon,
+            icon: IconName::Moon,
             color: color.into(),
         },
         Some(color) => RowDot::Fill {

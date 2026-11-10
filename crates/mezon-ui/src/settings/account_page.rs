@@ -271,8 +271,7 @@ impl Render for AccountPage {
                                             .cursor_pointer()
                                             .hover(|style| style.opacity(0.9))
                                             .child(
-                                                Icon::new(IconName::QrCode)
-                                                    .size(px(24.))
+                                                Icon::new(IconName::Qr).size(px(24.))
                                                     .text_color(gpui::black()),
                                             )
                                             .on_click(move |_, window, cx| {

@@ -4924,5 +4924,7 @@
   "setting.account.qrProfile.brandName": "MEZON",
   "setting.account.qrProfile.verifiedByMezon": "VERIFIED BY MEZON",
   "setting.account.qrProfile.errorExport": "Det gick inte att exportera profilens QR-kod",
-  "setting.account.qrProfile.errorImage": "Det gick inte att läsa in bilden"
+  "setting.account.qrProfile.errorImage": "Det gick inte att läsa in bilden",
+  "setting.appearance.iconAnimations": "Ikonanimationer",
+  "setting.appearance.iconAnimationsDescription": "Animera ikoner när pekaren förs över knappar och rader."
 }

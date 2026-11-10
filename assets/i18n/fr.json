@@ -4923,5 +4923,7 @@
   "setting.account.qrProfile.brandName": "MEZON",
   "setting.account.qrProfile.verifiedByMezon": "VERIFIED BY MEZON",
   "setting.account.qrProfile.errorExport": "Impossible d’exporter le QR du profil",
-  "setting.account.qrProfile.errorImage": "Impossible de charger l’image"
+  "setting.account.qrProfile.errorImage": "Impossible de charger l’image",
+  "setting.appearance.iconAnimations": "Animations des icônes",
+  "setting.appearance.iconAnimationsDescription": "Animer les icônes au survol des boutons et des lignes."
 }

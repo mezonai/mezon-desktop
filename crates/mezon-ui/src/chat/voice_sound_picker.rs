@@ -417,7 +417,7 @@ fn render_sound_cell(
     let ent = entity.clone();
     let green: gpui::Hsla = gpui::rgb(0x22c55e).into();
     let preview_icon = if is_previewing {
-        IconName::PauseIcon
+        IconName::Pause
     } else {
         IconName::Speaker
     };
@@ -484,7 +484,7 @@ fn render_sound_cell(
                 .justify_center()
                 .cursor_pointer()
                 .child(
-                    Icon::new(IconName::ResendMessageRightClick)
+                    Icon::new(IconName::Send)
                         .size(px(20.))
                         .text_color(theme.text_primary),
                 )

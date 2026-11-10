@@ -207,9 +207,9 @@ impl RenderOnce for Dropdown {
             )
             .child(
                 Icon::new(IconName::ArrowDown)
-                    .size_4()
+                    .size(px(16.))
                     .flex_shrink_0()
-                    .text_color(theme.text_muted),
+                    .selected(false),
             );
         match trigger_style {
             DropdownTriggerStyle::Default => {
@@ -332,7 +332,7 @@ impl RenderOnce for Dropdown {
                                                 .when(selected, |el| {
                                                     el.child(
                                                         Icon::new(IconName::Check)
-                                                            .size_4()
+                                                            .size(px(16.))
                                                             .flex_shrink_0()
                                                             .text_color(theme.brand),
                                                     )

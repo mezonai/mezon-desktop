@@ -345,11 +345,7 @@ impl Render for EditGroupModal {
                             .opacity(0.65)
                             .hover(|s| s.opacity(1.0))
                             .on_click(|_, _, cx| Self::close(cx))
-                            .child(
-                                Icon::new(IconName::Close)
-                                    .size(px(20.))
-                                    .text_color(theme.text_secondary),
-                            ),
+                            .child(Icon::new(IconName::Close).size(px(20.)).selected(false)),
                     ),
             )
             .child(
@@ -393,7 +389,7 @@ impl Render for EditGroupModal {
                                                         s.visible()
                                                     })
                                                     .child(
-                                                        Icon::new(IconName::UploadImage)
+                                                        Icon::new(IconName::Camera)
                                                             .size(px(20.))
                                                             .text_color(gpui::white()),
                                                     )

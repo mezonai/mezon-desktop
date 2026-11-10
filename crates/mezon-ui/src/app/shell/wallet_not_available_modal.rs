@@ -1,11 +1,10 @@
 use gpui::{
-    Context, FocusHandle, SharedString, Subscription, Window, div, img, prelude::*, px, rgb, rgba,
-    white,
+    Context, FocusHandle, SharedString, Subscription, Window, div, prelude::*, px, rgb, rgba, white,
 };
 use mezon_store::{WalletEvent, WalletStore};
 
 use super::Shell;
-use crate::components::primitives::{h_flex, v_flex};
+use crate::components::primitives::{Icon, IconName, h_flex, v_flex};
 use crate::theme::ActiveTheme;
 
 const ENABLE_BUTTON_BG: u32 = 0x5865f2;
@@ -102,8 +101,9 @@ impl Render for WalletNotAvailableModal {
                             .rounded_full()
                             .bg(rgba(ICON_CIRCLE_BG))
                             .child(
-                                img("icons/icon-clock-channel.svg")
+                                Icon::new(IconName::Lock)
                                     .size(px(40.))
+                                    .selected(false)
                                     .flex_none(),
                             ),
                     )

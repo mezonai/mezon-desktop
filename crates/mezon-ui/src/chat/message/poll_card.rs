@@ -1,3 +1,5 @@
+use crate::components::primitives::{Icon, IconName};
+
 use std::cell::Cell;
 use std::rc::Rc;
 use std::time::Duration;
@@ -14,7 +16,6 @@ use super::content::{
 use super::context::RowCtx;
 use super::poll_detail_modal::PollDetailModal;
 use super::selection::{SelectableRegion, TextSegment};
-use crate::components::primitives::{Icon, IconName};
 use crate::image_cache::LruImageCache;
 use crate::theme::Theme;
 
@@ -372,11 +373,7 @@ fn render_answer_row(
                 .items_center()
                 .justify_center()
                 .flex_shrink_0()
-                .child(
-                    Icon::new(IconName::Check)
-                        .size(px(12.))
-                        .text_color(theme.tokens.text_secondary),
-                ),
+                .child(Icon::new(IconName::Check).size(px(16.)).selected(false)),
         );
     }
 
@@ -708,7 +705,7 @@ pub(crate) fn render_poll_card_readonly(
                     .flex_shrink_0()
                     .child(
                         Icon::new(IconName::Check)
-                            .size(px(12.))
+                            .size(px(16.))
                             .text_color(tokens.text_secondary),
                     ),
             );

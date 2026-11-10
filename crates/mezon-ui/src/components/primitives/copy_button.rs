@@ -64,9 +64,9 @@ impl RenderOnce for CopyButton {
     fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
         let state = window.use_keyed_state(self.id.clone(), cx, CopyButtonState::new);
         let (icon, size) = if state.read(cx).is_copied() {
-            (IconName::PasteIcon, COPIED_ICON_SIZE)
+            (IconName::Paste, COPIED_ICON_SIZE)
         } else {
-            (IconName::CopyIcon, COPY_ICON_SIZE)
+            (IconName::Copy, COPY_ICON_SIZE)
         };
         let text = self.text;
 

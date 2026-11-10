@@ -180,11 +180,7 @@ impl Render for UserReactionPanel {
                     div()
                         .id(("reaction-remove", index))
                         .cursor_pointer()
-                        .child(
-                            Icon::new(IconName::Close)
-                                .size(px(12.))
-                                .text_color(theme.text_secondary),
-                        )
+                        .child(Icon::new(IconName::Close).size(px(16.)).selected(false))
                         .on_click(move |_, _, cx| {
                             MessagesStore::global(cx).update(cx, |store, cx| {
                                 store.remove_reaction(
@@ -298,11 +294,7 @@ pub fn emoji_error_fallback(
             .flex()
             .items_center()
             .justify_center()
-            .child(
-                Icon::new(IconName::ImageThumbnail)
-                    .size(size)
-                    .text_color(color),
-            )
+            .child(Icon::new(IconName::FileImage).size(size).text_color(color))
             .into_any_element()
     }
 }

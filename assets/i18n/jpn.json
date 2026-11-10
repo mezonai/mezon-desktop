@@ -4926,5 +4926,7 @@
   "setting.account.qrProfile.brandName": "MEZON",
   "setting.account.qrProfile.verifiedByMezon": "VERIFIED BY MEZON",
   "setting.account.qrProfile.errorExport": "プロフィールのQRコードを出力できません",
-  "setting.account.qrProfile.errorImage": "画像を読み込めません"
+  "setting.account.qrProfile.errorImage": "画像を読み込めません",
+  "setting.appearance.iconAnimations": "アイコンのアニメーション",
+  "setting.appearance.iconAnimationsDescription": "ボタンや行にポインターを合わせたときにアイコンをアニメーション表示します。"
 }

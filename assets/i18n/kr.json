@@ -4924,5 +4924,7 @@
   "setting.account.qrProfile.brandName": "MEZON",
   "setting.account.qrProfile.verifiedByMezon": "VERIFIED BY MEZON",
   "setting.account.qrProfile.errorExport": "프로필 QR 코드를 내보낼 수 없습니다",
-  "setting.account.qrProfile.errorImage": "이미지를 불러올 수 없습니다"
+  "setting.account.qrProfile.errorImage": "이미지를 불러올 수 없습니다",
+  "setting.appearance.iconAnimations": "아이콘 애니메이션",
+  "setting.appearance.iconAnimationsDescription": "버튼이나 행에 포인터를 올리면 아이콘에 애니메이션을 표시합니다."
 }

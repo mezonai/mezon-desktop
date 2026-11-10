@@ -4924,5 +4924,7 @@
   "setting.account.qrProfile.brandName": "MEZON",
   "setting.account.qrProfile.verifiedByMezon": "ĐƯỢC MEZON XÁC THỰC",
   "setting.account.qrProfile.errorExport": "Không thể xuất QR hồ sơ",
-  "setting.account.qrProfile.errorImage": "Không thể đọc ảnh"
+  "setting.account.qrProfile.errorImage": "Không thể đọc ảnh",
+  "setting.appearance.iconAnimations": "Chuyển động biểu tượng",
+  "setting.appearance.iconAnimationsDescription": "Tạo chuyển động cho biểu tượng khi rê chuột lên nút và các hàng."
 }

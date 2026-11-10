@@ -1398,8 +1398,8 @@ impl ProfilePage {
                                         |element| {
                                             element.child(
                                                 Icon::new(IconName::Plus)
-                                                    .size(px(22.))
-                                                    .text_color(theme.text_muted),
+                                                    .size(px(24.))
+                                                    .selected(false),
                                             )
                                         },
                                     )

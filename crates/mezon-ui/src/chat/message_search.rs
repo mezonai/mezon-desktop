@@ -637,7 +637,7 @@ fn render_pagination_nav_button(
     } else {
         theme.tokens.text_theme_primary
     };
-    let mut icon = Icon::new(IconName::ArrowRight)
+    let mut icon = Icon::new(IconName::ChevronRight)
         .size(px(20.))
         .text_color(icon_color);
     if previous {

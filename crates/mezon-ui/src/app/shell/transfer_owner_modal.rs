@@ -92,8 +92,8 @@ impl TransferOwnerModal {
             .when(is_new_owner, |el| {
                 el.child(
                     div().absolute().top(px(-14.)).child(
-                        Icon::new(IconName::OwnerIcon)
-                            .size(px(18.))
+                        Icon::new(IconName::Owner)
+                            .size(px(20.))
                             .text_color(rgb(OWNER_ICON_COLOR)),
                     ),
                 )
@@ -164,7 +164,8 @@ impl Render for TransferOwnerModal {
                             .child(self.party(&self.current_owner, false, theme))
                             .child(
                                 div().mt(px(24.)).child(
-                                    Icon::new(IconName::TransferOwner)
+                                    Icon::new(IconName::OwnerTransfer)
+                                        .size(px(48.))
                                         .size(px(60.))
                                         .text_color(theme.text_primary),
                                 ),

@@ -5166,5 +5166,7 @@
   "setting.account.qrProfile.brandName": "MEZON",
   "setting.account.qrProfile.verifiedByMezon": "VERIFIED BY MEZON",
   "setting.account.qrProfile.errorExport": "Не удалось экспортировать QR-код профиля",
-  "setting.account.qrProfile.errorImage": "Не удалось загрузить изображение"
+  "setting.account.qrProfile.errorImage": "Не удалось загрузить изображение",
+  "setting.appearance.iconAnimations": "Анимация значков",
+  "setting.appearance.iconAnimationsDescription": "Анимировать значки при наведении указателя на кнопки и строки."
 }

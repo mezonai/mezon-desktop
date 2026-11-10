@@ -28,7 +28,7 @@ use crate::theme::Theme;
 use crate::util::download::save_with_progress_toast;
 
 const DEFAULT_ROLE_COLOR: u32 = 0x99_aab5;
-const TOPIC_DEFAULT_AVATAR: &str = "icons/avatar-user.svg";
+const TOPIC_DEFAULT_AVATAR: &str = "icons/user-circle.svg";
 pub const FOR_YOU_ROW_HEIGHT: f32 = 76.;
 pub const MENTION_ROW_HEIGHT: f32 = 120.;
 pub const MESSAGE_ROW_HEIGHT: f32 = 128.;
@@ -1552,8 +1552,8 @@ fn render_inbox_video(
                             a: 0.5,
                         })
                         .child(
-                            Icon::new(IconName::PlayButton)
-                                .size(px(18.))
+                            Icon::new(IconName::Play)
+                                .size(px(20.))
                                 .text_color(gpui::white()),
                         ),
                 ),
@@ -1612,7 +1612,13 @@ fn render_inbox_file_card(
                 .justify_center()
                 .w(px(32.))
                 .h(px(40.))
-                .child(img(icon.path()).w(px(32.)).h(px(40.)).flex_none()),
+                .child(
+                    Icon::new(icon)
+                        .text_color(theme.tokens.text_secondary)
+                        .w(px(32.))
+                        .h(px(40.))
+                        .flex_none(),
+                ),
         )
         .child(
             div()
@@ -1674,7 +1680,7 @@ fn render_inbox_file_card(
                         })
                         .child(
                             Icon::new(IconName::Download)
-                                .size(px(14.))
+                                .size(px(16.))
                                 .text_color(theme.tokens.text_theme_primary),
                         ),
                 ),

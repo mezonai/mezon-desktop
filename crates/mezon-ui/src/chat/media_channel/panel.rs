@@ -659,11 +659,7 @@ fn render_empty_state(
                 .flex()
                 .items_center()
                 .justify_center()
-                .child(
-                    Icon::new(IconName::ImageThumbnail)
-                        .size(px(48.))
-                        .text_color(theme.text_muted),
-                ),
+                .child(Icon::new(IconName::FileImage).size(px(48.)).selected(false)),
         )
         .child(
             div()
@@ -701,7 +697,7 @@ fn render_empty_state(
                     .hover(|el| el.opacity(0.9))
                     .on_click(move |_, window, cx| on_create(window, cx))
                     .child(
-                        Icon::new(IconName::PlusIcon)
+                        Icon::new(IconName::PlusCircle)
                             .size(px(20.))
                             .text_color(theme.text_primary),
                     )

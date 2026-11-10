@@ -4936,5 +4936,7 @@
   "setting.account.qrProfile.brandName": "MEZON",
   "setting.account.qrProfile.verifiedByMezon": "VERIFIED BY MEZON",
   "setting.account.qrProfile.errorExport": "Профиль QR-кодын экспортлап булмый",
-  "setting.account.qrProfile.errorImage": "Рәсемне йөкләп булмый"
+  "setting.account.qrProfile.errorImage": "Рәсемне йөкләп булмый",
+  "setting.appearance.iconAnimations": "Билгеләр анимациясе",
+  "setting.appearance.iconAnimationsDescription": "Тычкан күрсәткечен төймәләргә һәм юлларга китергәндә билгеләрне җанландыру."
 }

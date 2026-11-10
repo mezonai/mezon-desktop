@@ -1,3 +1,5 @@
+use crate::components::primitives::{Icon, IconName};
+
 use gpui::{
     AnyWindowHandle, App, Bounds, Context, Div, Entity, MouseButton, ObjectFit, Window,
     WindowBounds, WindowControlArea, WindowDecorations, WindowKind, WindowOptions, div, img,
@@ -6,7 +8,6 @@ use gpui::{
 use mezon_store::{VoiceRenderFrame, VoiceStore};
 
 use crate::app::window_controls::linux_app_id;
-use crate::components::primitives::{Icon, IconName};
 
 pub struct ScreenSharePipView {
     voice: Entity<VoiceStore>,
@@ -91,7 +92,7 @@ impl Render for ScreenSharePipView {
                 .size_full()
                 .object_fit(ObjectFit::Contain)
                 .into_any_element(),
-            None => Icon::new(IconName::VoiceScreenShareIcon)
+            None => Icon::new(IconName::ScreenShare)
                 .size(px(40.))
                 .text_color(rgb(0x9a9a9a))
                 .into_any_element(),
@@ -116,7 +117,7 @@ impl Render for ScreenSharePipView {
             })
             .child(
                 Icon::new(IconName::Close)
-                    .size(px(14.))
+                    .size(px(16.))
                     .text_color(rgb(0xffffff)),
             )
             .on_mouse_down(MouseButton::Left, |_, window, cx| {

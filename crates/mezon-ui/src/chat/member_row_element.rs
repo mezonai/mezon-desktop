@@ -16,7 +16,7 @@ const AVATAR_SIZE: Pixels = px(32.);
 const GAP: Pixels = px(9.);
 const NAME_FONT_SIZE: Pixels = px(16.);
 const STATUS_FONT_SIZE: Pixels = px(12.);
-const OWNER_ICON_SIZE: Pixels = px(14.);
+const OWNER_ICON_SIZE: Pixels = px(16.);
 const OWNER_GAP: Pixels = px(4.);
 const DOT_SIZE: Pixels = px(12.);
 const DOT_BORDER: Pixels = px(2.);
@@ -124,6 +124,8 @@ struct TruncatedLine {
 struct RowTextCache {
     name: Option<TruncatedLine>,
     status: Option<TruncatedLine>,
+    owner_motion: mezon_widgets::IconMotion,
+    status_motion: mezon_widgets::IconMotion,
 }
 
 fn truncate_to_width(
@@ -400,12 +402,12 @@ impl MemberRowElement {
                 ),
                 size: size(OWNER_ICON_SIZE, OWNER_ICON_SIZE),
             };
-            let _ = window.paint_svg(
+            cache.owner_motion.paint(
+                IconName::Owner,
                 owner_bounds,
-                IconName::OwnerIcon.path().into(),
-                None,
-                TransformationMatrix::default(),
                 color,
+                owner_bounds.contains(&window.mouse_position()) && !cx.has_active_drag(),
+                window,
                 cx,
             );
         }
@@ -420,12 +422,12 @@ impl MemberRowElement {
                     ),
                     size: size(STATUS_ICON_SIZE, STATUS_ICON_SIZE),
                 };
-                let _ = window.paint_svg(
+                cache.status_motion.paint(
+                    icon,
                     icon_bounds,
-                    icon.path().into(),
-                    None,
-                    TransformationMatrix::default(),
                     icon_color,
+                    icon_bounds.contains(&window.mouse_position()) && !cx.has_active_drag(),
+                    window,
                     cx,
                 );
                 status_text_x += STATUS_ICON_SIZE + STATUS_ICON_GAP;
