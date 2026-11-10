@@ -5,10 +5,10 @@ use gpui::{
     prelude::*, px,
 };
 use mezon_store::{
-    BadgeService, ChannelList, ClanId, ClanMembersStore, DirectMessageBody, DirectMessageStore,
-    FriendState, FriendStore, PERMISSION_CLAN_OWNER, PERMISSION_MANAGE_CLAN, PermissionStore,
-    PresenceStore, ProfileContext, RoleId, RolesStore, Settings, UserId, UsersByUserStore,
-    current_user_status, resolve_user_profile,
+    AccountStore, BadgeService, ChannelList, ClanId, ClanMembersStore, DirectMessageBody,
+    DirectMessageStore, FriendState, FriendStore, PERMISSION_CLAN_OWNER, PERMISSION_MANAGE_CLAN,
+    PermissionStore, PresenceStore, ProfileContext, RoleId, RolesStore, Settings, UserId,
+    UsersByUserStore, current_user_status, resolve_user_profile,
 };
 use ui::{Clickable, PopoverMenu, Toggleable};
 
@@ -61,6 +61,14 @@ pub struct UserProfilePopover {
     context: ProfileContext,
     settings: gpui::Entity<Settings>,
     avatar_image_cache: gpui::Entity<LruImageCache>,
+    cover_image_cache: gpui::Entity<LruImageCache>,
+    banner_url: Option<SharedString>,
+    banner_color: Option<gpui::Rgba>,
+    banner_avatar: (String, String),
+    banner_task: Option<gpui::Task<()>>,
+    _account_sub: Option<gpui::Subscription>,
+    _direct_members_sub: Option<gpui::Subscription>,
+    _direct_channels_sub: Option<gpui::Subscription>,
     message_input: gpui::Entity<InputState>,
     role_search: gpui::Entity<InputState>,
     roles: RoleSection,
@@ -173,6 +181,7 @@ impl UserProfilePopover {
         let clan_members_sub =
             cx.observe(&ClanMembersStore::global(cx), |this: &mut Self, _, cx| {
                 this.roles_dirty = true;
+                this.refresh_profile_banner(cx);
                 cx.notify();
             });
         let permissions_sub = PermissionStore::try_global(cx).map(|permission_store| {
@@ -184,17 +193,57 @@ impl UserProfilePopover {
         let friend_sub = cx.observe(&FriendStore::global(cx), |_, _, cx| cx.notify());
         let presence_sub = cx.observe(&PresenceStore::global(cx), |_, _, cx| cx.notify());
         let users = UsersByUserStore::global(cx);
-        users.update(cx, |store, cx| store.ensure_loaded(cx));
-        let users_sub = cx.observe(&users, |_, _, cx| cx.notify());
+        users.update(cx, |store, cx| {
+            store.ensure_loaded(cx);
+            store.ensure_cover_profile(user_id, cx);
+        });
+        let users_sub = cx.observe(&users, |this, _, cx| {
+            this.refresh_profile_banner(cx);
+            cx.notify();
+        });
+        let account_sub = AccountStore::try_global(cx).map(|store| {
+            cx.observe(&store, |this, _, cx| {
+                this.refresh_profile_banner(cx);
+                cx.notify();
+            })
+        });
         let channel_sub = matches!(context, ProfileContext::Clan(_))
             .then(|| cx.observe(&ChannelList::global(cx), |_, _, cx| cx.notify()));
 
-        Self {
+        let direct_members_sub = if matches!(context, ProfileContext::Direct(_)) {
+            mezon_store::GroupMembersStore::try_global(cx).map(|store| {
+                cx.observe(&store, |this, _, cx| {
+                    this.refresh_profile_banner(cx);
+                    cx.notify();
+                })
+            })
+        } else {
+            None
+        };
+        let direct_channels_sub = if matches!(context, ProfileContext::Direct(_)) {
+            DirectMessageStore::try_global(cx).map(|store| {
+                cx.observe(&store, |this, _, cx| {
+                    this.refresh_profile_banner(cx);
+                    cx.notify();
+                })
+            })
+        } else {
+            None
+        };
+        let mut this = Self {
+            banner_url: None,
+            banner_color: None,
+            banner_avatar: (String::new(), String::new()),
+            banner_task: None,
+            _account_sub: account_sub,
+            _direct_members_sub: direct_members_sub,
+            _direct_channels_sub: direct_channels_sub,
             focus_handle,
             user_id,
             context,
             settings,
             avatar_image_cache,
+            cover_image_cache: crate::image_cache::profile_cover_cache(cx),
             message_input,
             role_search,
             roles: RoleSection::default(),
@@ -213,7 +262,48 @@ impl UserProfilePopover {
             _channel_sub: channel_sub,
             _input_sub: input_sub,
             _role_search_sub: role_search_sub,
+        };
+        this.refresh_profile_banner(cx);
+        this
+    }
+
+    fn refresh_profile_banner(&mut self, cx: &mut Context<Self>) {
+        let avatar_raw = resolve_user_profile(self.user_id, self.context, cx)
+            .map(|profile| profile.avatar_url)
+            .unwrap_or_default();
+        let avatar = crate::util::imgproxy::avatar_url(cx, &avatar_raw);
+        let cover = mezon_store::resolve_profile_banner(self.user_id, cx);
+        let cover = cover
+            .map(|url| {
+                (!url.is_empty())
+                    .then(|| SharedString::from(crate::util::imgproxy::profile_cover_url(cx, &url)))
+            })
+            .unwrap_or_else(|| self.banner_url.clone());
+        let source = (avatar, avatar_raw);
+        let avatar_changed = source != self.banner_avatar;
+        if !avatar_changed && self.banner_url == cover {
+            return;
         }
+        self.banner_url = cover;
+        if avatar_changed {
+            self.banner_color = None;
+            self.banner_task = None;
+            self.banner_avatar = source;
+        }
+        if self.banner_color.is_none() && self.banner_task.is_none() {
+            self.banner_task = crate::util::avatar_color::spawn_banner_color_task_with_fallback(
+                self.avatar_image_cache.clone(),
+                self.banner_avatar.0.clone(),
+                self.banner_avatar.1.clone(),
+                cx,
+                |this, color, cx| {
+                    this.banner_color = Some(color);
+                    this.banner_task = None;
+                    cx.notify();
+                },
+            );
+        }
+        cx.notify();
     }
 
     fn clan_id(&self) -> Option<ClanId> {
@@ -789,7 +879,10 @@ impl Render for UserProfilePopover {
         };
 
         let theme = cx.theme();
-        let banner_bg = gpui::rgb(0x818cf8);
+        let banner_bg = self
+            .banner_color
+            .map(gpui::Hsla::from)
+            .unwrap_or_else(|| theme.tokens.bg_secondary.into());
 
         div()
             .occlude()
@@ -819,7 +912,19 @@ impl Render for UserProfilePopover {
                     .h(px(BANNER_HEIGHT))
                     .rounded_tl_lg()
                     .rounded_tr_lg()
+                    .relative()
+                    .flex_shrink_0()
+                    .overflow_hidden()
                     .bg(banner_bg)
+                    .children(self.banner_url.clone().map(|url| {
+                        img(url)
+                            .image_cache(&self.cover_image_cache)
+                            .absolute()
+                            .inset_0()
+                            .size_full()
+                            .rounded_t_lg()
+                            .object_fit(gpui::ObjectFit::Cover)
+                    }))
                     .flex()
                     .flex_row()
                     .justify_end()

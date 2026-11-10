@@ -688,6 +688,7 @@ mod tests {
 
     fn account(id: i64, username: &str, display: &str) -> ApiAccount {
         ApiAccount {
+            banner: None,
             user_id: id,
             username: username.to_string(),
             email: None,

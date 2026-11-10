@@ -289,7 +289,7 @@ pub use topics::{TopicsEvent, TopicsStore};
 pub use ui_state::UiState;
 pub use user_profile::{
     ProfileContext, UserProfileView, active_clan_id, cached_username, current_user_clan_avatar,
-    resolve_avatar_url, resolve_user_profile,
+    resolve_avatar_url, resolve_profile_banner, resolve_user_profile,
 };
 pub use users_by_user::{UsersByUserEvent, UsersByUserStore};
 #[cfg(debug_assertions)]
