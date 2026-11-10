@@ -4917,4 +4917,12 @@
   "setting.profile.chooseCover": "Chọn ảnh bìa",
   "setting.profile.coverUploadFailed": "Không thể tải ảnh bìa. Hãy dùng JPEG, PNG, GIF hoặc WebP tối đa 10 MB.",
   "setting.profile.removeCover": "Xóa ảnh bìa"
+,  "setting.account.qrProfile.centerLogo": "Logo ở giữa QR",
+  "setting.account.qrProfile.chooseFromDevice": "Chọn ảnh từ thiết bị",
+  "setting.account.qrProfile.resetDefaultLogo": "Đặt lại logo Mezon",
+  "setting.account.qrProfile.qrDownloaded": "Đã tải ảnh QR về máy",
+  "setting.account.qrProfile.brandName": "MEZON",
+  "setting.account.qrProfile.verifiedByMezon": "ĐƯỢC MEZON XÁC THỰC",
+  "setting.account.qrProfile.errorExport": "Không thể xuất QR hồ sơ",
+  "setting.account.qrProfile.errorImage": "Không thể đọc ảnh"
 }

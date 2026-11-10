@@ -1,6 +1,7 @@
 use crate::dialog::{DialogOutcome, classify_dialog};
 use gpui::{App, AppContext, ClipboardItem, Entity, Global, Image, ImageFormat, SharedString};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 pub enum DownloadEvent {
     Started,
@@ -24,6 +25,27 @@ thread_local! {
         const { std::cell::RefCell::new(None) };
 }
 
+static DOWNLOADS_IN_FLIGHT: AtomicUsize = AtomicUsize::new(0);
+
+struct DownloadInFlight;
+
+impl DownloadInFlight {
+    fn start() -> Self {
+        DOWNLOADS_IN_FLIGHT.fetch_add(1, Ordering::Relaxed);
+        Self
+    }
+}
+
+impl Drop for DownloadInFlight {
+    fn drop(&mut self) {
+        DOWNLOADS_IN_FLIGHT.fetch_sub(1, Ordering::Relaxed);
+    }
+}
+
+pub(crate) fn downloads_in_flight() -> bool {
+    DOWNLOADS_IN_FLIGHT.load(Ordering::Relaxed) > 0
+}
+
 /// Where a download goes when the user could not be asked.
 fn downloads_dir() -> Option<std::path::PathBuf> {
     #[cfg(test)]
@@ -33,6 +55,32 @@ fn downloads_dir() -> Option<std::path::PathBuf> {
     dirs::download_dir().or_else(dirs::home_dir)
 }
 
+fn save_dialog_directory(cx: &App) -> std::path::PathBuf {
+    crate::Settings::try_global(cx)
+        .and_then(|settings| settings.read(cx).last_download_dir.clone())
+        .or_else(downloads_dir)
+        .unwrap_or_else(|| std::path::PathBuf::from("."))
+}
+
+fn remember_download_dir(path: &std::path::Path, cx: &mut App) {
+    let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) else {
+        return;
+    };
+    let Some(settings) = crate::Settings::try_global(cx) else {
+        return;
+    };
+    let changed = settings.update(cx, |settings, _| {
+        if settings.last_download_dir.as_deref() == Some(parent) {
+            return false;
+        }
+        settings.last_download_dir = Some(parent.to_path_buf());
+        true
+    });
+    if changed {
+        crate::schedule_settings_save(&settings, cx);
+    }
+}
+
 pub fn download_url_with_dialog(
     url: SharedString,
     filename: SharedString,
@@ -40,9 +88,7 @@ pub fn download_url_with_dialog(
     cx: &mut App,
 ) {
     let downloads = downloads_dir();
-    let directory = downloads
-        .clone()
-        .unwrap_or_else(|| std::path::PathBuf::from("."));
+    let directory = save_dialog_directory(cx);
     let url = url.to_string();
     let suggested = mezon_client::resolve_download_filename(&filename, &url);
     let receiver = cx.prompt_for_new_path(&directory, Some(suggested.as_str()));
@@ -86,7 +132,13 @@ pub fn download_url_with_dialog(
             }
         };
         let finished_path = path.clone();
-        cx.update(|cx| on_event(DownloadEvent::Started, cx));
+        let _in_flight = DownloadInFlight::start();
+        cx.update(|cx| {
+            if asked {
+                remember_download_dir(&finished_path, cx);
+            }
+            on_event(DownloadEvent::Started, cx);
+        });
         let (tx, rx) = flume::unbounded::<(u64, Option<u64>)>();
         let download = cx.background_executor().spawn(async move {
             mezon_client::transport_runtime::download_to(&url, path, move |written, total| {
@@ -592,6 +644,18 @@ mod tests {
     use std::cell::RefCell;
     use std::rc::Rc;
 
+    #[test]
+    fn a_download_counts_as_in_flight_until_its_guard_drops() {
+        assert!(!downloads_in_flight());
+        let first = DownloadInFlight::start();
+        let second = DownloadInFlight::start();
+        assert!(downloads_in_flight());
+        drop(first);
+        assert!(downloads_in_flight());
+        drop(second);
+        assert!(!downloads_in_flight());
+    }
+
     const PORTAL_MISSING: &str =
         "Couldn't open file picker due to missing xdg-desktop-portal implementation.";
 
@@ -789,5 +853,154 @@ mod tests {
         assert!(!PlatformStore::channel_show_cancelled(Some(channel), later));
         assert!(!PlatformStore::channel_show_cancelled(None, armed));
         assert!(!PlatformStore::channel_show_cancelled(Some("0"), armed));
+    }
+
+    #[gpui::test]
+    async fn save_dialog_reopens_in_the_folder_picked_last_time(cx: &mut TestAppContext) {
+        let dir = scratch_dir("dl-remembered");
+        let downloads = dir.join("Downloads");
+        let picked = dir.join("picked");
+        TEST_DOWNLOAD_DIR.with(|slot| *slot.borrow_mut() = Some(downloads.clone()));
+        let settings = cx.update(|cx| {
+            let settings = cx.new(|_| crate::Settings::default());
+            crate::Settings::init_global(&settings, cx);
+            settings
+        });
+
+        let seen: Rc<RefCell<Vec<&'static str>>> = Rc::default();
+        let on_event = record(&seen);
+        cx.update(|cx| {
+            download_url_with_dialog(
+                "https://cdn.example/1/2.mp4".into(),
+                "clip.mp4".into(),
+                on_event,
+                cx,
+            );
+        });
+
+        let first_dir = Rc::new(RefCell::new(None));
+        let first_dir_out = first_dir.clone();
+        let chosen = picked.join("x.mp4");
+        cx.simulate_new_path_selection(move |initial| {
+            *first_dir_out.borrow_mut() = Some(initial.to_path_buf());
+            Some(chosen)
+        });
+        cx.run_until_parked();
+
+        assert_eq!(first_dir.borrow().as_ref(), Some(&downloads));
+        cx.update(|cx| {
+            assert_eq!(settings.read(cx).last_download_dir.as_ref(), Some(&picked));
+        });
+
+        let on_event = record(&seen);
+        cx.update(|cx| {
+            download_url_with_dialog(
+                "https://cdn.example/1/3.mp4".into(),
+                "next.mp4".into(),
+                on_event,
+                cx,
+            );
+        });
+
+        let second_dir = Rc::new(RefCell::new(None));
+        let second_dir_out = second_dir.clone();
+        cx.simulate_new_path_selection(move |initial| {
+            *second_dir_out.borrow_mut() = Some(initial.to_path_buf());
+            None
+        });
+        cx.run_until_parked();
+
+        assert_eq!(second_dir.borrow().as_ref(), Some(&picked));
+
+        TEST_DOWNLOAD_DIR.with(|slot| *slot.borrow_mut() = None);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[gpui::test]
+    async fn cancelling_the_save_dialog_does_not_change_last_download_dir(cx: &mut TestAppContext) {
+        let dir = scratch_dir("dl-cancel");
+        let previous = dir.join("previous");
+        TEST_DOWNLOAD_DIR.with(|slot| *slot.borrow_mut() = Some(dir.clone()));
+        let settings = cx.update(|cx| {
+            let settings = cx.new(|_| crate::Settings::default());
+            crate::Settings::init_global(&settings, cx);
+            settings
+        });
+
+        let seen: Rc<RefCell<Vec<&'static str>>> = Rc::default();
+        let on_event = record(&seen);
+        cx.update(|cx| {
+            download_url_with_dialog(
+                "https://cdn.example/1/2.mp4".into(),
+                "clip.mp4".into(),
+                on_event,
+                cx,
+            );
+        });
+
+        cx.simulate_new_path_selection(|_| None);
+        cx.run_until_parked();
+
+        cx.update(|cx| {
+            assert_eq!(settings.read(cx).last_download_dir, None);
+            settings.update(cx, |settings, _| {
+                settings.last_download_dir = Some(previous.clone());
+            });
+        });
+
+        let on_event = record(&seen);
+        cx.update(|cx| {
+            download_url_with_dialog(
+                "https://cdn.example/1/3.mp4".into(),
+                "next.mp4".into(),
+                on_event,
+                cx,
+            );
+        });
+
+        cx.simulate_new_path_selection(|_| None);
+        cx.run_until_parked();
+
+        cx.update(|cx| {
+            assert_eq!(
+                settings.read(cx).last_download_dir.as_ref(),
+                Some(&previous)
+            );
+        });
+
+        TEST_DOWNLOAD_DIR.with(|slot| *slot.borrow_mut() = None);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[gpui::test]
+    async fn no_dialog_fallback_does_not_store_last_download_dir(cx: &mut TestAppContext) {
+        let dir = scratch_dir("dl-fallback-no-store");
+        TEST_DOWNLOAD_DIR.with(|slot| *slot.borrow_mut() = Some(dir.clone()));
+        let settings = cx.update(|cx| {
+            let settings = cx.new(|_| crate::Settings::default());
+            crate::Settings::init_global(&settings, cx);
+            settings
+        });
+
+        let seen: Rc<RefCell<Vec<&'static str>>> = Rc::default();
+        let on_event = record(&seen);
+        cx.update(|cx| {
+            download_url_with_dialog(
+                "https://cdn.example/1/2.crt".into(),
+                "ca.crt".into(),
+                on_event,
+                cx,
+            );
+        });
+
+        cx.simulate_new_path_failure(anyhow::anyhow!(PORTAL_MISSING));
+        cx.run_until_parked();
+
+        cx.update(|cx| {
+            assert_eq!(settings.read(cx).last_download_dir, None);
+        });
+
+        TEST_DOWNLOAD_DIR.with(|slot| *slot.borrow_mut() = None);
+        std::fs::remove_dir_all(&dir).ok();
     }
 }

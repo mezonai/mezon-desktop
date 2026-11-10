@@ -13,6 +13,7 @@ use mezon_store::{
 use ui::{Clickable, PopoverMenu, Toggleable};
 
 use crate::app::shell::{FriendRemovalKind, Shell};
+use crate::chat::call_actions::{CallTarget, call_user};
 use crate::chat::friends_page::{
     dm_open_failure_message, open_created_dm_if_route_unchanged, toast_send_failed,
 };
@@ -765,8 +766,13 @@ impl Render for UserProfilePopover {
                     .map(|p| p.display_name.as_str())
                     .unwrap_or(""),
             );
+        let message_bg = {
+            let tokens = &cx.theme().tokens;
+            tokens.bg_surface.blend(tokens.bg_input_secondary).into()
+        };
         self.message_input.update(cx, |input, cx| {
             input.set_placeholder(message_placeholder, cx);
+            input.set_bg(Some(message_bg), cx);
         });
 
         let (display_name, username, avatar_raw, about_me, member_since_time, online) =
@@ -883,7 +889,7 @@ impl Render for UserProfilePopover {
             .w(px(300.))
             .overflow_hidden()
             .rounded_lg()
-            .bg(theme.bg_floating)
+            .bg(theme.tokens.theme_setting_primary)
             .key_context("menu")
             .track_focus(&self.focus_handle)
             .on_action(cx.listener(|_, _: &::menu::Cancel, _window, cx| {
@@ -942,6 +948,11 @@ impl Render for UserProfilePopover {
                 )),
                 custom_status,
                 theme,
+                if self.embedded {
+                    theme.surfaces.direct_message.solid
+                } else {
+                    theme.tokens.theme_setting_primary
+                },
             ))
             .child(
                 div().px(px(16.)).child(
@@ -951,15 +962,14 @@ impl Render for UserProfilePopover {
                         .my(px(16.))
                         .border_1()
                         .border_color(theme.tokens.theme_border_input)
-                        .shadow_sm()
-                        .bg(theme.tokens.bg_active_member_channel)
+                        .bg(theme.tokens.bg_surface)
                         .flex()
                         .flex_col()
                         .child(
                             div()
                                 .font_weight(FontWeight::SEMIBOLD)
                                 .text_lg()
-                                .text_color(theme.tokens.text_theme_primary)
+                                .text_color(theme.tokens.text_theme_message)
                                 .overflow_hidden()
                                 .truncate()
                                 .child(display_name.clone()),
@@ -968,7 +978,7 @@ impl Render for UserProfilePopover {
                             div()
                                 .text_base()
                                 .font_weight(FontWeight::SEMIBOLD)
-                                .text_color(theme.tokens.text_theme_primary)
+                                .text_color(theme.tokens.text_theme_message)
                                 .overflow_hidden()
                                 .truncate()
                                 .child(username.clone()),
@@ -1025,18 +1035,11 @@ impl Render for UserProfilePopover {
                         })
                         .when(show_message_input, |d| {
                             d.child(
-                                div()
-                                    .occlude()
-                                    .mt_2()
-                                    .rounded(px(5.))
-                                    .border_1()
-                                    .border_color(theme.tokens.theme_border_input)
-                                    .bg(theme.tokens.bg_theme_contexify)
-                                    .child(
-                                        Input::new(&self.message_input)
-                                            .w_full()
-                                            .text_color(theme.tokens.text_theme_primary),
-                                    ),
+                                div().occlude().mt_2().rounded(px(5.)).child(
+                                    Input::new(&self.message_input)
+                                        .w_full()
+                                        .text_color(theme.tokens.text_theme_primary),
+                                ),
                             )
                         })
                         .when(username.is_empty() && !is_self && !is_blocked, |d| {
@@ -1194,6 +1197,33 @@ fn render_banner_actions(
             .size(px(16.))
             .text_color(gpui::white())
             .into_any_element(),
+    ));
+
+    buttons.push(banner_icon_button(
+        "profile-call",
+        IconName::IconPhoneDM,
+        false,
+        true,
+        cx.listener(|this, _: &ClickEvent, _window, cx| {
+            let profile = resolve_user_profile(this.user_id, this.context, cx).unwrap_or_default();
+            let label = if !profile.display_name.is_empty() {
+                profile.display_name
+            } else {
+                profile.username.clone()
+            };
+            let target = CallTarget {
+                user: this.user_id,
+                label: label.into(),
+                avatar: profile.avatar_url.into(),
+                username: profile.username.into(),
+            };
+            let error = SharedString::from(mezon_i18n::t(
+                &this.settings.read(cx).language,
+                "shareContact.card.callError",
+            ));
+            call_user(target, false, error, cx);
+            cx.emit(DismissEvent);
+        }),
     ));
 
     if show_share_contact {
@@ -1517,6 +1547,7 @@ fn render_avatar_row(
     status: Option<(mezon_store::UserPresence, gpui::Rgba)>,
     custom_status: String,
     theme: &Theme,
+    avatar_ring_color: gpui::Rgba,
 ) -> AnyElement {
     div()
         .flex()
@@ -1532,7 +1563,7 @@ fn render_avatar_row(
                 .child(
                     div()
                         .border(px(AVATAR_BORDER))
-                        .border_color(theme.bg_floating)
+                        .border_color(avatar_ring_color)
                         .rounded_full()
                         .child(avatar),
                 )

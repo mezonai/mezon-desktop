@@ -4916,4 +4916,12 @@
   "setting.profile.chooseCover": "Выбраць вокладку",
   "setting.profile.coverUploadFailed": "Не ўдалося загрузіць вокладку. Выкарыстоўвайце JPEG, PNG, GIF або WebP памерам да 10 МБ.",
   "setting.profile.removeCover": "Выдаліць вокладку"
+,  "setting.account.qrProfile.centerLogo": "Лагатып у цэнтры QR",
+  "setting.account.qrProfile.chooseFromDevice": "Выбраць з прылады",
+  "setting.account.qrProfile.resetDefaultLogo": "Скінуць лагатып Mezon",
+  "setting.account.qrProfile.qrDownloaded": "Выява QR спампавана",
+  "setting.account.qrProfile.brandName": "MEZON",
+  "setting.account.qrProfile.verifiedByMezon": "VERIFIED BY MEZON",
+  "setting.account.qrProfile.errorExport": "Не ўдалося экспартаваць QR-код профілю",
+  "setting.account.qrProfile.errorImage": "Не ўдалося загрузіць выяву"
 }

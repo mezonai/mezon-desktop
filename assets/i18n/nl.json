@@ -4916,4 +4916,12 @@
   "setting.profile.chooseCover": "Omslag kiezen",
   "setting.profile.coverUploadFailed": "De omslag kon niet worden geüpload. Gebruik JPEG, PNG, GIF of WebP tot 10 MB.",
   "setting.profile.removeCover": "Omslag verwijderen"
+,  "setting.account.qrProfile.centerLogo": "QR-middenlogo",
+  "setting.account.qrProfile.chooseFromDevice": "Kies van apparaat",
+  "setting.account.qrProfile.resetDefaultLogo": "Mezon-logo herstellen",
+  "setting.account.qrProfile.qrDownloaded": "QR-afbeelding gedownload",
+  "setting.account.qrProfile.brandName": "MEZON",
+  "setting.account.qrProfile.verifiedByMezon": "VERIFIED BY MEZON",
+  "setting.account.qrProfile.errorExport": "De profiel-QR kan niet worden geëxporteerd",
+  "setting.account.qrProfile.errorImage": "De afbeelding kan niet worden geladen"
 }

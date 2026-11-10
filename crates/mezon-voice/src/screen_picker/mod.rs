@@ -15,6 +15,10 @@ pub fn system_screen_share_pick() -> Option<PickedScreen> {
     None
 }
 
+pub(crate) fn pick_polls_at_capture_fps(pick: &PickedScreen) -> bool {
+    cfg!(any(target_os = "linux", target_os = "freebsd")) && !pick_uses_portal(pick)
+}
+
 pub(crate) fn pick_uses_portal(pick: &PickedScreen) -> bool {
     #[cfg(target_os = "linux")]
     {
@@ -24,6 +28,21 @@ pub(crate) fn pick_uses_portal(pick: &PickedScreen) -> bool {
     {
         let _ = pick;
         false
+    }
+}
+
+pub(crate) fn portal_parent_window_for_pick(pick: &PickedScreen) -> Option<String> {
+    #[cfg(target_os = "linux")]
+    {
+        match pick {
+            PickedScreen::LinuxPortal => crate::linux_session::portal_parent_window(),
+            PickedScreen::Target(_) => None,
+        }
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = pick;
+        None
     }
 }
 

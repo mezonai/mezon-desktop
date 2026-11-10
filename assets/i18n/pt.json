@@ -4917,4 +4917,12 @@
   "setting.profile.chooseCover": "Escolher capa",
   "setting.profile.coverUploadFailed": "Não foi possível enviar a capa. Use JPEG, PNG, GIF ou WebP de até 10 MB.",
   "setting.profile.removeCover": "Remover capa"
+,  "setting.account.qrProfile.centerLogo": "Logotipo central do QR",
+  "setting.account.qrProfile.chooseFromDevice": "Escolher do dispositivo",
+  "setting.account.qrProfile.resetDefaultLogo": "Redefinir logotipo da Mezon",
+  "setting.account.qrProfile.qrDownloaded": "Imagem do QR baixada",
+  "setting.account.qrProfile.brandName": "MEZON",
+  "setting.account.qrProfile.verifiedByMezon": "VERIFIED BY MEZON",
+  "setting.account.qrProfile.errorExport": "Não foi possível exportar o QR do perfil",
+  "setting.account.qrProfile.errorImage": "Não foi possível carregar a imagem"
 }

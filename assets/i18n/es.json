@@ -4955,4 +4955,12 @@
   "setting.profile.chooseCover": "Elegir portada",
   "setting.profile.coverUploadFailed": "No se pudo subir la portada. Usa JPEG, PNG, GIF o WebP de hasta 10 MB.",
   "setting.profile.removeCover": "Eliminar portada"
+,  "setting.account.qrProfile.centerLogo": "Logo central del QR",
+  "setting.account.qrProfile.chooseFromDevice": "Elegir del dispositivo",
+  "setting.account.qrProfile.resetDefaultLogo": "Restablecer logo de Mezon",
+  "setting.account.qrProfile.qrDownloaded": "Imagen QR descargada",
+  "setting.account.qrProfile.brandName": "MEZON",
+  "setting.account.qrProfile.verifiedByMezon": "VERIFIED BY MEZON",
+  "setting.account.qrProfile.errorExport": "No se pudo exportar el QR del perfil",
+  "setting.account.qrProfile.errorImage": "No se pudo cargar la imagen"
 }

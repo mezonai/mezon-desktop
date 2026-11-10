@@ -54,7 +54,7 @@ pub use camera::{
     CameraController, CameraDeviceInfo, enumerate_cameras, start_camera, start_camera_into,
 };
 #[cfg(any(target_os = "linux", target_os = "freebsd"))]
-pub use linux_session::record_wayland_session;
+pub use linux_session::{record_wayland_session, set_portal_parent_window};
 pub use mezon_record::{RecordError, RecordStats};
 pub use permission::{
     MediaDevice, MediaPermission, media_permission, media_permission_changes,
@@ -846,6 +846,13 @@ async fn session_main(
                             continue;
                         }
                         screen_mode = mode;
+                        if screen_session.is_none()
+                            && screen_picker::pick_uses_portal(&pick)
+                            && let Some(task) = screen_task.take()
+                        {
+                            task.abort();
+                            screen_gen = screen_gen.wrapping_add(1);
+                        }
                         if screen_session.is_none() && screen_task.is_none() {
                             screen_full_res.store(false, Ordering::Relaxed);
                             let factory = factory.clone();
@@ -1533,24 +1540,31 @@ async fn start_screen_track(
         ?mode,
         "starting screen share (share system audio: {share_audio})"
     );
+    let polls = screen_picker::pick_polls_at_capture_fps(&pick);
+    let fixed_capture_fps = screen_picker::pick_uses_portal(&pick).then(|| mode.capture_fps());
     let (stopper, source_rx) = screen::start_screen(
         identity.to_string(),
         frame_store,
         full_res,
         pick,
         mode.capture_fps(),
+        mode.paced_send_fps(mode.encode_max_fps()),
     );
     let (source, width, _height) = source_rx
         .recv_async()
         .await
         .map_err(|_| anyhow::anyhow!("screen thread exited"))?
         .map_err(|e| anyhow::anyhow!(e))?;
+    let repeat = (!polls && !screen_mode::PACES_TEXT_FRAMES)
+        .then(|| sfu::ScreenRepeat::new(source.clone(), fixed_capture_fps));
     let screen_track = factory.create_video_track("screen", source);
     apply_screen_content_hint(&screen_track, mode);
     let track = sfu::ScreenTrack {
         track: screen_track,
         width,
         mode,
+        repeat,
+        send_pace: stopper.send_pace(),
     };
 
     let audio = if share_audio {
@@ -1590,6 +1604,10 @@ fn apply_screen_share_mode(session: &mut ScreenSession, mode: ScreenShareMode, e
     }
     session.track.mode = mode;
     session.stopper.set_capture_fps(mode.capture_fps());
+    session
+        .track
+        .send_pace
+        .set_fps(mode.paced_send_fps(mode.encode_max_fps()));
     apply_screen_content_hint(&session.track.track, mode);
     engine.set_screen_share_mode(mode);
     tracing::info!(?mode, "screen share mode changed");

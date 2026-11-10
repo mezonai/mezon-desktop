@@ -56,7 +56,6 @@ pub enum Route {
     SettingsNotifications,
     SettingsLanguage,
     SettingsVoice,
-    SettingsStreaming,
     SettingsServer,
     SettingsAdvanced,
     ClanSettings {
@@ -140,7 +139,6 @@ impl Route {
             Route::SettingsNotifications => "/settings/notifications".to_string(),
             Route::SettingsLanguage => "/settings/language".to_string(),
             Route::SettingsVoice => "/settings/voice".to_string(),
-            Route::SettingsStreaming => "/settings/streaming".to_string(),
             Route::SettingsServer => "/settings/server".to_string(),
             Route::SettingsAdvanced => "/settings/advanced".to_string(),
             Route::ClanSettings { clan_id, page } => {
@@ -250,7 +248,7 @@ impl Route {
             ["settings", "notifications"] => Route::SettingsNotifications,
             ["settings", "language"] => Route::SettingsLanguage,
             ["settings", "voice"] => Route::SettingsVoice,
-            ["settings", "streaming"] => Route::SettingsStreaming,
+            ["settings", "streaming"] => Route::SettingsAccount,
             ["settings", "server"] => Route::SettingsServer,
             ["settings", "advanced"] => Route::SettingsAdvanced,
             ["chat", "clans", clan_id, "settings"] => Route::ClanSettings {
@@ -785,13 +783,17 @@ mod tests {
         let route = Route::ChannelSettings {
             clan_id: ClanId(4),
             channel_id: ChannelId(9),
-            tab: ChannelSettingsTab::StreamThumbnail,
+            tab: ChannelSettingsTab::Streaming,
         };
         assert_eq!(
             route.to_path(),
-            "/chat/clans/4/channels/9/settings/stream-thumbnail"
+            "/chat/clans/4/channels/9/settings/streaming"
         );
         assert_eq!(Route::from_path(&route.to_path()), route);
+        assert_eq!(
+            Route::from_path("/chat/clans/4/channels/9/settings/stream-thumbnail"),
+            route
+        );
     }
 
     #[test]

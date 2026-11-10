@@ -7,6 +7,7 @@ use crate::chat::{MentionInput, ReplyTarget};
 use crate::components::primitives::{Icon, IconName};
 use crate::image_cache::LruImageCache;
 use crate::theme::{ActiveTheme, Theme};
+use crate::util::theme::theme_is_light;
 use gpui::{
     Context, Entity, FontWeight, ObjectFit, Render, SharedString, Subscription, Task, Window, div,
     img, prelude::*, px, radians, rgb,
@@ -200,6 +201,8 @@ impl InputBar {
         target: &ReplyTarget,
         reply_clear: ReplyClearSource,
     ) -> impl IntoElement {
+        let surface = theme.tokens.bg_surface;
+
         div()
             .id("reply-preview-bar")
             .flex()
@@ -211,6 +214,12 @@ impl InputBar {
             .rounded_tl_lg()
             .rounded_tr_lg()
             .bg(theme.tokens.theme_setting_nav)
+            .when(theme_is_light(theme), |bar| {
+                bar.bg(surface.blend(theme.tokens.bg_input_secondary))
+                    .border_t_1()
+                    .border_x_1()
+                    .border_color(theme.tokens.border_primary)
+            })
             .text_size(px(14.))
             .child(
                 div()
@@ -402,13 +411,11 @@ impl InputBar {
         &self,
         theme: &Theme,
         text: SharedString,
-        cap_top: bool,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         shared_grammar_correction_bar(
             theme,
             text,
-            cap_top,
             cx.listener(|this, _, window, cx| {
                 this.mention_input.update(cx, |input, cx| {
                     input.apply_grammar_correction(window, cx);
@@ -425,7 +432,6 @@ impl InputBar {
         let replying = self.replying_to.is_some();
         let reply_clear = self.reply_clear;
         let grammar_correction = self.mention_input.read(cx).grammar_correction_text();
-        let composer_capped = replying || grammar_correction.is_some();
         let ogp_preview = self.mention_input.read(cx).ogp_preview().cloned();
         let store = MessagesStore::global(cx);
         let anonymous = if self.for_topic {
@@ -433,9 +439,8 @@ impl InputBar {
         } else {
             store.read(cx).is_anonymous_mode()
         };
-        let show_quick_replies = grammar_correction.is_none()
-            && self.settings.read(cx).quick_replies_enabled
-            && !self.quick_replies.is_empty();
+        let show_quick_replies =
+            self.settings.read(cx).quick_replies_enabled && !self.quick_replies.is_empty();
         let mention_input = self.mention_input.clone();
         div()
             .flex()
@@ -444,48 +449,55 @@ impl InputBar {
             .w_full()
             .px_3()
             .pb_1()
-            .when_some(ogp_preview, |d, preview| {
-                d.child(self.ogp_preview_bar(&preview, &theme, cx))
-            })
-            .when_some(self.replying_to.as_ref(), |d, target| {
-                d.child(Self::reply_preview_bar(
-                    &theme,
-                    &self.locale,
-                    target,
-                    reply_clear,
-                ))
-            })
-            .when(show_quick_replies, |d| {
-                d.child(self.quick_replies_row(mention_input, cx))
-            })
-            .when_some(grammar_correction, |d, text| {
-                d.child(self.grammar_correction_bar(&theme, text, !replying, cx))
-            })
             .child(
                 div()
                     .relative()
                     .flex()
-                    .flex_row()
-                    .items_center()
-                    .when(composer_capped, |d| d.rounded_bl_lg().rounded_br_lg())
-                    .when(!composer_capped, |d| d.rounded_lg())
-                    .border_1()
-                    .border_color(theme.tokens.border_primary)
-                    .bg(theme.surfaces.surface.fill())
-                    .shadow_md()
-                    .child(div().flex_1().child(self.mention_input.clone()))
-                    .when(anonymous, |composer| {
-                        composer.child(
-                            div().absolute().top(px(-12.)).right(px(-12.)).child(
-                                Icon::new(IconName::HatIcon)
-                                    .size(px(28.))
-                                    .text_color(theme.tokens.text_theme_primary)
-                                    .with_transformation(gpui::Transformation::rotate(radians(
-                                        std::f32::consts::FRAC_PI_4,
-                                    ))),
-                            ),
-                        )
-                    }),
+                    .flex_col()
+                    .w_full()
+                    .when_some(grammar_correction, |d, text| {
+                        d.child(self.grammar_correction_bar(&theme, text, cx))
+                    })
+                    .when_some(ogp_preview, |d, preview| {
+                        d.child(self.ogp_preview_bar(&preview, &theme, cx))
+                    })
+                    .when_some(self.replying_to.as_ref(), |d, target| {
+                        d.child(Self::reply_preview_bar(
+                            &theme,
+                            &self.locale,
+                            target,
+                            reply_clear,
+                        ))
+                    })
+                    .when(show_quick_replies, |d| {
+                        d.child(self.quick_replies_row(mention_input, cx))
+                    })
+                    .child(
+                        div()
+                            .relative()
+                            .flex()
+                            .flex_row()
+                            .items_center()
+                            .when(replying, |d| d.rounded_bl_lg().rounded_br_lg())
+                            .when(!replying, |d| d.rounded_lg())
+                            .border_1()
+                            .border_color(theme.tokens.border_primary)
+                            .bg(theme.surfaces.surface.fill())
+                            .shadow_md()
+                            .child(div().flex_1().child(self.mention_input.clone()))
+                            .when(anonymous, |composer| {
+                                composer.child(
+                                    div().absolute().top(px(-12.)).right(px(-12.)).child(
+                                        Icon::new(IconName::HatIcon)
+                                            .size(px(28.))
+                                            .text_color(theme.tokens.text_theme_primary)
+                                            .with_transformation(gpui::Transformation::rotate(
+                                                radians(std::f32::consts::FRAC_PI_4),
+                                            )),
+                                    ),
+                                )
+                            }),
+                    ),
             )
     }
 }

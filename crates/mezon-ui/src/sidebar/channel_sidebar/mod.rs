@@ -778,6 +778,10 @@ impl ChannelSidebar {
             })
             .unwrap_or_default();
 
+        if self.app_list_open {
+            self.app_list_apps = app_channels.clone();
+        }
+
         items.push(SidebarItem::BannerAndEvents {
             banner_url: clans.active_clan_banner().map(|s| s.to_string()),
             app_channels,

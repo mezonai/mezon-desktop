@@ -4917,4 +4917,12 @@
   "setting.profile.chooseCover": "Banner auswählen",
   "setting.profile.coverUploadFailed": "Banner konnte nicht hochgeladen werden. Verwende JPEG, PNG, GIF oder WebP bis 10 MB.",
   "setting.profile.removeCover": "Banner entfernen"
+,  "setting.account.qrProfile.centerLogo": "QR-Zentrum-Logo",
+  "setting.account.qrProfile.chooseFromDevice": "Vom Gerät auswählen",
+  "setting.account.qrProfile.resetDefaultLogo": "Mezon-Logo zurücksetzen",
+  "setting.account.qrProfile.qrDownloaded": "QR-Code-Bild heruntergeladen",
+  "setting.account.qrProfile.brandName": "MEZON",
+  "setting.account.qrProfile.verifiedByMezon": "VERIFIED BY MEZON",
+  "setting.account.qrProfile.errorExport": "Profil-QR kann nicht exportiert werden",
+  "setting.account.qrProfile.errorImage": "Bild kann nicht geladen werden"
 }

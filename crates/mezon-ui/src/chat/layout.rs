@@ -3323,7 +3323,6 @@ impl ChatLayout {
             | Route::SettingsNotifications
             | Route::SettingsLanguage
             | Route::SettingsVoice
-            | Route::SettingsStreaming
             | Route::SettingsServer
             | Route::SettingsAdvanced
             | Route::ClanSettings { .. }

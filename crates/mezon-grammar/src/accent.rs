@@ -160,8 +160,9 @@ pub(crate) fn add_accents(text: &str, infer: &dyn Fn(&str) -> Option<Vec<f32>>) 
     if text.trim().is_empty() || is_predominantly_english_sentence(text) {
         return text.to_string();
     }
-    if RE_SENTENCE.is_match(text) {
-        return split_keeping_delimiters(text)
+    let precleaned = crate::rules::preclean_phonetics_and_units(text);
+    if RE_SENTENCE.is_match(&precleaned) {
+        return split_keeping_delimiters(&precleaned)
             .into_iter()
             .map(|part| {
                 if RE_DELIMITER_ONLY.is_match(&part) {
@@ -172,7 +173,45 @@ pub(crate) fn add_accents(text: &str, infer: &dyn Fn(&str) -> Option<Vec<f32>>) 
             })
             .collect();
     }
-    add_accents_chunk(text, infer)
+    add_accents_chunk(&precleaned, infer)
+}
+
+pub fn restore_sentence(
+    text: &str,
+    capitalize: bool,
+    resolve_teencode: bool,
+    infer: &dyn Fn(&str) -> Option<Vec<f32>>,
+) -> String {
+    if text.trim().is_empty() || is_predominantly_english_sentence(text) {
+        return text.to_string();
+    }
+
+    // 1. Punctuation spacing normalization
+    let (punc_norm, _) = crate::rules::normalize_punctuation_spacing(text);
+    let mut processed = punc_norm;
+
+    // 2. Pre-clean units & phonetics
+    processed = crate::rules::preclean_phonetics_and_units(&processed);
+
+    // 3. Teencode expansion if requested
+    if resolve_teencode {
+        let (expanded, _) = crate::rules::normalize_teencode(&processed);
+        processed = expanded;
+    }
+
+    // 4. Multi-word phrase pre-pass
+    processed = apply_confusable_prepass(&processed);
+
+    // 5. Neural accent restoration
+    let restored = add_accents(&processed, infer);
+
+    // 6. Sentence-start capitalization recovery
+    if capitalize {
+        let (cap, _) = crate::rules::normalize_sentence_capitalization(&restored);
+        cap
+    } else {
+        restored
+    }
 }
 
 fn split_keeping_delimiters(text: &str) -> Vec<String> {
@@ -193,20 +232,88 @@ fn split_keeping_delimiters(text: &str) -> Vec<String> {
 
 fn add_accents_chunk(text: &str, infer: &dyn Fn(&str) -> Option<Vec<f32>>) -> String {
     let text = apply_confusable_prepass(text);
-    let protected = protected_indices(&text);
     let chars: Vec<char> = text.chars().collect();
+    if chars.len() > ACCENT_MAX_CHARS {
+        static RE_CLAUSE: LazyLock<Regex> =
+            LazyLock::new(|| Regex::new(r"([,;]\s+|\s+-\s+)").unwrap());
+        if RE_CLAUSE.is_match(&text) {
+            let mut subparts = Vec::new();
+            let mut last = 0usize;
+            for matched in RE_CLAUSE.find_iter(&text) {
+                if matched.start() > last {
+                    subparts.push(&text[last..matched.start()]);
+                }
+                subparts.push(matched.as_str());
+                last = matched.end();
+            }
+            if last < text.len() {
+                subparts.push(&text[last..]);
+            }
+            let mut sub_res = Vec::new();
+            let mut curr_buf = String::new();
+            for sp in subparts {
+                if curr_buf.chars().count() + sp.chars().count() > ACCENT_MAX_CHARS && !curr_buf.is_empty() {
+                    sub_res.push(add_accents_chunk(&curr_buf, infer));
+                    curr_buf = sp.to_string();
+                } else {
+                    curr_buf.push_str(sp);
+                }
+            }
+            if !curr_buf.is_empty() {
+                sub_res.push(add_accents_chunk(&curr_buf, infer));
+            }
+            return rescore_with_collocations(&sub_res.concat(), &text);
+        } else {
+            let words: Vec<&str> = text.split(' ').collect();
+            let mut chunks = Vec::new();
+            let mut curr_chunk: Vec<&str> = Vec::new();
+            let mut curr_len = 0usize;
+            for w in words {
+                let w_len = w.chars().count();
+                if curr_len + w_len + 1 > (ACCENT_MAX_CHARS - 15) && !curr_chunk.is_empty() {
+                    chunks.push(curr_chunk.join(" "));
+                    curr_chunk = vec![w];
+                    curr_len = w_len;
+                } else {
+                    curr_chunk.push(w);
+                    curr_len += w_len + 1;
+                }
+            }
+            if !curr_chunk.is_empty() {
+                chunks.push(curr_chunk.join(" "));
+            }
+            if chunks.len() > 1 {
+                let res_chunks: Vec<String> = chunks.iter().map(|c| add_accents_chunk(c, infer)).collect();
+                return rescore_with_collocations(&res_chunks.join(" "), &text);
+            } else {
+                // Single huge word with no spaces or clauses; chunk strictly by char length
+                let mut char_chunks = Vec::new();
+                for chunk in chars.chunks(ACCENT_MAX_CHARS) {
+                    let s: String = chunk.iter().collect();
+                    char_chunks.push(add_accents_single_chunk(&s, infer));
+                }
+                return rescore_with_collocations(&char_chunks.concat(), &text);
+            }
+        }
+    }
+    add_accents_single_chunk(&text, infer)
+}
+
+fn add_accents_single_chunk(text: &str, infer: &dyn Fn(&str) -> Option<Vec<f32>>) -> String {
+    let chars: Vec<char> = text.chars().collect();
+    let protected = protected_indices(text);
     let limit = chars.len().min(ACCENT_MAX_CHARS);
     let prefix: String = chars.iter().take(limit).collect();
     let Some(logits) = infer(&prefix) else {
-        return text;
+        return text.to_string();
     };
     if logits.len() < limit.saturating_mul(ACCENT_VOCAB_SIZE) {
-        return text;
+        return text.to_string();
     }
     let decoded = decode_beam(&chars[..limit], &logits, &protected);
     let mut raw = decoded;
     raw.extend(chars.iter().skip(limit));
-    rescore_with_collocations(&raw.iter().collect::<String>(), &text)
+    rescore_with_collocations(&raw.iter().collect::<String>(), text)
 }
 
 fn apply_confusable_prepass(text: &str) -> String {
@@ -652,7 +759,8 @@ fn rescore_with_collocations(text: &str, original: &str) -> String {
             }
         }
     }
-    apply_confusable_prepass(&tokens.concat())
+    let rescored = apply_confusable_prepass(&tokens.concat());
+    crate::rules::preclean_phonetics_and_units(&rescored)
 }
 
 fn tokenize(text: &str) -> Vec<String> {

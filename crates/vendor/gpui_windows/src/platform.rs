@@ -1255,10 +1255,21 @@ fn file_save_dialog(
     if let Some(suggested_name) = suggested_name {
         unsafe {
             dialog
-                .SetFileName(&HSTRING::from(suggested_name))
+                .SetFileName(&HSTRING::from(&suggested_name))
                 .context("failed to set file name")
                 .log_err()
         };
+        if let Some(extension) = std::path::Path::new(&suggested_name)
+            .extension()
+            .filter(|ext| !ext.is_empty())
+        {
+            unsafe {
+                dialog
+                    .SetDefaultExtension(&HSTRING::from(extension))
+                    .context("failed to set default extension")
+                    .log_err()
+            };
+        }
     }
 
     unsafe {

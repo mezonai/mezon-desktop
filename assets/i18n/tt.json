@@ -4929,4 +4929,12 @@
   "setting.profile.chooseCover": "Тышлык рәсемен сайлау",
   "setting.profile.coverUploadFailed": "Тышлыкны йөкләп булмады. 10 МБ кадәр JPEG, PNG, GIF яки WebP кулланыгыз.",
   "setting.profile.removeCover": "Тышлыкны бетерү"
+,  "setting.account.qrProfile.centerLogo": "QR уртасындагы логотип",
+  "setting.account.qrProfile.chooseFromDevice": "Җайланмадан сайлау",
+  "setting.account.qrProfile.resetDefaultLogo": "Mezon логотибын кайтару",
+  "setting.account.qrProfile.qrDownloaded": "QR рәсеме йөкләнде",
+  "setting.account.qrProfile.brandName": "MEZON",
+  "setting.account.qrProfile.verifiedByMezon": "VERIFIED BY MEZON",
+  "setting.account.qrProfile.errorExport": "Профиль QR-кодын экспортлап булмый",
+  "setting.account.qrProfile.errorImage": "Рәсемне йөкләп булмый"
 }

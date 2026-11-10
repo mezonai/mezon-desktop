@@ -5159,4 +5159,12 @@
   "setting.profile.chooseCover": "Выбрать обложку",
   "setting.profile.coverUploadFailed": "Не удалось загрузить обложку. Используйте JPEG, PNG, GIF или WebP размером до 10 МБ.",
   "setting.profile.removeCover": "Удалить обложку"
+,  "setting.account.qrProfile.centerLogo": "Логотип в центре QR",
+  "setting.account.qrProfile.chooseFromDevice": "Выбрать с устройства",
+  "setting.account.qrProfile.resetDefaultLogo": "Сбросить логотип Mezon",
+  "setting.account.qrProfile.qrDownloaded": "Изображение QR скачано",
+  "setting.account.qrProfile.brandName": "MEZON",
+  "setting.account.qrProfile.verifiedByMezon": "VERIFIED BY MEZON",
+  "setting.account.qrProfile.errorExport": "Не удалось экспортировать QR-код профиля",
+  "setting.account.qrProfile.errorImage": "Не удалось загрузить изображение"
 }

@@ -1,0 +1,34 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1020" height="1152" viewBox="0 0 340 384">
+  <defs>
+    <clipPath id="card"><rect width="340" height="384" rx="24"/></clipPath>
+    <clipPath id="avatar"><circle cx="{avatar_x}" cy="40" r="16"/></clipPath>
+    <clipPath id="logo"><rect x="156" y="213.5" width="28" height="28" rx="8"/></clipPath>
+    <linearGradient id="background" gradientUnits="userSpaceOnUse" x1="{x1}" y1="{y1}" x2="{x2}" y2="{y2}">{stops}</linearGradient>
+  </defs>
+  <g clip-path="url(#card)" font-family="{font}" font-weight="600">
+    <rect width="340" height="384" fill="{background}"/>
+    <rect x="0.5" y="0.5" width="339" height="383" rx="23.5" fill="none" stroke="{border}"/>
+    <circle cx="{avatar_x}" cy="40" r="17" fill="{accent}"/>
+    <image x="{name_left}" y="24" width="32" height="32" href="{avatar_image}" preserveAspectRatio="xMidYMid slice" clip-path="url(#avatar)"/>
+    <text x="{name_x}" y="46" font-size="18" textLength="{name_width}" lengthAdjust="spacingAndGlyphs" fill="white" stroke="white" stroke-width="0.6" paint-order="stroke">{name}</text>
+    <g visibility="{username_visibility}">
+      <rect x="{username_left}" y="62" width="{username_box}" height="18" rx="9" fill="{username_fill}"/>
+      <text x="170" y="75" text-anchor="middle" font-size="11" textLength="{username_width}" lengthAdjust="spacingAndGlyphs" fill="{accent}" stroke="{accent}" stroke-width="0.2" paint-order="stroke">{username}</text>
+    </g>
+    <rect x="47.5" y="96" width="245" height="263" rx="16" fill="white"/>
+    <image x="59.5" y="107" width="16" height="16" href="{brand_image}"/>
+    <text x="82" y="119" font-size="12" textLength="{brand_width}" lengthAdjust="spacingAndGlyphs" fill="{ink}" stroke="{ink}" stroke-width="0.3" paint-order="stroke">{brand}</text>
+    <rect x="{badge_left}" y="107" width="{badge_box}" height="16" rx="8" fill="{badge_fill}"/>
+    <text x="{badge_x}" y="118" font-size="8" textLength="{badge_width}" lengthAdjust="spacingAndGlyphs" fill="{accent}" stroke="{accent}" stroke-width="0.2" paint-order="stroke">{badge}</text>
+    <path d="M59.5 132H280.5 M59.5 323H280.5" stroke="{divider}"/>
+    <path d="{qr}" transform="translate(82.5 140) scale({qr_scale})" fill="{ink}" shape-rendering="crispEdges"/>
+    <rect x="152" y="209.5" width="36" height="36" rx="12" fill="white"/>
+    <rect x="156" y="213.5" width="28" height="28" rx="8" fill="{accent}" visibility="{initial_visibility}"/>
+    <text x="170" y="233" text-anchor="middle" font-size="15" fill="white" visibility="{initial_visibility}">{initial}</text>
+    <image visibility="{logo_visibility}" x="156" y="213.5" width="28" height="28" href="{logo_image}" preserveAspectRatio="xMidYMid slice" clip-path="url(#logo)"/>
+    <rect x="{verified_left}" y="331" width="{verified_box}" height="18" rx="9" fill="{badge_fill}"/>
+    <circle cx="{seal_x}" cy="340" r="4.5" fill="{accent}"/>
+    <image x="{tick_x}" y="336" width="8" height="8" href="{tick_image}"/>
+    <text x="{verified_x}" y="343" font-size="9" textLength="{verified_width}" lengthAdjust="spacingAndGlyphs" fill="{accent}" stroke="{accent}" stroke-width="0.2" paint-order="stroke">{verified}</text>
+  </g>
+</svg>

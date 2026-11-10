@@ -4916,4 +4916,12 @@
   "setting.profile.chooseCover": "Choisir une bannière",
   "setting.profile.coverUploadFailed": "Impossible d’envoyer la bannière. Utilisez JPEG, PNG, GIF ou WebP, jusqu’à 10 Mo.",
   "setting.profile.removeCover": "Supprimer la bannière"
+,  "setting.account.qrProfile.centerLogo": "Logo central du QR",
+  "setting.account.qrProfile.chooseFromDevice": "Choisir depuis l'appareil",
+  "setting.account.qrProfile.resetDefaultLogo": "Réinitialiser le logo Mezon",
+  "setting.account.qrProfile.qrDownloaded": "Image QR téléchargée",
+  "setting.account.qrProfile.brandName": "MEZON",
+  "setting.account.qrProfile.verifiedByMezon": "VERIFIED BY MEZON",
+  "setting.account.qrProfile.errorExport": "Impossible d’exporter le QR du profil",
+  "setting.account.qrProfile.errorImage": "Impossible de charger l’image"
 }

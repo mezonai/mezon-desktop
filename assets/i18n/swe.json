@@ -4917,4 +4917,12 @@
   "setting.profile.chooseCover": "Välj omslagsbild",
   "setting.profile.coverUploadFailed": "Det gick inte att ladda upp omslaget. Använd JPEG, PNG, GIF eller WebP upp till 10 MB.",
   "setting.profile.removeCover": "Ta bort omslag"
+,  "setting.account.qrProfile.centerLogo": "QR-centerlogotyp",
+  "setting.account.qrProfile.chooseFromDevice": "Välj från enhet",
+  "setting.account.qrProfile.resetDefaultLogo": "Återställ Mezon-logotyp",
+  "setting.account.qrProfile.qrDownloaded": "QR-kodsbild nedladdad",
+  "setting.account.qrProfile.brandName": "MEZON",
+  "setting.account.qrProfile.verifiedByMezon": "VERIFIED BY MEZON",
+  "setting.account.qrProfile.errorExport": "Det gick inte att exportera profilens QR-kod",
+  "setting.account.qrProfile.errorImage": "Det gick inte att läsa in bilden"
 }
