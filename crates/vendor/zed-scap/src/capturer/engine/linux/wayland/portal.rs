@@ -267,6 +267,8 @@ pub struct ScreenCastPortal<'a> {
     token: String,
     cursor_mode: u32,
     requested_source_types: Option<u32>,
+    parent_window: String,
+    cancel: Option<Arc<AtomicBool>>,
 }
 
 impl<'a> ScreenCastPortal<'a> {
@@ -284,11 +286,23 @@ impl<'a> ScreenCastPortal<'a> {
             token,
             cursor_mode: 1,
             requested_source_types: None,
+            parent_window: String::new(),
+            cancel: None,
         }
     }
 
     pub fn source_types(mut self, types: Option<u32>) -> Self {
         self.requested_source_types = types;
+        self
+    }
+
+    pub fn parent_window(mut self, parent_window: Option<String>) -> Self {
+        self.parent_window = parent_window.unwrap_or_default();
+        self
+    }
+
+    pub fn cancel_on(mut self, cancel: Option<Arc<AtomicBool>>) -> Self {
+        self.cancel = cancel;
         self
     }
 
@@ -347,6 +361,7 @@ impl<'a> ScreenCastPortal<'a> {
         path: dbus::Path<'static>,
         iterations: usize,
         timeout: Duration,
+        cancel: Option<&AtomicBool>,
         response: Arc<Mutex<Response>>,
         request: F,
     ) -> Result<(), dbus::Error>
@@ -385,6 +400,14 @@ impl<'a> ScreenCastPortal<'a> {
         }
 
         for _ in 0..iterations {
+            if cancel.is_some_and(|cancel| cancel.load(std::sync::atomic::Ordering::Relaxed)) {
+                let _ = connection.remove_match(match_token);
+                return Err(dbus::Error::new_custom(
+                    "org.freedesktop.portal.Error.Cancelled",
+                    "screen share request cancelled",
+                ));
+            }
+
             connection.process(timeout)?;
 
             if got_response.load(std::sync::atomic::Ordering::Relaxed) {
@@ -408,6 +431,7 @@ impl<'a> ScreenCastPortal<'a> {
             request_path,
             100,
             Duration::from_millis(100),
+            self.cancel.as_deref(),
             response_clone,
             || {
                 self.proxy
@@ -456,6 +480,7 @@ impl<'a> ScreenCastPortal<'a> {
             request_path,
             1200, // Wait 2 min
             Duration::from_millis(100),
+            self.cancel.as_deref(),
             response_clone,
             || self.proxy.select_sources(session_handle, args),
         )
@@ -483,8 +508,9 @@ impl<'a> ScreenCastPortal<'a> {
             request_path,
             1200,
             Duration::from_millis(100),
+            self.cancel.as_deref(),
             response_clone,
-            || self.proxy.start(session_handle, "", args),
+            || self.proxy.start(session_handle, &self.parent_window, args),
         )
         .map_err(|error| LinCapError::new(format!("Start request failed: {error}")))?;
 

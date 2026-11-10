@@ -4910,6 +4910,14 @@
   "chat.activityStrip.hideAction": "Приховати панель закріплень і тем",
   "chat.activityStrip.hideConfirm.title": "Приховати панель закріплень і тем",
   "chat.activityStrip.hideConfirm.description": "Приховати панель закріплень і тем для цього каналу? Вона автоматично з’явиться знову після нового закріплення або нової теми.",
+  "setting.account.qrProfile.centerLogo": "Логотип у центрі QR",
+  "setting.account.qrProfile.chooseFromDevice": "Вибрати з пристрою",
+  "setting.account.qrProfile.resetDefaultLogo": "Скинути логотип Mezon",
+  "setting.account.qrProfile.qrDownloaded": "Зображення QR завантажено",
+  "setting.account.qrProfile.brandName": "MEZON",
+  "setting.account.qrProfile.verifiedByMezon": "VERIFIED BY MEZON",
+  "setting.account.qrProfile.errorExport": "Не вдалося експортувати QR-код профілю",
+  "setting.account.qrProfile.errorImage": "Не вдалося завантажити зображення",
   "setting.appearance.iconAnimations": "Анімація значків",
   "setting.appearance.iconAnimationsDescription": "Анімувати значки під час наведення вказівника на кнопки та рядки."
 }

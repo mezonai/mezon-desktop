@@ -2275,7 +2275,18 @@ impl AppApi {
         let upload_type = upload_attachment_type(&filetype);
         let raw_size = crate::transport_runtime::file_len(path.clone()).await?;
         let ingest = stream_while_uploading
-            && crate::file_ingest::is_ingest_candidate(&upload_name, &filetype, raw_size);
+            && crate::file_ingest::is_ingest_candidate(&upload_name, &filetype, raw_size)
+            && match crate::ingest_probe::hls_rejection_at(path.clone(), raw_size).await {
+                None => true,
+                Some(reason) => {
+                    tracing::info!(
+                        %reason,
+                        filename = %upload_name,
+                        "video has no HLS copy; uploading it straight to storage"
+                    );
+                    false
+                }
+            };
         let size = i32::try_from(raw_size)
             .map_err(|_| anyhow::anyhow!("attachment too large to upload: {raw_size} bytes"))?;
         let thumbnail_url = match thumbnail {

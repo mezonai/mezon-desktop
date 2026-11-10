@@ -2344,7 +2344,8 @@ impl ChannelList {
         cx: &mut Context<Self>,
     ) -> (bool, bool) {
         let mut app_channels_changed = false;
-        if let Some(app_channels) = extras.app_channels {
+        if let Some(mut app_channels) = extras.app_channels {
+            app_channels.retain(|app| !self.deleted_channel_ids.contains(&app.channel_id));
             app_channels_changed = self.app_channels_cache.get(&clan_id) != Some(&app_channels);
             self.app_channels_cache.insert(clan_id, app_channels);
         }
@@ -5260,6 +5261,12 @@ impl ChannelList {
             });
         }
         self.deleted_channel_ids.insert(channel_id);
+        let mut app_channels_changed = false;
+        if let Some(apps) = self.app_channels_cache.get_mut(&clan_id) {
+            let previous_len = apps.len();
+            apps.retain(|app| app.channel_id != channel_id);
+            app_channels_changed = apps.len() != previous_len;
+        }
         if !parent_id.is_zero() {
             self.deleted_channel_parents.insert(channel_id, parent_id);
         }
@@ -5292,7 +5299,7 @@ impl ChannelList {
                 self.invalidate_channel_index(clan_id);
             }
         }
-        let mut changed = removed || in_voice_changed;
+        let mut changed = removed || in_voice_changed || app_channels_changed;
         if self.active_channel_id == Some(channel_id) {
             let redirect = (!parent_id.is_zero())
                 .then_some(parent_id)
@@ -10621,6 +10628,43 @@ mod tests {
                 assert!(channels.is_locally_deleted(ChannelId(9)));
                 assert_eq!(channels.active_channel_id, Some(ChannelId(1)));
                 assert_eq!(channels.remembered_channel(ClanId(1)), Some(ChannelId(1)));
+            });
+        });
+    }
+
+    #[gpui::test]
+    fn deleting_channel_app_removes_only_its_channel_and_rejects_stale_extras(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        cx.update(|cx| {
+            let channels = init_channel_list_with_threads(cx);
+            channels.update(cx, |channels, cx| {
+                let app = |id| AppChannel {
+                    app_id: "same-app".into(),
+                    app_name: "App".into(),
+                    app_logo: None,
+                    app_url: "https://example.com".into(),
+                    channel_id: ChannelId(id),
+                };
+                let apps = vec![app(1), app(2)];
+                channels.app_channels_cache.insert(ClanId(1), apps.clone());
+                channels.app_channels_cache.insert(ClanId(2), vec![app(3)]);
+                channels.handle_event(
+                    &RealtimeEvent::ChannelDeleted(channel_deleted_event(1, 1, 0)),
+                    cx,
+                );
+                channels.apply_local_delete(ClanId(1), ChannelId(1), ChannelId(0), cx);
+                assert_eq!(channels.app_channels_for_clan(ClanId(1)), &[app(2)]);
+                assert_eq!(channels.app_channels_for_clan(ClanId(2)), &[app(3)]);
+                channels.apply_clan_extras(
+                    ClanId(1),
+                    ClanExtras {
+                        voice_map: None,
+                        app_channels: Some(apps),
+                    },
+                    cx,
+                );
+                assert_eq!(channels.app_channels_for_clan(ClanId(1)), &[app(2)]);
             });
         });
     }

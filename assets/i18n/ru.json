@@ -5153,6 +5153,14 @@
   "chat.activityStrip.hideAction": "Скрыть панель закреплений и тем",
   "chat.activityStrip.hideConfirm.title": "Скрыть панель закреплений и тем",
   "chat.activityStrip.hideConfirm.description": "Скрыть панель закреплений и тем для этого канала? Она автоматически появится снова при новом закреплении или новой теме.",
+  "setting.account.qrProfile.centerLogo": "Логотип в центре QR",
+  "setting.account.qrProfile.chooseFromDevice": "Выбрать с устройства",
+  "setting.account.qrProfile.resetDefaultLogo": "Сбросить логотип Mezon",
+  "setting.account.qrProfile.qrDownloaded": "Изображение QR скачано",
+  "setting.account.qrProfile.brandName": "MEZON",
+  "setting.account.qrProfile.verifiedByMezon": "VERIFIED BY MEZON",
+  "setting.account.qrProfile.errorExport": "Не удалось экспортировать QR-код профиля",
+  "setting.account.qrProfile.errorImage": "Не удалось загрузить изображение",
   "setting.appearance.iconAnimations": "Анимация значков",
   "setting.appearance.iconAnimationsDescription": "Анимировать значки при наведении указателя на кнопки и строки."
 }

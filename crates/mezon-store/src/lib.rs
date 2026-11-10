@@ -107,7 +107,7 @@ pub use audit_log::{
     AuditLogState, AuditLogStateView, AuditLogStore, audit_action_api_value, audit_action_i18n_key,
     audit_action_index_for_api_log,
 };
-pub use auto_update::{AutoUpdateStatus, AutoUpdateStore};
+pub use auto_update::{AutoUpdateStatus, AutoUpdateStore, take_start_hidden_marker};
 pub use badge::BadgeService;
 pub use banned_users::{
     BAN_FOR_1_HOUR_SEC, BAN_FOR_3_HOURS_SEC, BAN_FOR_8_HOURS_SEC, BAN_FOR_15_MINUTES_SEC,
@@ -561,6 +561,8 @@ pub struct Settings {
     pub stream_default_quality: StreamQuality,
     #[serde(default)]
     pub voice_user_volumes: HashMap<String, u16>,
+    #[serde(default)]
+    pub last_download_dir: Option<std::path::PathBuf>,
 }
 
 impl Default for Settings {
@@ -600,6 +602,7 @@ impl Default for Settings {
             grammar_correction_enabled: false,
             stream_default_quality: StreamQuality::default(),
             voice_user_volumes: HashMap::new(),
+            last_download_dir: None,
         }
     }
 }

@@ -4911,6 +4911,14 @@
   "screenShare.modeTextDescription": "Văn bản và slide rõ nét, ít tốn tài nguyên hơn.",
   "screenShare.modeVideo": "Video",
   "screenShare.modeVideoDescription": "Video mượt hơn; có thể giảm độ nét khi mạng chậm.",
+  "setting.account.qrProfile.centerLogo": "Logo ở giữa QR",
+  "setting.account.qrProfile.chooseFromDevice": "Chọn ảnh từ thiết bị",
+  "setting.account.qrProfile.resetDefaultLogo": "Đặt lại logo Mezon",
+  "setting.account.qrProfile.qrDownloaded": "Đã tải ảnh QR về máy",
+  "setting.account.qrProfile.brandName": "MEZON",
+  "setting.account.qrProfile.verifiedByMezon": "ĐƯỢC MEZON XÁC THỰC",
+  "setting.account.qrProfile.errorExport": "Không thể xuất QR hồ sơ",
+  "setting.account.qrProfile.errorImage": "Không thể đọc ảnh",
   "setting.appearance.iconAnimations": "Chuyển động biểu tượng",
   "setting.appearance.iconAnimationsDescription": "Tạo chuyển động cho biểu tượng khi rê chuột lên nút và các hàng."
 }

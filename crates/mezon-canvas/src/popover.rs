@@ -263,8 +263,8 @@ fn render_header(
     let close_btn = Button::new("canvas-close-btn")
         .icon(
             Icon::new(IconName::Close)
-                .size(px(16.))
-                .text_color(tokens.text_theme_primary_hover),
+                .size_4()
+                .text_color(tokens.text_theme_primary),
         )
         .ghost()
         .with_size(Size::Small)

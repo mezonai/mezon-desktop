@@ -184,6 +184,13 @@ impl InputState {
         self
     }
 
+    pub fn set_bg(&mut self, bg: Option<Hsla>, cx: &mut Context<Self>) {
+        if self.bg_override != bg {
+            self.bg_override = bg;
+            cx.notify();
+        }
+    }
+
     pub fn text_color(mut self, color: impl Into<Hsla>) -> Self {
         self.text_color_override = Some(color.into());
         self

@@ -8,6 +8,7 @@ use crate::components::primitives::{Icon, IconName};
 
 use crate::image_cache::LruImageCache;
 use crate::theme::{ActiveTheme, Theme};
+use crate::util::theme::theme_is_light;
 use gpui::{
     Context, Entity, FontWeight, ObjectFit, Render, SharedString, Subscription, Task, Window, div,
     img, prelude::*, px, radians, rgb,
@@ -201,6 +202,8 @@ impl InputBar {
         target: &ReplyTarget,
         reply_clear: ReplyClearSource,
     ) -> impl IntoElement {
+        let surface = theme.tokens.bg_surface;
+
         div()
             .id("reply-preview-bar")
             .flex()
@@ -212,6 +215,12 @@ impl InputBar {
             .rounded_tl_lg()
             .rounded_tr_lg()
             .bg(theme.tokens.theme_setting_nav)
+            .when(theme_is_light(theme), |bar| {
+                bar.bg(surface.blend(theme.tokens.bg_input_secondary))
+                    .border_t_1()
+                    .border_x_1()
+                    .border_color(theme.tokens.border_primary)
+            })
             .text_size(px(14.))
             .child(
                 div()

@@ -4911,6 +4911,14 @@
   "chat.activityStrip.hideAction": "Ocultar barra de fixados e tópicos",
   "chat.activityStrip.hideConfirm.title": "Ocultar barra de fixados e tópicos",
   "chat.activityStrip.hideConfirm.description": "Ocultar a barra de fixados e tópicos deste canal? Ela reaparecerá automaticamente quando houver um novo item fixado ou tópico.",
+  "setting.account.qrProfile.centerLogo": "Logotipo central do QR",
+  "setting.account.qrProfile.chooseFromDevice": "Escolher do dispositivo",
+  "setting.account.qrProfile.resetDefaultLogo": "Redefinir logotipo da Mezon",
+  "setting.account.qrProfile.qrDownloaded": "Imagem do QR baixada",
+  "setting.account.qrProfile.brandName": "MEZON",
+  "setting.account.qrProfile.verifiedByMezon": "VERIFIED BY MEZON",
+  "setting.account.qrProfile.errorExport": "Não foi possível exportar o QR do perfil",
+  "setting.account.qrProfile.errorImage": "Não foi possível carregar a imagem",
   "setting.appearance.iconAnimations": "Animações de ícones",
   "setting.appearance.iconAnimationsDescription": "Animar os ícones ao passar o mouse sobre botões e linhas."
 }
