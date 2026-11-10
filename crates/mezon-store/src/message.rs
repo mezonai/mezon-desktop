@@ -773,6 +773,35 @@ pub struct TokenTransaction {
 }
 
 #[derive(Debug, Clone)]
+pub struct MessageLocation {
+    pub latitude: f64,
+    pub longitude: f64,
+    pub maps_url: SharedString,
+}
+
+fn location_from_content(content: &str) -> Option<MessageLocation> {
+    let parsed = mezon_client::transport::parse_location_from_text(
+        mezon_client::transport::LOCATION_CODE,
+        content,
+    )?;
+    Some(MessageLocation {
+        latitude: parsed.latitude,
+        longitude: parsed.longitude,
+        maps_url: parsed.maps_url.into(),
+    })
+}
+
+pub fn build_message_location(code: MessageCode, content: &str) -> Option<MessageLocation> {
+    if code == MessageCode::Location {
+        return location_from_content(content);
+    }
+    if mezon_client::transport::is_standalone_google_maps_content(content) {
+        return location_from_content(content);
+    }
+    None
+}
+
+#[derive(Debug, Clone)]
 pub struct Message {
     pub id: MessageId,
     /// The bucket this row lives in: a topic's id for a topic reply, the
@@ -808,6 +837,7 @@ pub struct Message {
     pub ogp: Option<Box<OgpPreview>>,
     pub poll: Option<Box<PollData>>,
     pub call_log: Option<CallLog>,
+    pub location: Option<MessageLocation>,
     pub embeds: Arc<[Embed]>,
     pub components: Arc<[MessageComponentRow]>,
     pub is_card: bool,
@@ -2114,6 +2144,7 @@ impl Message {
             ogp: None,
             poll: None,
             call_log: None,
+            location: None,
             embeds: Vec::new().into(),
             components: Vec::new().into(),
             is_card: false,
@@ -2153,6 +2184,21 @@ impl Message {
 
     pub fn is_sent_by(&self, user_id: &str) -> bool {
         !user_id.is_empty() && self.sender_id == user_id
+    }
+
+    pub fn display_location(&self) -> Option<MessageLocation> {
+        if let Some(location) = &self.location {
+            return Some(location.clone());
+        }
+        build_message_location(self.code, &self.content).or_else(|| {
+            self.raw_content
+                .as_deref()
+                .and_then(|raw| build_message_location(self.code, raw))
+        })
+    }
+
+    pub fn shows_location_card(&self) -> bool {
+        self.display_location().is_some()
     }
 
     pub fn message_ref(&self) -> MessageRef {
@@ -2286,6 +2332,11 @@ impl Message {
 
     pub fn with_call_log(mut self, call_log: Option<CallLog>) -> Self {
         self.call_log = call_log;
+        self
+    }
+
+    pub fn with_location(mut self, location: Option<MessageLocation>) -> Self {
+        self.location = location;
         self
     }
 

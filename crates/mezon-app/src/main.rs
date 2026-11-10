@@ -1146,11 +1146,6 @@ fn open_main_window(
         std::sync::Arc::new(mezon_native::notifications::notifications_permitted),
         cx,
     );
-    mezon_store::PlatformStore::set_current_location(
-        &platform_store,
-        std::sync::Arc::new(mezon_native::location::current_location),
-        cx,
-    );
 
     {
         let (click_tx, mut click_rx) =

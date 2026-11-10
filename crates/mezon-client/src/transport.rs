@@ -579,6 +579,133 @@ pub fn build_location_content_json(latitude: f64, longitude: f64) -> String {
     .to_string()
 }
 
+#[derive(Debug, Clone, PartialEq)]
+pub struct ParsedLocation {
+    pub latitude: f64,
+    pub longitude: f64,
+    pub maps_url: String,
+}
+
+pub fn location_message_plain_text(content: &str) -> String {
+    let trimmed = content.trim();
+    if !trimmed.starts_with('{') {
+        return trimmed.to_string();
+    }
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(trimmed) else {
+        return trimmed.to_string();
+    };
+    value
+        .get("t")
+        .and_then(|t| t.as_str())
+        .filter(|t| !t.is_empty())
+        .map(str::to_string)
+        .unwrap_or_else(|| trimmed.to_string())
+}
+
+pub fn parse_google_maps_coordinates(text: &str) -> Option<(f64, f64)> {
+    let q_idx = text.find("q=")?;
+    let rest = &text[q_idx + 2..];
+    let end = rest
+        .find('&')
+        .or_else(|| rest.find(' '))
+        .unwrap_or(rest.len());
+    let coords = &rest[..end];
+    let (lat_s, lon_s) = coords.split_once(',')?;
+    let lat = lat_s.parse::<f64>().ok()?;
+    let lon = lon_s.parse::<f64>().ok()?;
+    (lat.is_finite() && lon.is_finite()).then_some((lat, lon))
+}
+
+pub fn is_standalone_google_maps_content(content: &str) -> bool {
+    let text = location_message_plain_text(content);
+    text.contains("google.com/maps") && parse_google_maps_coordinates(&text).is_some()
+}
+
+pub fn parse_location_from_text(code: i32, content: &str) -> Option<ParsedLocation> {
+    if code != LOCATION_CODE {
+        return None;
+    }
+    let text = location_message_plain_text(content);
+    if text.is_empty() {
+        return None;
+    }
+    let (latitude, longitude) = parse_google_maps_coordinates(&text)?;
+    let maps_url = if text.contains("google.com/maps") {
+        text
+    } else {
+        build_location_maps_link(latitude, longitude)
+    };
+    Some(ParsedLocation {
+        latitude,
+        longitude,
+        maps_url,
+    })
+}
+
+pub fn lat_lon_map_tile(latitude: f64, longitude: f64, zoom: u32) -> (u32, u32) {
+    let zoom = zoom.clamp(1, 19);
+    let scale = 2_f64.powi(zoom as i32);
+    let x = ((longitude + 180.0) / 360.0 * scale).floor() as u32;
+    let lat_rad = latitude.to_radians();
+    let y = ((1.0 - (lat_rad.tan() + 1.0 / lat_rad.cos()).ln() / std::f64::consts::PI) / 2.0
+        * scale)
+        .floor() as u32;
+    (x, y)
+}
+
+pub const LOCATION_MAP_PREVIEW_ZOOM: u32 = 15;
+
+pub fn location_map_osm_tile_url(latitude: f64, longitude: f64, zoom: u32) -> String {
+    let (x, y) = lat_lon_map_tile(latitude, longitude, zoom);
+    format!("https://tile.openstreetmap.org/{zoom}/{x}/{y}.png")
+}
+
+const MAP_TILE_PX: f64 = 256.0;
+
+pub fn location_map_world_pixel(latitude: f64, longitude: f64, zoom: u32) -> (f64, f64) {
+    let zoom = zoom.clamp(1, 19);
+    let scale = 2_f64.powi(zoom as i32);
+    let x = (longitude + 180.0) / 360.0 * scale * MAP_TILE_PX;
+    let lat_rad = latitude.to_radians();
+    let y = (1.0 - (lat_rad.tan() + 1.0 / lat_rad.cos()).ln() / std::f64::consts::PI) / 2.0
+        * scale
+        * MAP_TILE_PX;
+    (x, y)
+}
+
+pub struct LocationMapPreview {
+    pub tile_urls: [[String; 3]; 3],
+    pub origin_left_px: f32,
+    pub origin_top_px: f32,
+}
+
+pub fn location_map_preview(
+    latitude: f64,
+    longitude: f64,
+    viewport_width: f32,
+    viewport_height: f32,
+) -> LocationMapPreview {
+    let zoom = LOCATION_MAP_PREVIEW_ZOOM;
+    let (world_x, world_y) = location_map_world_pixel(latitude, longitude, zoom);
+    let (center_x, center_y) = lat_lon_map_tile(latitude, longitude, zoom);
+    let origin_x = center_x.saturating_sub(1);
+    let origin_y = center_y.saturating_sub(1);
+    let origin_world_x = origin_x as f64 * MAP_TILE_PX;
+    let origin_world_y = origin_y as f64 * MAP_TILE_PX;
+    let tile_urls = [0, 1, 2].map(|row| {
+        let y = origin_y.saturating_add(row);
+        [0, 1, 2].map(|col| {
+            let x = origin_x.saturating_add(col);
+            format!("https://tile.openstreetmap.org/{zoom}/{x}/{y}.png")
+        })
+    });
+    LocationMapPreview {
+        tile_urls,
+        origin_left_px: viewport_width * 0.5 - (world_x - origin_world_x) as f32,
+        origin_top_px: viewport_height * 0.5 - (world_y - origin_world_y) as f32,
+    }
+}
+
 pub const QUICK_MENU_TYPE_FLASH: i32 = 1;
 pub const QUICK_MENU_TYPE_QUICK: i32 = 2;
 const CHANNEL_TYPE_MEZON_VOICE: i32 = 10;
@@ -13584,6 +13711,43 @@ mod tests {
         assert!(link.contains("10.5,106.2"));
         assert_eq!(value["lk"][0]["s"], 0);
         assert_eq!(value["mk"][0]["type"], "lk");
+    }
+
+    #[test]
+    fn parse_location_from_maps_url() {
+        let url = build_location_maps_link(18.6734, 105.6923);
+        let parsed = parse_location_from_text(LOCATION_CODE, &url).expect("location");
+        assert!((parsed.latitude - 18.6734).abs() < f64::EPSILON);
+        assert!((parsed.longitude - 105.6923).abs() < f64::EPSILON);
+        assert_eq!(parsed.maps_url, url);
+    }
+
+    #[test]
+    fn location_map_preview_fills_viewport_and_centers_pin() {
+        let preview = location_map_preview(18.6734, 105.6923, 400., 150.);
+        let (world_x, world_y) =
+            location_map_world_pixel(18.6734, 105.6923, LOCATION_MAP_PREVIEW_ZOOM);
+        let (tile_x, tile_y) = lat_lon_map_tile(18.6734, 105.6923, LOCATION_MAP_PREVIEW_ZOOM);
+        let origin_x = tile_x.saturating_sub(1) as f64 * MAP_TILE_PX;
+        let origin_y = tile_y.saturating_sub(1) as f64 * MAP_TILE_PX;
+        let pin_x = preview.origin_left_px + (world_x - origin_x) as f32;
+        let pin_y = preview.origin_top_px + (world_y - origin_y) as f32;
+        assert!((pin_x - 200.).abs() < 0.01);
+        assert!((pin_y - 75.).abs() < 0.01);
+        assert!(preview.origin_left_px <= 0.);
+        assert!(preview.origin_top_px <= 0.);
+        assert!(preview.origin_left_px + (MAP_TILE_PX as f32 * 3.) >= 400.);
+        assert!(preview.origin_top_px + (MAP_TILE_PX as f32 * 3.) >= 150.);
+        assert!(preview.tile_urls[1][1].contains(&format!(
+            "/{LOCATION_MAP_PREVIEW_ZOOM}/{tile_x}/{tile_y}.png"
+        )));
+    }
+
+    fn parse_location_from_content_json() {
+        let json = build_location_content_json(10.5, 106.2);
+        let parsed = parse_location_from_text(LOCATION_CODE, &json).expect("location");
+        assert!((parsed.latitude - 10.5).abs() < f64::EPSILON);
+        assert!((parsed.longitude - 106.2).abs() < f64::EPSILON);
     }
 
     #[test]

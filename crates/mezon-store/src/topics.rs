@@ -4,7 +4,7 @@ use std::time::{Duration, Instant};
 use futures::{StreamExt, stream};
 use gpui::{App, AppContext, Context, Entity, EventEmitter, Global, Subscription, Task};
 use mezon_client::transport::{
-    LOCATION_CODE, MESSAGE_BUZZ_CODE, OutgoingMessageFlags, message_sender_name, prioritize_avatar,
+    MESSAGE_BUZZ_CODE, OutgoingMessageFlags, message_sender_name, prioritize_avatar,
 };
 use mezon_client::{
     AppApi, AttachmentUploadOutcome, ConnectionStatus, RealtimeEvent, TopicDiscussion, UploadFile,
@@ -1170,17 +1170,6 @@ impl TopicsStore {
             cx,
         );
         MessagesStore::global(cx).update(cx, |store, cx| store.play_buzz_sound(cx));
-    }
-
-    pub fn submit_location(&mut self, latitude: f64, longitude: f64, cx: &mut Context<Self>) {
-        let link = mezon_client::transport::build_location_maps_link(latitude, longitude);
-        self.submit_reply_with_code(
-            link,
-            OutgoingContent::default(),
-            Vec::new(),
-            LOCATION_CODE,
-            cx,
-        );
     }
 
     fn submit_reply_with_code(

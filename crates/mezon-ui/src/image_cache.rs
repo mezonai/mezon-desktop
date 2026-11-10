@@ -172,6 +172,13 @@ impl Global for SharedRoleIconPreviewCache {}
 struct SharedSpriteSheetCache(Entity<LruImageCache>);
 impl Global for SharedSpriteSheetCache {}
 
+const LOCATION_MAP_TILE_MAX_PX: u32 = 512;
+const LOCATION_MAP_FETCH_MAX_BYTES: usize = 512 * 1024;
+const LOCATION_MAP_USER_AGENT: &str = "MezonDesktop/1.0 (+https://mezon.ai; location-map)";
+const LOCATION_MAP_TIMELINE_CACHE_CAPACITY: usize = 24;
+const LOCATION_MAP_TIMELINE_CACHE_BYTES: u64 = 4 * 1024 * 1024;
+const LOCATION_MAP_ENTRY_MAX_BYTES: u64 = 512 * 1024;
+
 const OGP_TIMELINE_CACHE_CAPACITY: usize = 12;
 const OGP_TIMELINE_CACHE_BYTES: u64 = 6 * 1024 * 1024;
 const OGP_AUX_CACHE_CAPACITY: usize = 4;
@@ -180,6 +187,18 @@ const OGP_ENTRY_MAX_BYTES: u64 = 1024 * 1024;
 const SOCIAL_THUMB_CACHE_CAPACITY: usize = 12;
 const SOCIAL_THUMB_CACHE_BYTES: u64 = 12 * 1024 * 1024;
 const SOCIAL_THUMB_ENTRY_MAX_BYTES: u64 = 3 * 1024 * 1024 / 2;
+
+pub fn location_map_timeline_cache(label: &'static str, cx: &mut App) -> Entity<LruImageCache> {
+    cx.new(|cx| {
+        LruImageCache::location_map(
+            label,
+            LOCATION_MAP_TIMELINE_CACHE_CAPACITY,
+            LOCATION_MAP_TIMELINE_CACHE_BYTES,
+            LOCATION_MAP_ENTRY_MAX_BYTES,
+            cx,
+        )
+    })
+}
 
 pub fn ogp_timeline_cache(label: &'static str, cx: &mut App) -> Entity<LruImageCache> {
     ogp_preview_cache(
@@ -700,6 +719,7 @@ enum LoaderKind {
     /// animate, but downscaled to [`VIEWER_ANIMATION_MAX_PX`] and bounded by an
     /// in-decode byte budget.
     Viewer,
+    LocationMap,
 }
 
 pub struct LruImageCache {
@@ -897,6 +917,23 @@ impl LruImageCache {
         Self::with_loader(
             label,
             LoaderKind::OgpThumbnail,
+            max_items,
+            max_bytes,
+            max_entry_bytes,
+            cx,
+        )
+    }
+
+    pub fn location_map(
+        label: &'static str,
+        max_items: usize,
+        max_bytes: u64,
+        max_entry_bytes: u64,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        Self::with_loader(
+            label,
+            LoaderKind::LocationMap,
             max_items,
             max_bytes,
             max_entry_bytes,
@@ -1363,6 +1400,9 @@ impl LruImageCache {
             }
             LoaderKind::Viewer => {
                 AssetLogger::<ViewerImageLoader>::load(resource.clone(), cx).boxed()
+            }
+            LoaderKind::LocationMap => {
+                AssetLogger::<LocationMapLoader>::load(resource.clone(), cx).boxed()
             }
         };
         let task = cx.background_executor().spawn(loader).shared();
@@ -2254,6 +2294,71 @@ fn load_scaled_aspect(
                 .render_single_frame(&bytes, 1.0)
                 .map_err(Into::into)
         }
+    }
+}
+
+async fn fetch_location_map_tile_bytes(
+    client: &Arc<dyn gpui::http_client::HttpClient>,
+    uri: &str,
+) -> Result<Vec<u8>, ImageCacheError> {
+    use anyhow::Context as _;
+    use gpui::http_client::{AsyncBody, HttpRequestExt, RedirectPolicy};
+    let request = gpui::http_client::http::Request::builder()
+        .uri(uri)
+        .header("User-Agent", LOCATION_MAP_USER_AGENT)
+        .follow_redirects(RedirectPolicy::FollowAll)
+        .body(AsyncBody::empty())
+        .map_err(|e| ImageCacheError::Other(Arc::new(e.into())))?;
+    let mut response = client
+        .send(request)
+        .await
+        .with_context(|| format!("loading location map tile from {uri:?}"))?;
+    let bytes = read_body_limited(&mut response, LOCATION_MAP_FETCH_MAX_BYTES).await?;
+    if !response.status().is_success() {
+        return Err(ImageCacheError::BadStatus {
+            uri: uri.to_string().into(),
+            status: response.status(),
+            body: String::from_utf8_lossy(&bytes).into_owned(),
+        });
+    }
+    Ok(bytes)
+}
+
+fn load_location_map_tile(
+    source: Resource,
+    cx: &mut App,
+) -> impl Future<Output = Result<Arc<RenderImage>, ImageCacheError>> + Send + 'static {
+    let client = cx.http_client();
+    async move {
+        let _permit = acquire_image_pipeline_permit().await?;
+        let Resource::Uri(uri) = source else {
+            return Err(ImageCacheError::Asset(
+                "location map tiles need an http url".into(),
+            ));
+        };
+        let bytes = fetch_location_map_tile_bytes(&client, uri.as_ref()).await?;
+        let decoded = match decode_scaled_dynamic(&bytes, LOCATION_MAP_TILE_MAX_PX) {
+            Some(image) => image,
+            None => image::load_from_memory(&bytes)?,
+        };
+        Ok(Arc::new(RenderImage::new(vec![downscaled_static_frame(
+            decoded,
+            LOCATION_MAP_TILE_MAX_PX,
+        )])))
+    }
+}
+
+pub enum LocationMapLoader {}
+
+impl Asset for LocationMapLoader {
+    type Source = Resource;
+    type Output = Result<Arc<RenderImage>, ImageCacheError>;
+
+    fn load(
+        source: Self::Source,
+        cx: &mut App,
+    ) -> impl Future<Output = Self::Output> + Send + 'static {
+        load_location_map_tile(source, cx)
     }
 }
 
