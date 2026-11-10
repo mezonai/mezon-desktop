@@ -1,5 +1,6 @@
 mod attachments;
 mod recorder;
+mod rich_paste;
 mod text_field;
 
 use std::any::Any;
@@ -93,6 +94,7 @@ actions!(
     [
         MentionAccept,
         MentionDismiss,
+        PastePlainText,
         ToggleAnonymous,
         OpenMessageBuzz
     ]
@@ -102,6 +104,8 @@ pub fn init(cx: &mut App) {
     cx.bind_keys([
         KeyBinding::new("tab", MentionAccept, Some(KEY_CONTEXT)),
         KeyBinding::new("escape", MentionDismiss, Some(KEY_CONTEXT)),
+        KeyBinding::new("cmd-shift-v", PastePlainText, Some(KEY_CONTEXT)),
+        KeyBinding::new("ctrl-shift-v", PastePlainText, Some(KEY_CONTEXT)),
         KeyBinding::new("cmd-shift-enter", ToggleAnonymous, None),
         KeyBinding::new("ctrl-shift-enter", ToggleAnonymous, None),
         KeyBinding::new("ctrl-g", OpenMessageBuzz, None),
@@ -1778,8 +1782,9 @@ impl MentionInput {
                 (Ok(pending), Some(clipboard))
                     if pending.is_empty() && this.bind_generation == generation =>
                 {
-                    this.input
-                        .update(cx, |input, cx| input.paste_images_or_text(clipboard, cx));
+                    this.input.update(cx, |input, cx| {
+                        input.paste_images_or_text(clipboard, false, cx)
+                    });
                 }
                 (staged, _) => {
                     this.add_staged(generation, staged, window, cx);

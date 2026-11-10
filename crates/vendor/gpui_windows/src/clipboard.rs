@@ -28,6 +28,9 @@ static CLIPBOARD_HASH_FORMAT: LazyLock<u32> =
     LazyLock::new(|| register_clipboard_format(windows::core::w!("GPUI internal text hash")));
 static CLIPBOARD_METADATA_FORMAT: LazyLock<u32> =
     LazyLock::new(|| register_clipboard_format(windows::core::w!("GPUI internal metadata")));
+// mezon vendor edit: clipboard html for rich paste.
+static CLIPBOARD_HTML_FORMAT: LazyLock<u32> =
+    LazyLock::new(|| register_clipboard_format(windows::core::w!("HTML Format")));
 static CLIPBOARD_SVG_FORMAT: LazyLock<u32> =
     LazyLock::new(|| register_clipboard_format(windows::core::w!("image/svg+xml")));
 static CLIPBOARD_GIF_FORMAT: LazyLock<u32> =
@@ -258,7 +261,21 @@ fn convert_to_dib(bytes: &[u8], format: ImageFormat) -> Option<Vec<u8>> {
 fn read_string() -> Option<ClipboardEntry> {
     let text = get_clipboard_string(CF_UNICODETEXT.0 as u32)?;
     let metadata = read_clipboard_metadata(&text);
-    Some(ClipboardEntry::String(ClipboardString { text, metadata }))
+    // mezon vendor edit: clipboard html for rich paste.
+    let html = read_clipboard_html();
+    Some(ClipboardEntry::String(ClipboardString {
+        text,
+        metadata,
+        html,
+    }))
+}
+
+// mezon vendor edit: clipboard html for rich paste.
+fn read_clipboard_html() -> Option<String> {
+    let locked = get_clipboard_data(*CLIPBOARD_HTML_FORMAT)?;
+    let bytes = locked.as_bytes();
+    let end = bytes.iter().position(|&b| b == 0).unwrap_or(bytes.len());
+    String::from_utf8(bytes[..end].to_vec()).ok()
 }
 
 fn read_clipboard_metadata(text: &str) -> Option<String> {

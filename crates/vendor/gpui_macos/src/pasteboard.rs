@@ -137,7 +137,12 @@ impl Pasteboard {
                     }
                 });
 
-            Some(ClipboardEntry::String(ClipboardString { text, metadata }))
+            // mezon vendor edit: clipboard html for rich paste.
+            Some(ClipboardEntry::String(ClipboardString {
+                text,
+                metadata,
+                html: None,
+            }))
         }
     }
 
@@ -178,9 +183,11 @@ impl Pasteboard {
                     //
                     // Note how `any_images` is always `false`. We should fix that, but that's orthogonal to the refactor.
 
+                    // mezon vendor edit: clipboard html for rich paste.
                     let mut combined = ClipboardString {
                         text: String::new(),
                         metadata: None,
+                        html: None,
                     };
 
                     for entry in item.entries {

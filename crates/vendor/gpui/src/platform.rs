@@ -2218,6 +2218,8 @@ impl ClipboardItem {
             entries: vec![ClipboardEntry::String(ClipboardString {
                 text,
                 metadata: Some(metadata),
+                // mezon vendor edit: clipboard html for rich paste.
+                html: None,
             })],
         }
     }
@@ -2244,7 +2246,8 @@ impl ClipboardItem {
         let mut answer = String::new();
 
         for entry in self.entries.iter() {
-            if let ClipboardEntry::String(ClipboardString { text, metadata: _ }) = entry {
+            // mezon vendor edit: clipboard html for rich paste.
+            if let ClipboardEntry::String(ClipboardString { text, .. }) = entry {
                 answer.push_str(text);
             }
         }
@@ -2551,6 +2554,9 @@ pub struct ClipboardString {
     pub text: String,
     /// Optional metadata associated with this clipboard string.
     pub metadata: Option<String>,
+    // mezon vendor edit: clipboard html for rich paste.
+    /// Optional HTML representation of this clipboard string.
+    pub html: Option<String>,
 }
 
 impl ClipboardString {
@@ -2559,7 +2565,22 @@ impl ClipboardString {
         Self {
             text,
             metadata: None,
+            // mezon vendor edit: clipboard html for rich paste.
+            html: None,
         }
+    }
+
+    // mezon vendor edit: clipboard html for rich paste.
+    #[allow(missing_docs)]
+    pub fn with_html(mut self, html: Option<String>) -> Self {
+        self.html = html;
+        self
+    }
+
+    // mezon vendor edit: clipboard html for rich paste.
+    #[allow(missing_docs)]
+    pub fn html(&self) -> Option<&str> {
+        self.html.as_deref()
     }
 
     /// Return a new clipboard item with the metadata replaced by the given metadata,
@@ -2603,6 +2624,8 @@ impl From<String> for ClipboardString {
         Self {
             text: value,
             metadata: None,
+            // mezon vendor edit: clipboard html for rich paste.
+            html: None,
         }
     }
 }

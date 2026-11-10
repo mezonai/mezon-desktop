@@ -79,7 +79,8 @@ x11rb::atom_manager! {
         TEXT,
         TEXT_MIME_UNKNOWN: b"text/plain",
 
-        // HTML: b"text/html",
+        // mezon vendor edit: clipboard html for rich paste.
+        HTML: b"text/html",
         // mezon vendor edit: clipboard file lists for paste.
         URI_LIST: b"text/uri-list",
         GNOME_COPIED_FILES: b"x-special/gnome-copied-files",
@@ -1251,6 +1252,25 @@ impl Clipboard {
         } else {
             String::from_utf8(result.bytes).map_err(|_| Error::ConversionFailure)?
         };
+        // mezon vendor edit: clipboard html for rich paste.
+        if matches!(selection, ClipboardKind::Clipboard)
+            && let Ok(html_data) = self.inner.read(&[self.inner.atoms.HTML], selection)
+            && let Some(html) = if let Some(rest) = html_data.bytes.strip_prefix(&[0xFF, 0xFE]) {
+                let units: Vec<u16> = rest
+                    .chunks_exact(2)
+                    .map(|c| u16::from_le_bytes([c[0], c[1]]))
+                    .collect();
+                String::from_utf16(&units).ok()
+            } else {
+                String::from_utf8(html_data.bytes).ok()
+            }
+        {
+            return Ok(ClipboardItem {
+                entries: vec![gpui::ClipboardEntry::String(
+                    gpui::ClipboardString::new(text).with_html(Some(html)),
+                )],
+            });
+        }
         Ok(ClipboardItem::new_string(text))
     }
 

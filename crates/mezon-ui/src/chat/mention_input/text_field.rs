@@ -19,7 +19,7 @@ use gpui::{
 };
 use unicode_segmentation::UnicodeSegmentation;
 
-use super::{CopiedMention, copied_mentions};
+use super::{CopiedMention, PastePlainText, copied_mentions};
 use crate::components::primitives::text_actions::{
     Backspace, Copy, Cut, Delete, DeleteToLineEnd, DeleteToLineStart, DeleteToNextWordEnd,
     DeleteToPreviousWordStart, Down, End, Enter, Home, Left, MoveToDocEnd, MoveToDocStart,
@@ -817,24 +817,40 @@ impl MentionInputState {
 
     fn paste(&mut self, _: &Paste, window: &mut Window, cx: &mut Context<Self>) {
         mezon_widgets::clipboard::read_then(self, window, cx, |this, item, _window, cx| {
-            this.apply_paste(item, cx)
+            this.apply_paste(item, false, cx)
         });
     }
 
-    fn apply_paste(&mut self, item: ClipboardItem, cx: &mut Context<Self>) {
+    fn paste_plain_text(
+        &mut self,
+        _: &PastePlainText,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        mezon_widgets::clipboard::read_then(self, window, cx, |this, item, _window, cx| {
+            this.apply_paste(item, true, cx)
+        });
+    }
+
+    fn apply_paste(&mut self, item: ClipboardItem, plain: bool, cx: &mut Context<Self>) {
         let paths = if self.accepts_files {
             copied_paths(&item)
         } else {
             Vec::new()
         };
         if paths.is_empty() {
-            self.paste_images_or_text(item, cx);
+            self.paste_images_or_text(item, plain, cx);
         } else {
             cx.emit(MentionFieldEvent::PastePaths(paths, item));
         }
     }
 
-    pub(crate) fn paste_images_or_text(&mut self, item: ClipboardItem, cx: &mut Context<Self>) {
+    pub(crate) fn paste_images_or_text(
+        &mut self,
+        item: ClipboardItem,
+        plain: bool,
+        cx: &mut Context<Self>,
+    ) {
         let images = if self.accepts_files {
             copied_images(&item)
         } else {
@@ -848,15 +864,32 @@ impl MentionInputState {
             .entries()
             .iter()
             .any(|entry| matches!(entry, ClipboardEntry::String(_)));
-        if has_text && let Some(text) = item.text() {
+        if has_text {
             let mentions = copied_mentions(&item);
-            if mentions.is_empty() {
-                cx.emit(MentionFieldEvent::Paste(normalize_pasted(&text)));
-            } else {
-                cx.emit(MentionFieldEvent::PasteWithMentions(
-                    normalize_pasted(&text),
-                    mentions,
-                ));
+            if mentions.is_empty()
+                && !plain
+                && let Some(html) = item
+                    .entries()
+                    .iter()
+                    .find_map(|entry| match entry {
+                        ClipboardEntry::String(s) => Some(s.html()),
+                        _ => None,
+                    })
+                    .flatten()
+                && let Some(markdown) = super::rich_paste::clipboard_html_to_markdown(html)
+            {
+                cx.emit(MentionFieldEvent::Paste(normalize_pasted(&markdown)));
+                return;
+            }
+            if let Some(text) = item.text() {
+                if mentions.is_empty() {
+                    cx.emit(MentionFieldEvent::Paste(normalize_pasted(&text)));
+                } else {
+                    cx.emit(MentionFieldEvent::PasteWithMentions(
+                        normalize_pasted(&text),
+                        mentions,
+                    ));
+                }
             }
         }
     }
@@ -1406,6 +1439,7 @@ impl Render for MentionInputState {
             .on_action(cx.listener(Self::redo))
             .on_action(cx.listener(Self::show_character_palette))
             .on_action(cx.listener(Self::paste))
+            .on_action(cx.listener(Self::paste_plain_text))
             .on_action(cx.listener(Self::cut))
             .on_action(cx.listener(Self::copy))
             .on_mouse_down(MouseButton::Left, cx.listener(Self::on_mouse_down))
@@ -2099,21 +2133,73 @@ mod tests {
             text("folder"),
         ]);
         assert!(
-            field_events(cx, true, |field, _, cx| field
-                .paste_images_or_text(with_bitmap, cx))
-                == vec![MentionFieldEvent::PasteImages(vec![bitmap()])]
+            field_events(cx, true, |field, _, cx| field.paste_images_or_text(
+                with_bitmap,
+                false,
+                cx
+            )) == vec![MentionFieldEvent::PasteImages(vec![bitmap()])]
         );
         let with_text = clipboard(vec![files(&["/tmp/folder"]), text("/tmp/folder")]);
         assert!(
             field_events(cx, true, |field, _, cx| field
-                .paste_images_or_text(with_text, cx))
+                .paste_images_or_text(with_text, false, cx))
                 == vec![MentionFieldEvent::Paste("/tmp/folder".into())]
         );
         let files_only = clipboard(vec![files(&["/tmp/folder"])]);
         assert!(
             field_events(cx, true, |field, _, cx| field
-                .paste_images_or_text(files_only, cx))
+                .paste_images_or_text(files_only, false, cx))
             .is_empty()
+        );
+    }
+
+    #[gpui::test]
+    fn rich_html_clipboard_pastes_markdown_unless_plain_requested(cx: &mut gpui::TestAppContext) {
+        let item = clipboard(vec![ClipboardEntry::String(
+            gpui::ClipboardString::new("Hello world".into())
+                .with_html(Some("<p>Hello <b>world</b></p>".into())),
+        )]);
+        assert!(
+            paste_events(cx, true, item.clone())
+                == vec![MentionFieldEvent::Paste("Hello **world**".into())]
+        );
+        assert!(
+            field_events(cx, true, |field, _, cx| field.paste_images_or_text(
+                item.clone(),
+                true,
+                cx
+            )) == vec![MentionFieldEvent::Paste("Hello world".into())]
+        );
+        cx.update(|cx| cx.write_to_clipboard(item));
+        assert!(
+            field_events(cx, true, |field, window, cx| field.paste_plain_text(
+                &PastePlainText,
+                window,
+                cx
+            )) == vec![MentionFieldEvent::Paste("Hello world".into())]
+        );
+    }
+
+    #[gpui::test]
+    fn copied_mentions_ignore_clipboard_html(cx: &mut gpui::TestAppContext) {
+        let mentions = vec![CopiedMention {
+            display: "@alice".into(),
+            user_id: "42".into(),
+            role_id: String::new(),
+            at: 3,
+        }];
+        let entry = gpui::ClipboardString::new("hi @alice".into())
+            .with_json_metadata(super::super::CopiedMentions {
+                mezon_mentions: mentions.clone(),
+            })
+            .with_html(Some("<b>hi @alice</b>".into()));
+        let item = clipboard(vec![ClipboardEntry::String(entry)]);
+        assert!(
+            paste_events(cx, true, item)
+                == vec![MentionFieldEvent::PasteWithMentions(
+                    "hi @alice".into(),
+                    mentions
+                )]
         );
     }
 
