@@ -6,10 +6,10 @@ use gpui::{
     UniformListScrollHandle, WeakEntity, Window, div, img, prelude::*, px, size, uniform_list,
 };
 use mezon_store::{
-    AccountEvent, AccountStore, BuzzStore, ChannelEvent, ChannelId, ChannelList, ClanId,
-    DirectChannel, DirectKind, DirectMessageStore, DmAvatarPresence, FriendState, FriendStore,
-    NotificationSettingStore, PresenceEvent, PresenceStore, Settings, UserId, UserPresence,
-    current_user_presence,
+    AccountEvent, AccountStore, BadgeService, BuzzStore, ChannelEvent, ChannelId, ChannelList,
+    ClanId, DirectChannel, DirectKind, DirectMessageStore, DmAvatarPresence, FriendState,
+    FriendStore, NotificationSettingStore, PresenceEvent, PresenceStore, Settings, UserId,
+    UserPresence, current_user_presence,
 };
 
 use super::channel_sidebar::menu::{MUTE_DURATIONS, apply_mute, mute_label, submenu_options};
@@ -380,6 +380,7 @@ struct DmMenuTarget {
     pinned: bool,
     friend_state: Option<FriendState>,
     blocked_by_me: bool,
+    is_self: bool,
 }
 
 fn dm_menu_target(channel_id: ChannelId, cx: &App) -> Option<DmMenuTarget> {
@@ -397,6 +398,10 @@ fn dm_menu_target(channel_id: ChannelId, cx: &App) -> Option<DmMenuTarget> {
             })
         })
         .unwrap_or((None, false));
+    let is_self = peer.is_some_and(|user| {
+        BadgeService::try_global(cx).and_then(|badge| badge.read(cx).current_user_id(cx))
+            == Some(user)
+    });
     Some(DmMenuTarget {
         is_group: channel.kind == DirectKind::Group,
         peer,
@@ -406,6 +411,7 @@ fn dm_menu_target(channel_id: ChannelId, cx: &App) -> Option<DmMenuTarget> {
         pinned: store.is_pinned(channel_id),
         friend_state,
         blocked_by_me,
+        is_self,
     })
 }
 
@@ -435,6 +441,7 @@ fn build_dm_menu(
     let friend_state = target.as_ref().and_then(|target| target.friend_state);
     let blocked = friend_state == Some(FriendState::Blocked);
     let blocked_by_me = target.as_ref().is_some_and(|target| target.blocked_by_me);
+    let is_self = target.as_ref().is_some_and(|target| target.is_self);
 
     if !is_group && let Some(user) = peer {
         let profile_settings = settings.clone();
@@ -509,6 +516,7 @@ fn build_dm_menu(
     }
 
     if !is_group
+        && !is_self
         && let Some(user) = peer
         && let Some(target) = target.as_ref()
     {
