@@ -1,0 +1,21 @@
+name: Set up ONNX Runtime for Windows
+description: Build and cache ONNX Runtime with the static MSVC runtime used by WebRTC.
+runs:
+  using: composite
+  steps:
+    - name: Identify ONNX Runtime toolchain
+      id: toolchain
+      shell: pwsh
+      run: |
+        $key = & ./scripts/build-onnx-windows.ps1 -CacheKeyOnly
+        "key=$key" >> $env:GITHUB_OUTPUT
+
+    - name: Cache ONNX Runtime
+      uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+      with:
+        path: target/native/onnxruntime-mt
+        key: ${{ steps.toolchain.outputs.key }}
+
+    - name: Prepare ONNX Runtime
+      shell: pwsh
+      run: ./scripts/build-onnx-windows.ps1
