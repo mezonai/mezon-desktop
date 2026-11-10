@@ -193,3 +193,67 @@ fn test_download_only_when_config_enabled() {
         std::env::remove_var("MEZON_GRAMMAR_DIR");
     }
 }
+
+#[test]
+fn test_syllable_vocab_download_and_loading() {
+    assert_eq!(mezon_grammar::SYLLABLE_VOCAB_FILE, "syllable_vocab.json");
+    let loaded = mezon_grammar::assets::load_asset_str(mezon_grammar::SYLLABLE_VOCAB_FILE);
+    assert!(
+        loaded.is_some(),
+        "syllable_vocab.json should be loaded/downloadable"
+    );
+    assert!(mezon_grammar::is_valid_syllable_vocab("người"));
+    assert!(mezon_grammar::is_valid_syllable_vocab("việt"));
+    assert!(mezon_grammar::is_valid_syllable_vocab("nam"));
+    let cands = mezon_grammar::candidates_for_syllable("muon");
+    assert!(cands.is_some());
+    let list = cands.unwrap();
+    assert!(list.iter().any(|s| s == "muốn"));
+}
+
+#[test]
+fn test_model2_mined_pairs() {
+    let client = MezonGrammarClient::new();
+    assert!(
+        client
+            .correct("16 máu")
+            .corrected
+            .to_lowercase()
+            .contains("16 màu")
+    );
+    assert!(
+        client
+            .correct("be thui")
+            .corrected
+            .to_lowercase()
+            .contains("bê thui")
+    );
+    assert!(
+        client
+            .correct("bo xung")
+            .corrected
+            .to_lowercase()
+            .contains("bổ sung")
+    );
+    assert!(
+        client
+            .correct("con luon")
+            .corrected
+            .to_lowercase()
+            .contains("con lươn")
+    );
+    assert!(
+        client
+            .correct("chuan doan")
+            .corrected
+            .to_lowercase()
+            .contains("chẩn đoán")
+    );
+    assert!(
+        client
+            .correct("xap sep")
+            .corrected
+            .to_lowercase()
+            .contains("sắp xếp")
+    );
+}
