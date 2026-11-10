@@ -19,7 +19,7 @@ pub struct Avatar {
     pending: bool,
 }
 
-const USER_AVATAR_ICON: &str = "icons/avatar-user.svg";
+const USER_AVATAR_ICON: &str = "icons/user-circle.svg";
 
 impl Avatar {
     pub fn new() -> Self {
@@ -239,7 +239,7 @@ fn anonymous_circle(d: Pixels) -> AnyElement {
         .rounded_full()
         .bg(Hsla::from(gpui::rgb(0xffffff)))
         .child(
-            Icon::new(IconName::AnonymousAvatar)
+            Icon::new(IconName::Anonymous)
                 .text_color(gpui::black())
                 .size(d * 0.8),
         )
@@ -258,7 +258,7 @@ fn loading_circle(d: Pixels, fill: Hsla, border: Hsla) -> AnyElement {
 }
 
 pub(crate) fn default_user_avatar(size: Pixels, corner_radius: Pixels) -> AnyElement {
-    Icon::new(IconName::AvatarUser)
+    Icon::new(IconName::UserCircle)
         .size(size)
         .rounded(corner_radius)
         .into_any_element()

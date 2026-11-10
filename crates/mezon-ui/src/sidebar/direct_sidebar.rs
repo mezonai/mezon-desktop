@@ -801,7 +801,7 @@ impl DirectSidebar {
             .hover(move |this| this.bg(bg_hover))
             .on_click(|_, _window, cx| navigate(cx, Route::Friends))
             .child(
-                Icon::new(IconName::IconFriends)
+                Icon::new(IconName::Friends)
                     .size(px(20.))
                     .text_color(theme.tokens.text_theme_primary)
                     .flex_none(),

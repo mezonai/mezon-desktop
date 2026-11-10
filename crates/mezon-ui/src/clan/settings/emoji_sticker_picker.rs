@@ -744,7 +744,7 @@ fn preview_image(
             .object_fit(gpui::ObjectFit::Contain)
             .rounded_md()
             .into_any_element(),
-        None => Icon::new(IconName::UploadImage)
+        None => Icon::new(IconName::Camera)
             .size(px(48.))
             .size(px(50.))
             .text_color(placeholder_color)

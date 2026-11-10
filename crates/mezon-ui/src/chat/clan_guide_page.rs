@@ -213,7 +213,7 @@ impl ClanGuidePage {
                             .child(clan_name),
                     )
                     .child(
-                        Icon::new(IconName::ClanGuideHouse)
+                        Icon::new(IconName::ClanBadge)
                             .size(px(24.))
                             .flex_none()
                             .text_color(theme.tokens.text_theme_primary),
@@ -437,7 +437,7 @@ impl ClanGuidePage {
             section = section.child(guide_card(
                 SharedString::from(format!("clan-guide-rule-{}", rule.id)),
                 theme,
-                Icon::new(IconName::RuleIcon)
+                Icon::new(IconName::Rules)
                     .size(px(24.))
                     .text_color(theme.tokens.text_theme_primary)
                     .into_any_element(),
@@ -505,7 +505,7 @@ impl ClanGuidePage {
                 guide_card(
                     SharedString::from(format!("clan-guide-mission-{}", mission.id)),
                     theme,
-                    Icon::new(IconName::TargetIcon)
+                    Icon::new(IconName::Target)
                         .size(px(24.))
                         .text_color(theme.tokens.text_theme_primary)
                         .into_any_element(),

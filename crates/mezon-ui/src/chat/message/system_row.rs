@@ -36,13 +36,13 @@ pub fn render_system_message(msg: &Message, ctx: &RowCtx) -> AnyElement {
     );
 
     let (icon, icon_size) = match msg.code {
-        MessageCode::CreatePin => (IconName::PinRight, px(SYSTEM_SMALL_ICON)),
+        MessageCode::CreatePin => (IconName::Pin, px(SYSTEM_SMALL_ICON)),
         MessageCode::CreateThread | MessageCode::DeleteThread => {
-            (IconName::ThreadIcon, px(SYSTEM_SMALL_ICON))
+            (IconName::Thread, px(SYSTEM_SMALL_ICON))
         }
-        MessageCode::AuditLog => (IconName::AuditLogIcon, px(SYSTEM_ARROW_ICON)),
-        MessageCode::UpcomingEvent => (IconName::UpcomingEventIcon, px(SYSTEM_ARROW_ICON)),
-        _ => (IconName::WelcomeIcon, px(SYSTEM_ARROW_ICON)),
+        MessageCode::AuditLog => (IconName::AuditLog, px(SYSTEM_ARROW_ICON)),
+        MessageCode::UpcomingEvent => (IconName::Event, px(SYSTEM_ARROW_ICON)),
+        _ => (IconName::ArrowRight, px(SYSTEM_ARROW_ICON)),
     };
 
     let text_gap = if is_custom { px(24.) } else { px(16.) };
@@ -686,7 +686,7 @@ pub fn render_onboard_welcome(ctx: &RowCtx) -> AnyElement {
             card_bg,
             hover_bg,
             title_color,
-            Icon::new(IconName::AddPerson)
+            Icon::new(IconName::UserPlus)
                 .size(px(20.))
                 .text_color(title_color),
             mezon_i18n::t(locale, "chatWelcome.onboard.inviteFriends"),
@@ -738,7 +738,7 @@ pub fn render_onboard_welcome(ctx: &RowCtx) -> AnyElement {
             card_bg,
             hover_bg,
             title_color,
-            Icon::new(IconName::Hashtag)
+            Icon::new(IconName::Channel)
                 .size(px(20.))
                 .text_color(title_color),
             mezon_i18n::t(locale, "chatWelcome.onboard.createChannel"),
@@ -820,7 +820,7 @@ fn onboard_item(
                 )
                 .into_any_element()
         } else {
-            Icon::new(IconName::ArrowRight)
+            Icon::new(IconName::ChevronRight)
                 .size(px(20.))
                 .text_color(title_color)
                 .into_any_element()
@@ -907,19 +907,19 @@ pub fn render_welcome(_msg: &Message, ctx: &RowCtx) -> AnyElement {
             col = col
                 .child(welcome_icon_circle(
                     if is_stream {
-                        Icon::new(IconName::Stream)
+                        Icon::new(IconName::Live)
                             .size(px(40.))
                             .text_color(icon_fill)
                     } else if mezon_store::is_age_restricted(age_restricted) {
-                        Icon::new(IconName::HashtagWarning)
+                        Icon::new(IconName::ChannelWarning)
                             .size(px(40.))
                             .text_color(icon_fill)
                     } else if private {
-                        Icon::new(IconName::HashtagLocked)
+                        Icon::new(IconName::ChannelPrivate)
                             .size(px(40.))
                             .text_color(icon_fill)
                     } else {
-                        Icon::new(IconName::Hashtag)
+                        Icon::new(IconName::Channel)
                             .size(px(40.))
                             .text_color(icon_fill)
                     },

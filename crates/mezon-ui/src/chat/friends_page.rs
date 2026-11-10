@@ -942,7 +942,7 @@ impl FriendsPage {
                             .items_center()
                             .font_weight(gpui::FontWeight::MEDIUM)
                             .text_color(theme.tokens.text_secondary)
-                            .child(Icon::new(IconName::IconFriends).size(px(20.)).flex_none())
+                            .child(Icon::new(IconName::Friends).size(px(20.)).flex_none())
                             .child(mezon_i18n::t(locale, "friendsPage.friends")),
                     )
                     .child(
@@ -1360,7 +1360,7 @@ fn render_friend_row(
                 .right(px(-1.))
                 .size(px(10.))
                 .child(
-                    Icon::new(IconName::DarkModeIcon)
+                    Icon::new(IconName::Moon)
                         .size(px(16.))
                         .with_transformation(gpui::Transformation::rotate(gpui::radians(
                             -std::f32::consts::FRAC_PI_2,
@@ -1577,7 +1577,7 @@ fn render_row_actions(
             .child(
                 round_button(
                     ("friend-more", id.get() as usize),
-                    IconName::IconEditThreeDot,
+                    IconName::MoreVertical,
                     theme,
                 )
                 .on_click({

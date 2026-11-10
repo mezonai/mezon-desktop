@@ -446,7 +446,7 @@ impl ChannelWebhookTab {
                     }),
             )
             .child(
-                Icon::new(IconName::ArrowDownFill)
+                Icon::new(IconName::CaretDown)
                     .size(px(16.0))
                     .flex_shrink_0()
                     .selected(false),
@@ -532,7 +532,7 @@ fn render_channel_label(option: &ChannelOption, theme: &crate::theme::Theme) -> 
         .gap_2()
         .overflow_hidden()
         .child(
-            Icon::new(IconName::Hashtag)
+            Icon::new(IconName::Channel)
                 .size(px(16.0))
                 .flex_shrink_0()
                 .selected(false),
@@ -775,9 +775,7 @@ fn render_channel_webhook_item(
                                     }
                                 });
                                 pick_btn.child(
-                                    Icon::new(IconName::ImageUploadIcon)
-                                        .size(px(16.0))
-                                        .selected(false),
+                                    Icon::new(IconName::ImageAdd).size(px(16.0)).selected(false),
                                 )
                             })
                         })
@@ -814,9 +812,11 @@ fn render_channel_webhook_item(
                         ),
                 )
                 .child(if expanded {
-                    Icon::new(IconName::CaretDown).size(px(20.)).selected(false)
+                    Icon::new(IconName::ChevronDown)
+                        .size(px(20.))
+                        .selected(false)
                 } else {
-                    Icon::new(IconName::ArrowRight)
+                    Icon::new(IconName::ChevronRight)
                         .size(px(20.0))
                         .selected(false)
                 }),

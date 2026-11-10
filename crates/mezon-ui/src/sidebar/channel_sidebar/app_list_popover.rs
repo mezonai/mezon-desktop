@@ -53,7 +53,7 @@ pub fn app_list_popover_overlay(
                 .aspect_square()
                 .into_any_element()
         } else {
-            Icon::new(IconName::AppChannelIcon)
+            Icon::new(IconName::ChannelApp)
                 .size(px(32.))
                 .text_color(theme.text_primary)
                 .into_any_element()
@@ -197,7 +197,7 @@ pub fn app_list_popover_overlay(
                                     ),
                             )
                             .child(
-                                Icon::new(IconName::ArrowRight)
+                                Icon::new(IconName::ChevronRight)
                                     .size(px(20.))
                                     .selected(false),
                             ),

@@ -1287,8 +1287,8 @@ impl PermissionOverrides {
         );
         let (element_id, icon) = match option {
             OVERRIDE_TYPE_DENY => ("permission-overrides-deny", IconName::Close),
-            OVERRIDE_TYPE_ALLOW => ("permission-overrides-allow", IconName::IconTick),
-            _ => ("permission-overrides-neutral", IconName::IconOr),
+            OVERRIDE_TYPE_ALLOW => ("permission-overrides-allow", IconName::Check),
+            _ => ("permission-overrides-neutral", IconName::Slash),
         };
         let icon_color = if active && option != OVERRIDE_TYPE_NEUTRAL {
             white()

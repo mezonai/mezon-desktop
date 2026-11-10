@@ -77,7 +77,7 @@ fn channel_icon(
 ) -> (IconName, Option<IconName>) {
     use crate::components::compositions::channel_row::channel_icon as compose_channel_icon;
     if matches!(channel_type, ChannelType::Text) && is_age_restricted(age_restricted) {
-        return (IconName::HashtagWarning, None);
+        return (IconName::ChannelWarning, None);
     }
     let composed = compose_channel_icon(channel_type, private, age_restricted);
     (composed.base, composed.lock)
@@ -1304,7 +1304,7 @@ fn render_shared_content(
                     .flex()
                     .items_center()
                     .justify_center()
-                    .child(Icon::new(IconName::AudioPlay).size(px(16.)).selected(false)),
+                    .child(Icon::new(IconName::Play).size(px(16.)).selected(false)),
             );
         }
         if shared.extra > 0 {

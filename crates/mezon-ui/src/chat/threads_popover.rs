@@ -364,7 +364,7 @@ fn render_header(
         .border_r_1()
         .border_color(tokens.border_primary)
         .child(
-            Icon::new(IconName::ThreadEmpty)
+            Icon::new(IconName::Thread)
                 .size(px(16.))
                 .text_color(tokens.bg_icon_theme),
         )
@@ -377,7 +377,7 @@ fn render_header(
         );
 
     let search_icon = Icon::new(if searching {
-        IconName::LoadingSpinner
+        IconName::Spinner
     } else {
         IconName::Search
     })
@@ -553,7 +553,7 @@ fn render_empty_body(
                 .rounded_full()
                 .bg(tokens.bg_active_member_channel)
                 .child(
-                    Icon::new(IconName::ThreadEmpty)
+                    Icon::new(IconName::Thread)
                         .size(px(40.))
                         .text_color(tokens.text_secondary)
                         .flex_none(),

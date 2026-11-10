@@ -163,7 +163,7 @@ pub fn render_share_contact_card(
         .bg(theme.surfaces.primary)
         .child(contact_action_button(
             "share-contact-call",
-            IconName::IconPhoneDM,
+            IconName::Call,
             mezon_i18n::t(ctx.locale, "shareContact.card.call"),
             false,
             on_call,

@@ -378,7 +378,7 @@ impl TransactionHistoryModal {
     fn render_header(&self, theme: &Theme, window: &Window, cx: &mut Context<Self>) -> AnyElement {
         let locale = self.locale.clone();
         let tk = |key: &'static str| mezon_i18n::t(&locale, key).to_string();
-        let reload = Icon::new(IconName::ReloadIcon)
+        let reload = Icon::new(IconName::Refresh)
             .size(px(20.))
             .text_color(theme.tokens.text_theme_primary);
         let reload = if self.loading && window.is_window_active() {
@@ -683,7 +683,7 @@ fn render_row(
     let arrow = Icon::new(if is_expanded {
         IconName::ArrowDown
     } else {
-        IconName::ArrowRight
+        IconName::ChevronRight
     })
     .size(px(16.))
     .text_color(accent);
@@ -827,7 +827,7 @@ fn render_detail(
         ))
         .child(detail_field(
             theme,
-            IconName::DollarIcon,
+            IconName::Coin,
             tk("transactionHistory.transactionDetail.fields.amount"),
             value(|d| d.amount.clone()),
             false,
@@ -836,7 +836,7 @@ fn render_detail(
         ))
         .child(detail_field(
             theme,
-            IconName::PenEdit,
+            IconName::Edit,
             tk("transactionHistory.transactionDetail.fields.note"),
             value(|d| d.note.clone()),
             false,
@@ -852,7 +852,7 @@ fn render_detail(
         .gap_4()
         .child(detail_field(
             theme,
-            IconName::UserIcon,
+            IconName::User,
             tk("transactionHistory.transactionDetail.fields.sender"),
             value(|d| d.sender.clone()),
             false,
@@ -861,7 +861,7 @@ fn render_detail(
         ))
         .child(detail_field(
             theme,
-            IconName::UserIcon,
+            IconName::User,
             tk("transactionHistory.transactionDetail.fields.receiver"),
             value(|d| d.receiver.clone()),
             false,
@@ -870,7 +870,7 @@ fn render_detail(
         ))
         .child(detail_field(
             theme,
-            IconName::ClockIcon,
+            IconName::Clock,
             tk("transactionHistory.transactionDetail.fields.created"),
             value(|d| d.created.clone()),
             false,
@@ -938,7 +938,7 @@ fn detail_field(
                     Shell::global(cx).update(cx, |shell, cx| shell.success(message, cx));
                 })
                 .child(
-                    Icon::new(IconName::CopyIcon)
+                    Icon::new(IconName::Copy)
                         .size(px(16.))
                         .text_color(theme.tokens.text_theme_primary),
                 ),
@@ -1056,7 +1056,7 @@ fn render_placeholder(
                 .items_center()
                 .justify_center()
                 .child(
-                    Icon::new(IconName::FileIcon)
+                    Icon::new(IconName::File)
                         .size(px(40.))
                         .selected(false)
                         .flex_none(),

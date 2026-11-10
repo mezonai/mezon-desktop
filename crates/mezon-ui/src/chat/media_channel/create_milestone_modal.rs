@@ -331,7 +331,11 @@ impl Render for CreateMilestoneModal {
                             .on_click(|_, _, cx| {
                                 Shell::global(cx).update(cx, |shell, cx| shell.close_modal(cx));
                             })
-                            .child(Icon::new(IconName::CloseIcon).size(px(20.)).selected(false)),
+                            .child(
+                                Icon::new(IconName::CloseCircle)
+                                    .size(px(20.))
+                                    .selected(false),
+                            ),
                     ),
             )
             .child(
@@ -498,7 +502,7 @@ fn render_attachments_section(
                 .child(if uploading {
                     Spinner::new().into_any_element()
                 } else {
-                    Icon::new(IconName::AddCircle)
+                    Icon::new(IconName::PlusCircle)
                         .size(px(40.))
                         .selected(false)
                         .into_any_element()
@@ -603,11 +607,7 @@ fn render_attachment_cell(
                     .items_center()
                     .justify_center()
                     .bg(bg)
-                    .child(
-                        Icon::new(IconName::AudioPlay)
-                            .size(px(32.))
-                            .text_color(muted),
-                    ),
+                    .child(Icon::new(IconName::Play).size(px(32.)).text_color(muted)),
             )
         })
         .when(!uploaded, |el| {
@@ -643,7 +643,7 @@ fn render_attachment_cell(
                     }),
                 )
                 .child(
-                    Icon::new(IconName::CloseIcon)
+                    Icon::new(IconName::CloseCircle)
                         .size(px(16.))
                         .text_color(theme.text_primary),
                 ),

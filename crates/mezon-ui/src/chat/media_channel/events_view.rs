@@ -33,7 +33,7 @@ pub fn render_events_header(
                 .hover(|el| el.bg(theme.bg_hover))
                 .on_click(move |_, window, cx| on_back(window, cx))
                 .child(
-                    Icon::new(IconName::ArrowLeft)
+                    Icon::new(IconName::ChevronLeft)
                         .size(px(20.))
                         .text_color(theme.text_primary),
                 ),

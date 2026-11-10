@@ -768,7 +768,7 @@ impl ClanMembersPage {
                     .text_color(gpui::white())
                     .gap_1()
                     .child(
-                        Icon::new(IconName::ConvertAccount)
+                        Icon::new(IconName::Swap)
                             .size(px(20.))
                             .text_color(gpui::white())
                             .with_transformation(gpui::Transformation::rotate(gpui::radians(
@@ -843,7 +843,7 @@ impl ClanMembersPage {
                 .hover(|style| style.bg(cx.theme().bg_hover))
                 .child(self.page_size.to_string())
                 .child(
-                    Icon::new(IconName::CaretDown)
+                    Icon::new(IconName::ChevronDown)
                         .size(px(16.))
                         .text_color(cx.theme().text_secondary)
                         .with_transformation(gpui::Transformation::rotate(gpui::radians(

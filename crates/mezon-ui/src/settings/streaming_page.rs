@@ -358,7 +358,7 @@ impl StreamingPage {
                             .items_center()
                             .gap_2()
                             .child(
-                                Icon::new(IconName::Stream)
+                                Icon::new(IconName::Live)
                                     .size(px(16.0))
                                     .text_color(theme.text_primary),
                             )
@@ -441,7 +441,7 @@ impl StreamingPage {
                                 .when(is_selected, |el| el.bg(theme.bg_hover))
                                 .when(!is_selected, |el| el.hover(|s| s.bg(theme.bg_hover)))
                                 .child(
-                                    Icon::new(IconName::Stream)
+                                    Icon::new(IconName::Live)
                                         .size(px(16.0))
                                         .text_color(theme.text_primary),
                                 )
@@ -495,7 +495,7 @@ impl StreamingPage {
                 Icon::new(if copied {
                     IconName::Check
                 } else {
-                    IconName::CopyIcon
+                    IconName::Copy
                 })
                 .size(px(16.0))
                 .text_color(if copied {

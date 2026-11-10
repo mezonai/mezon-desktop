@@ -476,7 +476,7 @@ impl InputBar {
                             .when(anonymous, |composer| {
                                 composer.child(
                                     div().absolute().top(px(-12.)).right(px(-12.)).child(
-                                        Icon::new(IconName::AnonymousAvatar)
+                                        Icon::new(IconName::Anonymous)
                                             .size(px(32.))
                                             .text_color(theme.tokens.text_theme_primary)
                                             .with_transformation(gpui::Transformation::rotate(

@@ -261,14 +261,10 @@ impl Render for EditAvatar {
                             .gap_3()
                             .items_center()
                             .justify_center()
-                            .child(
-                                Icon::new(IconName::ImageThumbnail)
-                                    .size(px(16.))
-                                    .selected(false),
-                            )
+                            .child(Icon::new(IconName::FileImage).size(px(16.)).selected(false))
                             .child(div().w(px(190.)).child(Slider::new(&self.slider)))
                             .child(
-                                Icon::new(IconName::ImageThumbnail)
+                                Icon::new(IconName::FileImage)
                                     .size(px(24.))
                                     .text_color(theme.text_primary),
                             )
@@ -284,7 +280,7 @@ impl Render for EditAvatar {
                                     .cursor_pointer()
                                     .hover(|el| el.bg(theme.bg_hover))
                                     .child(
-                                        Icon::new(IconName::RotateRightIcon)
+                                        Icon::new(IconName::RotateRight)
                                             .size(px(24.))
                                             .selected(false),
                                     )

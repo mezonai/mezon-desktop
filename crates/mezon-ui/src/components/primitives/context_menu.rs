@@ -619,7 +619,7 @@ impl RenderOnce for ContextMenu {
                                     .items_center()
                                     .justify_center()
                                     .child(
-                                        Icon::new(IconName::ImageThumbnail)
+                                        Icon::new(IconName::FileImage)
                                             .size(px(16.))
                                             .text_color(fallback_color),
                                     )
@@ -696,7 +696,7 @@ impl RenderOnce for ContextMenu {
                             .when_some(leading_icon, |row, icon| {
                                 let icon_el = Icon::new(icon)
                                     .size_4()
-                                    .when(icon == IconName::Flower, |icon| icon.size(px(24.)))
+                                    .when(icon == IconName::Gift, |icon| icon.size(px(24.)))
                                     .text_color(icon_color);
                                 row.child(icon_el)
                             })
@@ -848,7 +848,7 @@ impl RenderOnce for ContextMenu {
                             })
                             .child(label_col)
                             .child(
-                                Icon::new(IconName::ArrowRight)
+                                Icon::new(IconName::ChevronRight)
                                     .size(px(16.))
                                     .text_color(muted),
                             )
@@ -977,7 +977,7 @@ impl RenderOnce for ContextMenu {
                                                 .items_center()
                                                 .justify_center()
                                                 .child(
-                                                    Icon::new(IconName::ImageThumbnail)
+                                                    Icon::new(IconName::FileImage)
                                                         .size(px(16.))
                                                         .text_color(muted),
                                                 )
@@ -1044,7 +1044,7 @@ impl RenderOnce for ContextMenu {
                             })
                             .child(div().flex_1().child(label))
                             .child(
-                                Icon::new(IconName::ArrowRight)
+                                Icon::new(IconName::ChevronRight)
                                     .size(px(16.))
                                     .text_color(muted),
                             )

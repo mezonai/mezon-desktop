@@ -708,11 +708,7 @@ impl OverviewSettingPage {
                 )
             })
             .when(!has_logo, |el| {
-                el.child(
-                    Icon::new(IconName::UploadImage)
-                        .size(px(32.0))
-                        .selected(false),
-                )
+                el.child(Icon::new(IconName::Camera).size(px(32.0)).selected(false))
             })
             .child(
                 div()
@@ -755,7 +751,7 @@ impl OverviewSettingPage {
                         Icon::new(if has_logo {
                             IconName::Close
                         } else {
-                            IconName::SelectFileIcon
+                            IconName::ImageAdd
                         })
                         .size(px(16.0))
                         .text_color(if has_logo {
@@ -823,11 +819,10 @@ impl OverviewSettingPage {
                 )
             })
             .when(!has_banner, |el| {
-                el.flex().items_center().justify_center().child(
-                    Icon::new(IconName::UploadImage)
-                        .size(px(32.0))
-                        .selected(false),
-                )
+                el.flex()
+                    .items_center()
+                    .justify_center()
+                    .child(Icon::new(IconName::Camera).size(px(32.0)).selected(false))
             })
             .child(
                 div()
@@ -855,7 +850,7 @@ impl OverviewSettingPage {
                         Icon::new(if has_banner {
                             IconName::Close
                         } else {
-                            IconName::SelectFileIcon
+                            IconName::ImageAdd
                         })
                         .size(px(16.0))
                         .text_color(if has_banner {
@@ -873,7 +868,7 @@ impl OverviewSettingPage {
             .gap_1()
             .overflow_hidden()
             .child(
-                Icon::new(IconName::Hashtag)
+                Icon::new(IconName::Channel)
                     .size(px(16.0))
                     .flex_shrink_0()
                     .selected(false),
@@ -930,7 +925,7 @@ impl OverviewSettingPage {
                     }),
             )
             .child(
-                Icon::new(IconName::ArrowDownFill)
+                Icon::new(IconName::CaretDown)
                     .size(px(16.0))
                     .flex_shrink_0()
                     .selected(false),

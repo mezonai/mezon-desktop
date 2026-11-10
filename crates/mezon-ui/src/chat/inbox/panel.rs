@@ -592,11 +592,7 @@ fn render_header(theme: &Theme, locale: &SharedString) -> impl IntoElement {
         .items_center()
         .gap_2()
         .pb_2()
-        .child(
-            Icon::new(IconName::EmptyUnread)
-                .size(px(20.))
-                .selected(false),
-        )
+        .child(Icon::new(IconName::Inbox).size(px(20.)).selected(false))
         .child(
             div()
                 .text_base()
@@ -690,7 +686,7 @@ fn render_empty(theme: &Theme, locale: &SharedString, tab: InboxTab) -> gpui::An
                 .to_uppercase()
                 .into(),
             mezon_i18n::t(locale, "notifications.empty.messages.description").into(),
-            IconName::EmptyUnread,
+            IconName::Inbox,
         )
         .into_any_element(),
         InboxTab::Mentions => render_empty_with_protip(
@@ -700,7 +696,7 @@ fn render_empty(theme: &Theme, locale: &SharedString, tab: InboxTab) -> gpui::An
                 .to_uppercase()
                 .into(),
             mezon_i18n::t(locale, "notifications.empty.mentions.description").into(),
-            IconName::EmptyMention,
+            IconName::Mention,
         )
         .into_any_element(),
         InboxTab::ForYou => render_empty_simple(
@@ -714,7 +710,7 @@ fn render_empty(theme: &Theme, locale: &SharedString, tab: InboxTab) -> gpui::An
             theme,
             mezon_i18n::t(locale, "notifications.empty.topics.title").into(),
             mezon_i18n::t(locale, "notifications.empty.topics.description").into(),
-            IconName::EmptyMention,
+            IconName::Mention,
         )
         .into_any_element(),
     }
@@ -1085,7 +1081,7 @@ fn render_notification_item(
                             .opacity(0.)
                             .group_hover("inbox-item", |s| s.opacity(1.))
                             .hover(|s| s.bg(theme.bg_primary))
-                            .child(Icon::new(IconName::CopyIcon).size(px(16.)).selected(false))
+                            .child(Icon::new(IconName::Copy).size(px(16.)).selected(false))
                             .on_mouse_down(MouseButton::Left, {
                                 let copy_text = copy_text.clone();
                                 move |_, _, cx| {

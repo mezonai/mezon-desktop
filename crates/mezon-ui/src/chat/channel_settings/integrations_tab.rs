@@ -738,7 +738,7 @@ impl IntegrationsTab {
             )
             .when(on_webhooks, |el| {
                 el.child(
-                    Icon::new(IconName::ArrowRight)
+                    Icon::new(IconName::ChevronRight)
                         .size(px(20.0))
                         .text_color(theme.text_primary),
                 )
@@ -794,7 +794,7 @@ impl IntegrationsTab {
                             .gap_4()
                             .min_w_0()
                             .child(
-                                Icon::new(IconName::WebhooksIcon)
+                                Icon::new(IconName::Webhook)
                                     .size(px(20.0))
                                     .flex_shrink_0()
                                     .text_color(theme.tokens.text_theme_primary),
@@ -833,7 +833,7 @@ impl IntegrationsTab {
                             .text_color(theme.tokens.text_theme_primary)
                             .child(mezon_i18n::t(locale, "integrations.viewWebhook"))
                             .child(
-                                Icon::new(IconName::ArrowRight)
+                                Icon::new(IconName::ChevronRight)
                                     .size(px(16.0))
                                     .text_color(theme.tokens.text_theme_primary),
                             )
@@ -894,7 +894,7 @@ impl IntegrationsTab {
                             .child(selected_label),
                     )
                     .child(
-                        Icon::new(IconName::ArrowDownFill)
+                        Icon::new(IconName::CaretDown)
                             .size(px(16.0))
                             .flex_shrink_0()
                             .text_color(theme.tokens.text_theme_primary),
@@ -950,7 +950,7 @@ impl IntegrationsTab {
                                                 .font_weight(FontWeight::SEMIBOLD)
                                         })
                                         .child(
-                                            Icon::new(IconName::Hashtag)
+                                            Icon::new(IconName::Channel)
                                                 .size(px(16.0))
                                                 .flex_shrink_0()
                                                 .selected(false),
@@ -1032,7 +1032,7 @@ impl IntegrationsTab {
                                             },
                                         ));
                                         pick.child(
-                                            Icon::new(IconName::ImageUploadIcon).size(px(16.)).selected(false),
+                                            Icon::new(IconName::ImageAdd).size(px(16.)).selected(false),
                                         )
                                     })
                                     .when(self.avatar_uploading, |el| {
@@ -1357,7 +1357,7 @@ fn render_webhook_row(
                                         .items_center()
                                         .gap_1()
                                         .child(
-                                            Icon::new(IconName::ClockIcon)
+                                            Icon::new(IconName::Clock)
                                                 .size(px(16.0))
                                                 .flex_shrink_0()
                                                 .text_color(theme.tokens.text_theme_primary),
@@ -1374,12 +1374,12 @@ fn render_webhook_row(
                                 ),
                         )
                         .child(if expanded {
-                            Icon::new(IconName::CaretDown)
+                            Icon::new(IconName::ChevronDown)
                                 .size(px(32.))
                                 .flex_shrink_0()
                                 .selected(false)
                         } else {
-                            Icon::new(IconName::ArrowRight)
+                            Icon::new(IconName::ChevronRight)
                                 .size(px(32.))
                                 .flex_shrink_0()
                                 .selected(false)

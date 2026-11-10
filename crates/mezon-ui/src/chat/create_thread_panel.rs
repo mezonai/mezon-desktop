@@ -61,9 +61,9 @@ pub fn render_create_thread_panel(params: CreateThreadPanelParams<'_>) -> AnyEle
     });
 
     let thread_icon = if create_private {
-        IconName::ThreadIconLocker
+        IconName::ThreadPrivate
     } else {
-        IconName::ThreadIcon
+        IconName::Thread
     };
 
     v_flex()

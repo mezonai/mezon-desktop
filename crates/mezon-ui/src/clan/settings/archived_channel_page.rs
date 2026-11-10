@@ -391,7 +391,7 @@ impl ArchivedChannelPage {
                 .hover(|style| style.bg(cx.theme().bg_hover))
                 .child(self.page_size.to_string())
                 .child(
-                    Icon::new(IconName::CaretDown)
+                    Icon::new(IconName::ChevronDown)
                         .size(px(16.))
                         .text_color(cx.theme().text_secondary)
                         .with_transformation(gpui::Transformation::rotate(gpui::radians(
@@ -473,7 +473,7 @@ impl ArchivedChannelPage {
             .py(px(48.0))
             .child(
                 div().opacity(0.6).child(
-                    Icon::new(IconName::Hashtag)
+                    Icon::new(IconName::Channel)
                         .size(px(48.0))
                         .text_color(theme.text_primary),
                 ),

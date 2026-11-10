@@ -1104,7 +1104,7 @@ impl LoginView {
                             .bg(white())
                             .shadow_md()
                             .child(
-                                Icon::new(IconName::ReloadIcon)
+                                Icon::new(IconName::Refresh)
                                     .size(px(24.))
                                     .text_color(rgb(0x155eef)),
                             ),

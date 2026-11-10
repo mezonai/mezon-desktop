@@ -451,7 +451,7 @@ impl Render for EventDetailView {
                     .hover(|el| el.bg(theme.bg_hover))
                     .on_click(move |_, window, cx| on_back(window, cx))
                     .child(
-                        Icon::new(IconName::ArrowLeft)
+                        Icon::new(IconName::ChevronLeft)
                             .size(px(20.))
                             .text_color(theme.text_primary),
                     ),
@@ -532,7 +532,7 @@ impl Render for EventDetailView {
                             this.pick_files(window, cx);
                         }))
                         .child(
-                            Icon::new(IconName::ImageThumbnail)
+                            Icon::new(IconName::FileImage)
                                 .size(px(20.))
                                 .text_color(theme.text_primary),
                         ),
@@ -736,7 +736,7 @@ fn render_detail_top(
                             .ok();
                     }
                 })
-                .child(Icon::new(IconName::PenEdit).size(px(16.)).selected(false))
+                .child(Icon::new(IconName::Edit).size(px(16.)).selected(false))
                 .child(
                     div()
                         .text_sm()
@@ -788,7 +788,11 @@ fn render_detail_top(
                                     .ok();
                                 }
                             })
-                            .child(Icon::new(IconName::CloseIcon).size(px(16.)).selected(false))
+                            .child(
+                                Icon::new(IconName::CloseCircle)
+                                    .size(px(16.))
+                                    .selected(false),
+                            )
                             .child(mezon_i18n::t(
                                 locale,
                                 "channelCreator.fields.eventDetail.cancel",
@@ -931,7 +935,11 @@ fn render_add_media_tile(theme: &Theme, view: WeakEntity<EventDetailView>) -> im
             .on_click(move |_, window, cx| {
                 view.update(cx, |this, cx| this.pick_files(window, cx)).ok();
             })
-            .child(Icon::new(IconName::AddCircle).size(px(32.)).selected(false)),
+            .child(
+                Icon::new(IconName::PlusCircle)
+                    .size(px(32.))
+                    .selected(false),
+            ),
     )
 }
 

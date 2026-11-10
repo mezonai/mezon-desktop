@@ -619,7 +619,7 @@ fn channel_tab_icon(ctx: ChannelTabContext) -> ChannelIcon {
             channel_icon(ctx.channel_type, ctx.private, ctx.age_restricted)
         }
         _ => ChannelIcon {
-            base: IconName::Hashtag,
+            base: IconName::Channel,
             lock: None,
         },
     }
@@ -915,7 +915,7 @@ mod tests {
         };
         assert_eq!(
             channel_tab_icon(restricted).base.path(),
-            IconName::HashtagWarning.path()
+            IconName::ChannelWarning.path()
         );
         let voice = ChannelTabContext {
             channel_type: ChannelType::Voice,
@@ -931,7 +931,7 @@ mod tests {
         };
         assert_eq!(
             channel_tab_icon(thread).base.path(),
-            IconName::ThreadIcon.path()
+            IconName::Thread.path()
         );
         let forum = ChannelTabContext {
             channel_type: ChannelType::Forum,
@@ -939,7 +939,7 @@ mod tests {
         };
         assert_eq!(
             channel_tab_icon(forum).base.path(),
-            IconName::Hashtag.path()
+            IconName::Channel.path()
         );
     }
 
@@ -950,14 +950,14 @@ mod tests {
             ..ctx(channel_type, is_thread, false, true)
         };
         let voice = channel_tab_icon(private(ChannelType::Voice, false));
-        assert_eq!(voice.base, IconName::SpeakerLocked);
+        assert_eq!(voice.base, IconName::SpeakerLock);
         assert_eq!(voice.lock, None);
         let text = channel_tab_icon(private(ChannelType::Text, false));
-        assert_eq!(text.base, IconName::Hashtag);
-        assert_eq!(text.lock, Some(IconName::HashtagLock));
+        assert_eq!(text.base, IconName::Channel);
+        assert_eq!(text.lock, Some(IconName::Lock));
         let thread = channel_tab_icon(private(ChannelType::Thread, true));
-        assert_eq!(thread.base, IconName::ThreadIcon);
-        assert_eq!(thread.lock, Some(IconName::ThreadLock));
+        assert_eq!(thread.base, IconName::Thread);
+        assert_eq!(thread.lock, Some(IconName::Lock));
         let public_voice = channel_tab_icon(ctx(ChannelType::Voice, false, false, true));
         assert_eq!(public_voice.base, IconName::Speaker);
         assert_eq!(public_voice.lock, None);
@@ -1200,7 +1200,7 @@ mod tests {
         let detected = ctx(channel.channel_type, channel.is_thread(), false, true);
         assert!(!ChannelSettingsTab::Category.visible_in_sidebar(detected));
         assert!(!ChannelSettingsTab::Permissions.visible_in_sidebar(detected));
-        assert_eq!(channel_tab_icon(detected).base, IconName::ThreadIcon);
+        assert_eq!(channel_tab_icon(detected).base, IconName::Thread);
     }
 
     #[test]

@@ -142,7 +142,7 @@ pub(super) fn member_avatar(row: &MemberRow, size: gpui::Pixels) -> Avatar {
 
 pub(super) fn role_glyph(row: &RoleRow, cx: &mut App) -> gpui::AnyElement {
     if row.icon.is_empty() {
-        Icon::new(IconName::RoleIcon)
+        Icon::new(IconName::Role)
             .size(px(20.0))
             .flex_shrink_0()
             .text_color(row.color)
@@ -1149,7 +1149,7 @@ impl PermissionsTab {
                     .p_4()
                     .items_start()
                     .child(
-                        Icon::new(IconName::SyncIcon)
+                        Icon::new(IconName::Sync)
                             .size(px(20.0))
                             .flex_shrink_0()
                             .mr_2()
@@ -1253,7 +1253,7 @@ impl PermissionsTab {
                             .mb_2()
                             .items_center()
                             .child(
-                                Icon::new(IconName::HashtagLock)
+                                Icon::new(IconName::Lock)
                                     .size(px(20.0))
                                     .flex_shrink_0()
                                     .selected(false),
@@ -1528,7 +1528,7 @@ impl PermissionsTab {
                 .items_center()
                 .text_color(theme.tokens.text_theme_primary)
                 .child(
-                    Icon::new(IconName::RoleIcon)
+                    Icon::new(IconName::Role)
                         .size(px(20.0))
                         .flex_shrink_0()
                         .text_color(theme.tokens.text_theme_primary),
@@ -2009,7 +2009,7 @@ fn render_acl_role_row(
                             move |_, _, cx| on_remove(cx)
                         })
                         .child(
-                            Icon::new(IconName::EscIcon)
+                            Icon::new(IconName::CloseCircle)
                                 .size(px(REMOVE_ICON_SIZE))
                                 .text_color(theme.tokens.text_theme_primary)
                                 .group_hover(group_name, |style| {
@@ -2096,7 +2096,7 @@ fn render_acl_member_row(
                                 move |_, _, cx| on_remove(cx)
                             })
                             .child(
-                                Icon::new(IconName::EscIcon)
+                                Icon::new(IconName::CloseCircle)
                                     .size(px(REMOVE_ICON_SIZE))
                                     .text_color(theme.tokens.text_theme_primary)
                                     .group_hover(group_name.clone(), |style| {

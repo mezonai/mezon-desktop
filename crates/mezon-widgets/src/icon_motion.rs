@@ -433,7 +433,7 @@ mod tests {
                     |_, _, _| (),
                     move |bounds, _, window, cx| {
                         motion.borrow_mut().paint(
-                            crate::IconName::Hashtag,
+                            crate::IconName::Channel,
                             bounds,
                             gpui::white(),
                             hovered,
@@ -572,8 +572,8 @@ mod tests {
         assert!(
             playback
                 .frame(
-                    "icons/online-status.svg",
-                    MotionSpec::for_path("icons/online-status.svg"),
+                    "icons/status-online.svg",
+                    MotionSpec::for_path("icons/status-online.svg"),
                     true,
                     now
                 )
@@ -586,11 +586,11 @@ mod tests {
     fn catalog_preserves_special_motion_and_static_statuses() {
         for (path, kind, duration) in [
             ("icons/bell.svg", MotionKind::Swing, 500),
-            ("icons/incoming-call.svg", MotionKind::Ring, 450),
+            ("icons/call-incoming.svg", MotionKind::Ring, 450),
             ("icons/search.svg", MotionKind::Zoom, 300),
             ("icons/settings.svg", MotionKind::Spin, 400),
             ("icons/chat.svg", MotionKind::Typing, 350),
-            ("icons/online-status.svg", MotionKind::None, 0),
+            ("icons/status-online.svg", MotionKind::None, 0),
         ] {
             let spec = MotionSpec::for_path(path).unwrap();
             assert_eq!(spec.anim, kind, "{path}");

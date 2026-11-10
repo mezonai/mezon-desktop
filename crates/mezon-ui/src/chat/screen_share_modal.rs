@@ -732,7 +732,7 @@ fn target_grid(
 }
 
 fn tile_icon(color: gpui::Hsla) -> impl IntoElement {
-    Icon::new(IconName::VoiceScreenShareIcon)
+    Icon::new(IconName::ScreenShare)
         .size(px(40.))
         .text_color(color)
 }
@@ -767,7 +767,7 @@ fn permission_denied_state(locale: &str, cx: &mut Context<ScreenShareModal>) -> 
                 .rounded_full()
                 .bg(icon_bg)
                 .child(
-                    Icon::new(IconName::VoiceScreenShareIcon)
+                    Icon::new(IconName::ScreenShare)
                         .size(px(32.))
                         .text_color(text_muted),
                 ),

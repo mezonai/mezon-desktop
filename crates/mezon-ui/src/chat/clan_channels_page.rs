@@ -548,7 +548,7 @@ impl ClanChannelsPage {
                                 cx,
                             )
                         } else {
-                            Icon::new(IconName::AvatarUser)
+                            Icon::new(IconName::UserCircle)
                                 .size(px(24.))
                                 .color(cx.theme().tokens.icon_normal())
                                 .flex_none()
@@ -677,7 +677,7 @@ impl ClanChannelsPage {
                 .hover(|style| style.bg(cx.theme().bg_hover))
                 .child(self.page_size.to_string())
                 .child(
-                    Icon::new(IconName::CaretDown)
+                    Icon::new(IconName::ChevronDown)
                         .size(px(16.))
                         .text_color(cx.theme().text_secondary)
                         .with_transformation(gpui::Transformation::rotate(gpui::radians(

@@ -47,7 +47,7 @@ pub fn render_controls<V: 'static>(
             "window-control-close",
             color,
             icon_size,
-            IconName::WindowClose,
+            IconName::Close,
             move |style| style.bg(hover_bg),
             |window, cx| {
                 let is_main = crate::app::main_window::handle(cx) == Some(window.window_handle());

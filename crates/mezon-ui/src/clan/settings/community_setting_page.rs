@@ -806,11 +806,10 @@ impl CommunitySettingPage {
                 )
             })
             .when(!has_banner, |el| {
-                el.flex().items_center().justify_center().child(
-                    Icon::new(IconName::UploadImage)
-                        .size(px(32.0))
-                        .selected(false),
-                )
+                el.flex()
+                    .items_center()
+                    .justify_center()
+                    .child(Icon::new(IconName::Camera).size(px(32.0)).selected(false))
             })
             .child(
                 div()
@@ -842,7 +841,7 @@ impl CommunitySettingPage {
                         Icon::new(if has_banner {
                             IconName::Close
                         } else {
-                            IconName::SelectFileIcon
+                            IconName::ImageAdd
                         })
                         .size(px(16.0))
                         .text_color(if has_banner {
@@ -1191,7 +1190,7 @@ impl CommunitySettingPage {
                                                     Icon::new(if copied {
                                                         IconName::Check
                                                     } else {
-                                                        IconName::CopyIcon
+                                                        IconName::Copy
                                                     })
                                                     .size(px(16.0))
                                                     .text_color(if copied {

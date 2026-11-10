@@ -60,7 +60,7 @@ fn render_command_line(msg: &Message, command: &CommandInvocation, ctx: &RowCtx)
         .text_size(px(13.5))
         .child(
             div().flex_none().h(px(20.)).flex().items_center().child(
-                Icon::new(IconName::ArrowRight)
+                Icon::new(IconName::ChevronRight)
                     .size(px(16.))
                     .text_color(theme.tokens.mention_color),
             ),
@@ -274,7 +274,7 @@ fn render_footer(ctx: &RowCtx) -> AnyElement {
         .pt(px(2.))
         .text_size(px(11.5))
         .text_color(theme.text_muted)
-        .child(Icon::new(IconName::EyeClose).size(px(16.)).selected(false))
+        .child(Icon::new(IconName::EyeOff).size(px(16.)).selected(false))
         .child(mezon_i18n::t(ctx.locale, "message.onlyVisibleToYou"))
         .into_any_element()
 }

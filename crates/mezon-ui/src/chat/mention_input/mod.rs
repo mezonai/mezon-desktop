@@ -1651,7 +1651,7 @@ impl MentionInput {
                         }),
                     )
                     .child(
-                        Icon::new(IconName::ImageUploadIcon)
+                        Icon::new(IconName::ImageAdd)
                             .size(px(20.))
                             .flex_none()
                             .text_color(text_color)
@@ -1712,7 +1712,7 @@ impl MentionInput {
                         MouseButton::Left,
                         cx.listener(|this, _, window, cx| this.open_create_poll(window, cx)),
                     )
-                    .child(Icon::new(IconName::CheckListIcon).size(px(20.)).flex_none())
+                    .child(Icon::new(IconName::ListCheck).size(px(20.)).flex_none())
                     .child(div().text_sm().font_weight(FontWeight::MEDIUM).child(
                         mezon_i18n::t(&locale, "message.fileSelection.createPoll").to_string(),
                     ))
@@ -2189,9 +2189,9 @@ impl MentionInput {
                     .into_any_element()
             } else {
                 let icon = if att.is_video {
-                    IconName::PlayButton
+                    IconName::Play
                 } else {
-                    IconName::FileIcon
+                    IconName::File
                 };
                 div()
                     .size(px(64.))
@@ -3929,7 +3929,7 @@ impl MentionInput {
                 Suggestion::Role(role) => {
                     display_color = role.color;
                     let leading = if role.icon_src.is_empty() {
-                        Icon::new(IconName::RoleIcon)
+                        Icon::new(IconName::Role)
                             .size(px(20.))
                             .flex_shrink_0()
                             .text_color(role.color)
@@ -4546,7 +4546,7 @@ impl Render for MentionInput {
                             .cursor_pointer()
                             .hover(|s| s.bg(icon_bg_hover))
                             .child(
-                                Icon::new(IconName::AddCircle)
+                                Icon::new(IconName::PlusCircle)
                                     .size(px(20.))
                                     .selected(false)
                                     .hover(|s| s.text_color(icon_hover)),
@@ -4645,7 +4645,7 @@ impl Render for MentionInput {
                     .child(
                         self.picker_toggle(
                             "emoji-toggle",
-                            IconName::Smile,
+                            IconName::Emoji,
                             toggle_color,
                             icon_bg_hover,
                             icon_hover,
@@ -4795,14 +4795,14 @@ mod channel_suggest_tests {
     #[test]
     fn pool_entry_keeps_the_type_that_picks_the_row_icon() {
         for (channel_type, private, age_restricted, icon) in [
-            (ChannelType::Text, false, 0, IconName::Hashtag),
-            (ChannelType::Text, true, 0, IconName::HashtagLocked),
-            (ChannelType::Text, false, 1, IconName::HashtagWarning),
+            (ChannelType::Text, false, 0, IconName::Channel),
+            (ChannelType::Text, true, 0, IconName::ChannelPrivate),
+            (ChannelType::Text, false, 1, IconName::ChannelWarning),
             (ChannelType::Voice, false, 0, IconName::Speaker),
-            (ChannelType::Voice, true, 0, IconName::SpeakerLocked),
-            (ChannelType::Stream, false, 0, IconName::Stream),
-            (ChannelType::Thread, false, 0, IconName::ThreadIcon),
-            (ChannelType::App, false, 0, IconName::AppChannelIcon),
+            (ChannelType::Voice, true, 0, IconName::SpeakerLock),
+            (ChannelType::Stream, false, 0, IconName::Live),
+            (ChannelType::Thread, false, 0, IconName::Thread),
+            (ChannelType::App, false, 0, IconName::ChannelApp),
         ] {
             let mut ch = channel(channel_type, private);
             ch.age_restricted = age_restricted;

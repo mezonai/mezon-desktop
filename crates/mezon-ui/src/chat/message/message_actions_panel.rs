@@ -121,7 +121,7 @@ pub(super) fn render_message_button(
     element = element.child(div().child(button.label.clone()));
     if has_url {
         element = element.child(
-            Icon::new(IconName::ForwardRightClick)
+            Icon::new(IconName::Forward)
                 .size(px(16.))
                 .ml_2()
                 .text_color(text_color),
@@ -246,7 +246,7 @@ pub(super) fn render_message_select(
         .cursor_pointer()
         .child(left.into_any_element())
         .child(
-            Icon::new(IconName::ArrowDownFill)
+            Icon::new(IconName::CaretDown)
                 .size(px(16.))
                 .text_color(theme.tokens.text_theme_primary)
                 .into_any_element(),
@@ -304,8 +304,8 @@ pub(super) fn button_bg(style: i32) -> Rgba {
 
 fn button_icon(icon: Option<&str>) -> Option<IconName> {
     match icon {
-        Some("PLAY") => Some(IconName::RightFilledTriangle),
-        Some("PAUSE") => Some(IconName::PauseIcon),
+        Some("PLAY") => Some(IconName::CaretRight),
+        Some("PAUSE") => Some(IconName::Pause),
         _ => None,
     }
 }

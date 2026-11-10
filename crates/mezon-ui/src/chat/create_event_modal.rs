@@ -1481,7 +1481,7 @@ impl CreateEventModal {
                                         .min_w_0()
                                         .max_w_full()
                                         .child(
-                                            Icon::new(IconName::SpeakerLocked)
+                                            Icon::new(IconName::SpeakerLock)
                                                 .size(px(16.))
                                                 .text_color(theme.brand),
                                         )
@@ -1741,11 +1741,7 @@ impl CreateEventModal {
                                     .flex()
                                     .items_center()
                                     .gap_2()
-                                    .child(
-                                        Icon::new(IconName::IconEvents)
-                                            .size(px(24.))
-                                            .selected(false),
-                                    )
+                                    .child(Icon::new(IconName::Event).size(px(24.)).selected(false))
                                     .child(div().font_weight(FontWeight::SEMIBOLD).child(start))
                                     .child(
                                         div()
@@ -1801,7 +1797,7 @@ impl CreateEventModal {
                                     .selected(false)
                                     .into_any_element()
                             } else {
-                                Icon::new(IconName::LoudVolume)
+                                Icon::new(IconName::Speaker)
                                     .size(px(20.))
                                     .selected(false)
                                     .into_any_element()

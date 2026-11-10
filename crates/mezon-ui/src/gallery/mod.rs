@@ -34,7 +34,7 @@ fn gallery_thumb_placeholder(bg: gpui::Rgba, muted: gpui::Rgba) -> gpui::AnyElem
         .justify_center()
         .bg(bg)
         .child(
-            Icon::new(IconName::ImageThumbnail)
+            Icon::new(IconName::FileImage)
                 .size(px(20.))
                 .text_color(muted),
         )
@@ -540,7 +540,7 @@ impl GalleryModal {
                                         .rounded_full()
                                         .bg(gpui::hsla(0., 0., 0., 0.6))
                                         .child(
-                                            Icon::new(IconName::AudioPlay)
+                                            Icon::new(IconName::Play)
                                                 .size(px(20.))
                                                 .text_color(gpui::white()),
                                         ),
@@ -780,7 +780,7 @@ fn render_modal_header(
                 .items_center()
                 .gap_4()
                 .child(
-                    Icon::new(IconName::ImageThumbnail)
+                    Icon::new(IconName::FileImage)
                         .size(px(20.))
                         .text_color(theme.text_primary),
                 )
@@ -818,7 +818,7 @@ fn render_filter_tabs(
     entity: &Entity<GalleryModal>,
 ) -> impl IntoElement {
     let entity_toggle = entity.clone();
-    let mut chevron = Icon::new(IconName::CaretDown)
+    let mut chevron = Icon::new(IconName::ChevronDown)
         .size(px(16.))
         .text_color(theme.text_primary);
     if date_filter_open {

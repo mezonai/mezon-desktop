@@ -498,7 +498,7 @@ fn canvas_image_fallback_inner(fallback_fg: gpui::Rgba, fallback_bg: gpui::Rgba)
         .rounded_md()
         .bg(fallback_bg)
         .child(
-            Icon::new(IconName::ImageThumbnail)
+            Icon::new(IconName::FileImage)
                 .size(px(32.))
                 .text_color(fallback_fg),
         )

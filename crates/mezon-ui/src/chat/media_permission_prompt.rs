@@ -165,8 +165,8 @@ fn card_shell(theme: &Theme, width: Pixels) -> gpui::Div {
 
 fn device_icon(device: MediaDevice) -> IconName {
     match device {
-        MediaDevice::Microphone => IconName::VoiceMicIcon,
-        MediaDevice::Camera => IconName::VoiceCameraIcon,
+        MediaDevice::Microphone => IconName::Mic,
+        MediaDevice::Camera => IconName::Video,
     }
 }
 

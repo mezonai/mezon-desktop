@@ -519,7 +519,7 @@ impl Render for FooterProfilePopup {
                                         CustomStatusModal::open(locale, window, cx);
                                     }))
                                     .child(
-                                        Icon::new(IconName::PenEdit)
+                                        Icon::new(IconName::Edit)
                                             .size(px(16.))
                                             .text_color(text_secondary),
                                     ),
@@ -543,7 +543,7 @@ impl Render for FooterProfilePopup {
                                         cx.notify();
                                     }))
                                     .child(
-                                        Icon::new(IconName::TrashIcon)
+                                        Icon::new(IconName::Trash)
                                             .size(px(16.))
                                             .text_color(gpui::rgb(0xdc2626)),
                                     ),
@@ -579,7 +579,7 @@ impl Render for FooterProfilePopup {
             .px_2()
             .py(px(6.))
             .child(
-                Icon::new(IconName::Check)
+                Icon::new(IconName::Wallet)
                     .size(px(16.))
                     .text_color(text_secondary),
             )
@@ -630,7 +630,7 @@ impl Render for FooterProfilePopup {
                         ),
                 )
                 .child(
-                    Icon::new(IconName::ArrowRight)
+                    Icon::new(IconName::ChevronRight)
                         .size(px(16.))
                         .text_color(text_secondary),
                 ),
@@ -692,7 +692,7 @@ impl Render for FooterProfilePopup {
                     );
                 if has_duration {
                     row = row.child(
-                        Icon::new(IconName::ArrowRight)
+                        Icon::new(IconName::ChevronRight)
                             .size(px(16.))
                             .text_color(text_primary)
                             .group_hover(
@@ -760,7 +760,7 @@ impl Render for FooterProfilePopup {
             ))
             .child(Self::action_row(
                 "footer-action-custom-status",
-                IconName::SmilingFace,
+                IconName::Emoji,
                 tk(custom_status_key),
                 |this, window, cx| {
                     let locale = this.locale.clone();
@@ -790,9 +790,9 @@ impl Render for FooterProfilePopup {
                     }))
                     .child(
                         Icon::new(if user_id_copied {
-                            IconName::Tick
+                            IconName::Check
                         } else {
-                            IconName::CopyIcon
+                            IconName::Copy
                         })
                         .size(px(16.))
                         .text_color(text_secondary),

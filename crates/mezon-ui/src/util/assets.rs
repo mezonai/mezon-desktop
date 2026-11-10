@@ -57,7 +57,7 @@ mod tests {
             ONBOARDING,
             EMPTY_WEBHOOK,
             AGE_RESTRICTED_WARNING,
-            "icons/flower.svg",
+            "icons/gift.svg",
         ] {
             let loaded = Assets
                 .load(path)
@@ -66,6 +66,26 @@ mod tests {
                 loaded.is_some_and(|bytes| !bytes.is_empty()),
                 "{path} embedded but empty"
             );
+        }
+    }
+
+    #[test]
+    fn every_motion_catalog_icon_is_embedded_and_renders() {
+        let catalog = include_str!("../../../mezon-widgets/assets/icon-motion.rs");
+        let renderer = gpui::SvgRenderer::new(std::sync::Arc::new(Assets));
+        for path in catalog
+            .split('"')
+            .filter(|part| part.starts_with("icons/") && part.ends_with(".svg"))
+        {
+            let bytes = Assets
+                .load(path)
+                .unwrap_or_else(|error| panic!("{path}: {error}"))
+                .expect("catalog icon is embedded");
+            let frame = renderer
+                .render_single_frame(&bytes, 1.0)
+                .unwrap_or_else(|error| panic!("{path}: {error}"));
+            assert!(frame.size(0).width.0 > 0, "{path}");
+            assert!(frame.size(0).height.0 > 0, "{path}");
         }
     }
 

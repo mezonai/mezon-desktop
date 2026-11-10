@@ -241,7 +241,7 @@ impl RoleSettingPage {
                 .bg(parse_role_color(&color).unwrap_or(theme.text_muted))
                 .child(
                     div().absolute().top_1().right_1().child(
-                        Icon::new(IconName::PenEdit)
+                        Icon::new(IconName::Edit)
                             .size(px(16.))
                             .text_color(gpui::rgb(0x000000)),
                     ),

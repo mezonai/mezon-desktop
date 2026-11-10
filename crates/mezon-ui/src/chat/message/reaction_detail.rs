@@ -294,11 +294,7 @@ pub fn emoji_error_fallback(
             .flex()
             .items_center()
             .justify_center()
-            .child(
-                Icon::new(IconName::ImageThumbnail)
-                    .size(size)
-                    .text_color(color),
-            )
+            .child(Icon::new(IconName::FileImage).size(size).text_color(color))
             .into_any_element()
     }
 }

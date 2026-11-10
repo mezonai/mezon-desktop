@@ -123,41 +123,41 @@ fn call_log_header(
     let key = |name: &'static str| SharedString::from(mezon_i18n::t(locale, name));
     match (call_log.log_type, is_me) {
         (CallLogType::TimeoutCall, true) => (
-            IconName::OutGoingCall,
+            IconName::CallOutgoing,
             key("message.callLog.OUTGOING_CALL"),
             true,
         ),
         (CallLogType::TimeoutCall, false) => {
-            (IconName::MissedCall, key("message.callLog.MISSED"), true)
+            (IconName::CallMissed, key("message.callLog.MISSED"), true)
         }
         (CallLogType::FinishCall, true) => (
-            IconName::OutGoingCall,
+            IconName::CallOutgoing,
             key("message.callLog.OUTGOING_CALL"),
             false,
         ),
         (CallLogType::FinishCall, false) => (
-            IconName::IncomingCall,
+            IconName::CallIncoming,
             key("message.callLog.INCOMING_CALL"),
             false,
         ),
         (CallLogType::RejectCall, true) => (
-            IconName::CancelCall,
+            IconName::CallCancel,
             key("message.callLog.receiverRejected"),
             true,
         ),
         (CallLogType::RejectCall, false) => (
-            IconName::CancelCall,
+            IconName::CallCancel,
             key("message.callLog.youRejected"),
             true,
         ),
         (CallLogType::CancelCall, true) => {
-            (IconName::CancelCall, key("message.callLog.cancel"), true)
+            (IconName::CallCancel, key("message.callLog.cancel"), true)
         }
         (CallLogType::CancelCall, false) => {
-            (IconName::MissedCall, key("message.callLog.MISSED"), true)
+            (IconName::CallMissed, key("message.callLog.MISSED"), true)
         }
         _ => (
-            IconName::OutGoingCall,
+            IconName::CallOutgoing,
             started_call_title(msg, call_log),
             false,
         ),

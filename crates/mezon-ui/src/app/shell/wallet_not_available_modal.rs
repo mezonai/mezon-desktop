@@ -101,7 +101,7 @@ impl Render for WalletNotAvailableModal {
                             .rounded_full()
                             .bg(rgba(ICON_CIRCLE_BG))
                             .child(
-                                Icon::new(IconName::HashtagLock)
+                                Icon::new(IconName::Lock)
                                     .size(px(40.))
                                     .selected(false)
                                     .flex_none(),

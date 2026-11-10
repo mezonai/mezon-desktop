@@ -925,7 +925,7 @@ impl OnboardingSettingPage {
                     .child(self.main_row(
                         mezon_i18n::t(locale, "onBoardingClan.questions.title").into(),
                         mezon_i18n::t(locale, "onBoardingClan.questions.description").into(),
-                        IconName::People,
+                        IconName::User,
                         "onboarding-setup-questions",
                         mezon_i18n::t(locale, "onBoardingClan.buttons.setup").into(),
                         true,
@@ -940,7 +940,7 @@ impl OnboardingSettingPage {
                     .child(self.main_row(
                         mezon_i18n::t(locale, "onBoardingClan.clanGuide.title").into(),
                         mezon_i18n::t(locale, "onBoardingClan.clanGuide.description").into(),
-                        IconName::GuideIcon,
+                        IconName::Guide,
                         "onboarding-edit-guide",
                         mezon_i18n::t(locale, "onBoardingClan.buttons.edit").into(),
                         false,
@@ -1013,7 +1013,7 @@ impl OnboardingSettingPage {
                     .child(action)
                     .when(show_arrow, |button| {
                         button.child(
-                            Icon::new(IconName::LongArrowRight)
+                            Icon::new(IconName::ArrowRight)
                                 .size(px(16.))
                                 .text_color(gpui::white()),
                         )
@@ -1130,7 +1130,7 @@ impl OnboardingSettingPage {
                                             ),
                                     )
                                     .child(
-                                        Icon::new(IconName::ArrowRight)
+                                        Icon::new(IconName::ChevronRight)
                                             .size(px(16.))
                                             .selected(false)
                                             .when(self.channels_expanded, |icon| {
@@ -1201,7 +1201,7 @@ impl OnboardingSettingPage {
                             .gap_2()
                             .font_weight(FontWeight::BOLD)
                             .child(
-                                Icon::new(IconName::AddCircle)
+                                Icon::new(IconName::PlusCircle)
                                     .size(px(20.0))
                                     .text_color(rgb(0x949cf7)),
                             )
@@ -1265,7 +1265,7 @@ impl OnboardingSettingPage {
                                     .text_color(theme.text_secondary)
                                     .hover(|style| style.text_color(theme.danger_text))
                                     .child(
-                                        Icon::new(IconName::TrashIcon)
+                                        Icon::new(IconName::Trash)
                                             .size(px(16.))
                                             .selected(false)
                                             .group_hover(trash_group, |style| {
@@ -1290,7 +1290,7 @@ impl OnboardingSettingPage {
                                     .cursor_pointer()
                                     .text_color(theme.text_secondary)
                                     .child(
-                                        Icon::new(IconName::ArrowRight)
+                                        Icon::new(IconName::ChevronRight)
                                             .size(px(16.))
                                             .selected(false)
                                             .when(question.expanded, |icon| {
@@ -1381,7 +1381,7 @@ impl OnboardingSettingPage {
                             h_flex()
                                 .gap_2()
                                 .child(
-                                    Icon::new(IconName::AddCircle)
+                                    Icon::new(IconName::PlusCircle)
                                         .size(px(20.0))
                                         .text_color(theme.text_primary),
                                 )
@@ -1479,7 +1479,7 @@ impl OnboardingSettingPage {
                             mission.title.clone(),
                             this.task_label(mission.task_type, &mission_locale),
                             channel,
-                            Some(IconName::Hashtag),
+                            Some(IconName::Channel),
                             Some((edit, index, false)),
                             &mission_theme,
                         )
@@ -1511,7 +1511,7 @@ impl OnboardingSettingPage {
                             resource.title.clone(),
                             resource.description.clone(),
                             None,
-                            Some(IconName::RuleIcon),
+                            Some(IconName::Rules),
                             Some((edit, index, true)),
                             &resource_theme,
                         )
@@ -1593,7 +1593,7 @@ impl OnboardingSettingPage {
                                             .text_color(rgb(0xffffff))
                                             .child(owner_name)
                                             .child(
-                                                Icon::new(IconName::OwnerIcon)
+                                                Icon::new(IconName::Owner)
                                                     .size(px(16.))
                                                     .text_color(rgb(0xfacc15)),
                                             ),
@@ -1625,7 +1625,7 @@ impl OnboardingSettingPage {
                 mezon_i18n::t(locale, "onBoardingClan.clanGuideSetting.readTheRules"),
                 "",
                 None,
-                Some(IconName::RuleIcon),
+                Some(IconName::Rules),
                 None,
                 theme,
             ))
@@ -1647,7 +1647,7 @@ impl OnboardingSettingPage {
                             .gap_2()
                             .font_weight(FontWeight::BOLD)
                             .child(
-                                Icon::new(IconName::AddCircle)
+                                Icon::new(IconName::PlusCircle)
                                     .size(px(20.0))
                                     .text_color(rgb(0x949cf7)),
                             )
@@ -1720,7 +1720,7 @@ impl OnboardingSettingPage {
                             .gap_2()
                             .font_weight(FontWeight::BOLD)
                             .child(
-                                Icon::new(IconName::AddCircle)
+                                Icon::new(IconName::PlusCircle)
                                     .size(px(20.0))
                                     .text_color(rgb(0x949cf7)),
                             )
@@ -1824,7 +1824,7 @@ impl OnboardingSettingPage {
                         .bg(rgb(0x5865f2))
                         .hover(|style| style.bg(rgb(0x4752c4)))
                         .child(
-                            Icon::new(IconName::PenEdit)
+                            Icon::new(IconName::Edit)
                                 .size(px(20.0))
                                 .text_color(rgb(0xffffff)),
                         )
@@ -2110,7 +2110,7 @@ impl OnboardingSettingPage {
                             .justify_between()
                             .cursor_pointer()
                             .child(selected)
-                            .child(Icon::new(IconName::CaretDown).size(px(16.)))
+                            .child(Icon::new(IconName::ChevronDown).size(px(16.)))
                             .on_click(move |_, _, cx| {
                                 let _ = toggle.update(cx, |this, cx| {
                                     if let Some(Editor::Mission { channels_open, .. }) =

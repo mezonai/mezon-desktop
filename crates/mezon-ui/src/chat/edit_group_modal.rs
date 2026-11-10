@@ -389,7 +389,7 @@ impl Render for EditGroupModal {
                                                         s.visible()
                                                     })
                                                     .child(
-                                                        Icon::new(IconName::UploadImage)
+                                                        Icon::new(IconName::Camera)
                                                             .size(px(20.))
                                                             .text_color(gpui::white()),
                                                     )

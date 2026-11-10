@@ -204,7 +204,7 @@ fn render_header(
         .border_r_1()
         .border_color(tokens.border_primary)
         .child(
-            Icon::new(IconName::CanvasIcon)
+            Icon::new(IconName::Canvas)
                 .size(px(16.))
                 .text_color(tokens.bg_icon_theme),
         )
@@ -395,7 +395,7 @@ fn render_empty(
         .px_12()
         .gap_2()
         .child(
-            Icon::new(IconName::CanvasIcon)
+            Icon::new(IconName::Canvas)
                 .size(px(48.))
                 .size(px(56.))
                 .text_color(tokens.bg_icon_theme),
@@ -489,7 +489,7 @@ fn canvas_row(
                 Icon::new(if link_copied {
                     IconName::Check
                 } else {
-                    IconName::CopyIcon
+                    IconName::Copy
                 })
                 .size_4()
                 .text_color(if link_copied {

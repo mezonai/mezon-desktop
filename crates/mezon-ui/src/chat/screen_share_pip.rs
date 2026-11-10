@@ -92,7 +92,7 @@ impl Render for ScreenSharePipView {
                 .size_full()
                 .object_fit(ObjectFit::Contain)
                 .into_any_element(),
-            None => Icon::new(IconName::VoiceScreenShareIcon)
+            None => Icon::new(IconName::ScreenShare)
                 .size(px(40.))
                 .text_color(rgb(0x9a9a9a))
                 .into_any_element(),

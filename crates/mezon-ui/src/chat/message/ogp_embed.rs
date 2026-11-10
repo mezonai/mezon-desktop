@@ -220,7 +220,7 @@ fn ogp_image_fallback(fallback_fg: gpui::Rgba) -> AnyElement {
         .justify_center()
         .opacity(0.3)
         .child(
-            Icon::new(IconName::ImageThumbnail)
+            Icon::new(IconName::FileImage)
                 .size(px(32.))
                 .text_color(fallback_fg),
         )

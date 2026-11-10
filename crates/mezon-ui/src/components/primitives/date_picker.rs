@@ -314,7 +314,7 @@ impl Render for DatePicker {
                             .child(display),
                     )
                     .child(
-                        Icon::new(IconName::DatePickerIndicator)
+                        Icon::new(IconName::Calendar)
                             .size(px(16.))
                             .flex_none()
                             .selected(false),

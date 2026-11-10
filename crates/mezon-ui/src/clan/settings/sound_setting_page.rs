@@ -347,7 +347,7 @@ impl SoundSettingPage {
             .border_color(theme.border)
             .bg(theme.tokens.theme_setting_nav)
             .child(
-                Icon::new(IconName::LoudVolume)
+                Icon::new(IconName::Speaker)
                     .size(px(40.0))
                     .text_color(theme.tokens.text_theme_primary)
                     .mb(px(8.0)),
@@ -408,7 +408,7 @@ impl SoundSettingPage {
                     .items_center()
                     .gap(px(8.0))
                     .child(
-                        Icon::new(IconName::LoudVolume)
+                        Icon::new(IconName::Speaker)
                             .size(px(20.0))
                             .text_color(theme.tokens.text_theme_primary),
                     )
@@ -577,7 +577,7 @@ fn render_sound_card(
                             .ghost()
                             .with_size(Size::XSmall)
                             .icon(
-                                Icon::new(IconName::PenEdit)
+                                Icon::new(IconName::Edit)
                                     .size(px(16.0))
                                     .text_color(theme.tokens.text_theme_message),
                             )
@@ -645,9 +645,9 @@ fn render_sound_card(
                         .cursor_pointer()
                         .child(
                             Icon::new(if previewing {
-                                IconName::AudioPause
+                                IconName::Pause
                             } else {
-                                IconName::AudioPlay
+                                IconName::Play
                             })
                             .size(px(16.0))
                             .text_color(gpui::white()),
@@ -788,7 +788,7 @@ impl Render for SoundSettingPage {
                                         .items_center()
                                         .gap(px(8.0))
                                         .child(
-                                            Icon::new(IconName::LoudVolume)
+                                            Icon::new(IconName::Speaker)
                                                 .size(px(20.0))
                                                 .text_color(theme.tokens.text_theme_primary),
                                         )

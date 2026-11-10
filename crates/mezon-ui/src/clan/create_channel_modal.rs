@@ -443,9 +443,7 @@ impl Render for CreateChannelModal {
                                         .gap_2()
                                         .items_center()
                                         .child(
-                                            Icon::new(IconName::HashtagLock)
-                                                .size(px(24.))
-                                                .selected(false),
+                                            Icon::new(IconName::Lock).size(px(24.)).selected(false),
                                         )
                                         .child(
                                             div()

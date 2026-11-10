@@ -446,7 +446,7 @@ fn render_mcp_copy_button(
             Icon::new(if copied {
                 IconName::Check
             } else {
-                IconName::CopyIcon
+                IconName::Copy
             })
             .size(px(16.))
             .text_color(if copied {

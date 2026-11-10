@@ -340,7 +340,7 @@ impl Render for CreatePollModal {
                 .aspect_square()
                 .flex_none()
                 .into_any_element(),
-                None => Icon::new(IconName::Smile)
+                None => Icon::new(IconName::Emoji)
                     .size(px(20.))
                     .flex_none()
                     .text_color(theme.tokens.text_theme_primary)
@@ -409,7 +409,7 @@ impl Render for CreatePollModal {
                             this.remove_answer(index, cx);
                         }))
                         .child(
-                            Icon::new(IconName::TrashIcon)
+                            Icon::new(IconName::Trash)
                                 .size(px(20.))
                                 .text_color(theme.tokens.text_theme_primary),
                         ),
@@ -447,7 +447,7 @@ impl Render for CreatePollModal {
                         this.add_answer(window, cx);
                     }))
                     .child(
-                        Icon::new(IconName::AddCircle)
+                        Icon::new(IconName::PlusCircle)
                             .size(px(16.))
                             .flex_none()
                             .text_color(theme.tokens.text_theme_primary)

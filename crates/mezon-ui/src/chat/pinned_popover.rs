@@ -912,7 +912,7 @@ fn render_header(theme: &Theme, locale: &str) -> impl IntoElement {
         .border_color(tokens.border_primary)
         .bg(tokens.theme_setting_nav)
         .child(
-            Icon::new(IconName::PinList)
+            Icon::new(IconName::Pin)
                 .size(px(16.))
                 .text_color(tokens.bg_icon_theme),
         )

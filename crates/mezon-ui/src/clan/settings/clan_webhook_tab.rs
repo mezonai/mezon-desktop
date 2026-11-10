@@ -533,7 +533,7 @@ impl Render for ClanWebhookTab {
                                                 }
                                             });
                                             pick_btn.child(
-                                                Icon::new(IconName::ImageUploadIcon)
+                                                Icon::new(IconName::ImageAdd)
                                                     .size(px(16.))
                                                     .selected(false),
                                             )
@@ -569,7 +569,7 @@ impl Render for ClanWebhookTab {
                                             .gap_1()
                                             .items_center()
                                             .child(
-                                                Icon::new(IconName::ClockIcon)
+                                                Icon::new(IconName::Clock)
                                                     .size(px(16.))
                                                     .selected(false),
                                             )
@@ -583,9 +583,11 @@ impl Render for ClanWebhookTab {
                             )
                             .when(can_manage, |row| {
                                 row.child(if expanded {
-                                    Icon::new(IconName::CaretDown).size(px(20.)).selected(false)
+                                    Icon::new(IconName::ChevronDown)
+                                        .size(px(20.))
+                                        .selected(false)
                                 } else {
-                                    Icon::new(IconName::ArrowRight)
+                                    Icon::new(IconName::ChevronRight)
                                         .size(px(20.0))
                                         .selected(false)
                                 })

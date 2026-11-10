@@ -96,7 +96,7 @@ fn banned_notice(locale: &str, remaining: Option<i64>, cx: &App) -> gpui::AnyEle
         .text_color(theme.tokens.text_theme_primary)
         .overflow_hidden()
         .child(
-            Icon::new(IconName::TriangleAlert)
+            Icon::new(IconName::Warning)
                 .size(px(24.))
                 .flex_none()
                 .text_color(theme.danger_text),
@@ -180,7 +180,7 @@ fn onboarding_mission_banner(locale: &str, cx: &mut App) -> Option<gpui::AnyElem
                     .bg(theme.tokens.bg_tertiary)
                     .hover(|style| style.bg(theme.tokens.bg_item_hover))
                     .child(
-                        Icon::new(IconName::Hashtag)
+                        Icon::new(IconName::Channel)
                             .size(px(20.))
                             .text_color(theme.tokens.text_theme_primary),
                     )
@@ -857,7 +857,7 @@ fn latest_activity_strip(
                 .items_center()
                 .justify_center()
                 .size(px(28.))
-                .child(Icon::new(IconName::TopicIcon).size(px(24.)).selected(true))
+                .child(Icon::new(IconName::Topic).size(px(24.)).selected(true))
                 .when(topic_unread, |icon| {
                     icon.child(unread_dot().absolute().top_0().right_0())
                 }),
@@ -1092,7 +1092,7 @@ fn latest_activity_strip(
             cell.cursor_pointer().hover(move |style| style.bg(hover))
         })
         .child(pin_avatar.unwrap_or_else(|| {
-            Icon::new(IconName::PinList)
+            Icon::new(IconName::Pin)
                 .size(px(20.))
                 .selected(false)
                 .into_any_element()

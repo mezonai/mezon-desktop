@@ -276,7 +276,7 @@ impl Render for TopicPanel {
                     .items_center()
                     .gap_2()
                     .child(
-                        Icon::new(IconName::TopicIcon)
+                        Icon::new(IconName::Topic)
                             .size(px(20.))
                             .text_color(tokens.text_theme_primary),
                     )

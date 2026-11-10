@@ -518,7 +518,7 @@ impl ConfirmBirthdayModal {
                     .cursor_pointer()
                     .child(div().min_w_0().truncate().child(label))
                     .child(
-                        Icon::new(IconName::CaretDown)
+                        Icon::new(IconName::ChevronDown)
                             .size(px(16.))
                             .flex_none()
                             .text_color(rgb(FIELD_TEXT)),

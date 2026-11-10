@@ -1169,9 +1169,9 @@ impl Render for SoundPicker {
                                         .when(!can_preview, |el| el.opacity(0.5))
                                         .child(
                                             Icon::new(if previewing {
-                                                IconName::AudioPause
+                                                IconName::Pause
                                             } else {
-                                                IconName::AudioPlay
+                                                IconName::Play
                                             })
                                             .size(px(16.0))
                                             .text_color(gpui::white()),
@@ -1257,7 +1257,7 @@ impl Render for SoundPicker {
                                 .items_center()
                                 .justify_center()
                                 .child(
-                                    Icon::new(IconName::FileThumbAudio)
+                                    Icon::new(IconName::FileAudio)
                                         .size(px(48.0))
                                         .text_color(theme.tokens.text_theme_primary),
                                 ),

@@ -128,7 +128,7 @@ fn filter_chip(
                 .child(label.into()),
         )
         .child(
-            Icon::new(IconName::ArrowDownFill)
+            Icon::new(IconName::CaretDown)
                 .size(px(16.0))
                 .flex_shrink_0()
                 .selected(false),
@@ -601,7 +601,7 @@ impl AuditLogSettingPage {
             .h(px(FILTER_CHIP_HEIGHT))
             .child(div().w_full().h_full().child(filter_chip(
                 "audit-log-user-filter-chip",
-                IconName::MemberIcon,
+                IconName::Members,
                 label,
                 user_active,
                 theme,
@@ -688,7 +688,7 @@ impl AuditLogSettingPage {
             .h(px(FILTER_CHIP_HEIGHT))
             .child(div().w_full().h_full().child(filter_chip(
                 "audit-log-action-filter-chip",
-                IconName::FiltersIcon,
+                IconName::Filter,
                 label,
                 action_active,
                 theme,

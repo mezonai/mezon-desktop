@@ -55,7 +55,7 @@ impl RenderOnce for Spinner {
         let color = self
             .color
             .unwrap_or_else(|| cx.theme().tokens.icon_normal().into());
-        let icon = crate::Icon::new(crate::IconName::LoadingSpinner)
+        let icon = crate::Icon::new(crate::IconName::Spinner)
             .motion_enabled(false)
             .size(diameter(self.size))
             .flex_none()

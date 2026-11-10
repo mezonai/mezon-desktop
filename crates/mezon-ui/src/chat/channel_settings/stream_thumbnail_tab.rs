@@ -340,7 +340,7 @@ impl Render for StreamThumbnailTab {
                                 .large()
                                 .label(self.t("streamThumbnail.buttons.change", cx))
                                 .icon(
-                                    Icon::new(IconName::PenEdit)
+                                    Icon::new(IconName::Edit)
                                         .size(px(16.))
                                         .text_color(theme.text_primary),
                                 )
@@ -353,7 +353,7 @@ impl Render for StreamThumbnailTab {
                                 .large()
                                 .label(self.t("streamThumbnail.buttons.remove", cx))
                                 .icon(
-                                    Icon::new(IconName::TrashIcon)
+                                    Icon::new(IconName::Trash)
                                         .size(px(16.))
                                         .text_color(theme.text_primary),
                                 )
@@ -395,7 +395,7 @@ impl Render for StreamThumbnailTab {
                                 .items_center()
                                 .justify_center()
                                 .child(
-                                    Icon::new(IconName::UploadImage)
+                                    Icon::new(IconName::Camera)
                                         .size(px(48.))
                                         .text_color(theme.brand),
                                 ),
@@ -416,7 +416,7 @@ impl Render for StreamThumbnailTab {
                                 .large()
                                 .label(self.t("streamThumbnail.buttons.selectFile", cx))
                                 .icon(
-                                    Icon::new(IconName::UploadImage)
+                                    Icon::new(IconName::Camera)
                                         .size(px(16.))
                                         .text_color(theme.text_primary),
                                 )
@@ -460,17 +460,17 @@ impl Render for StreamThumbnailTab {
             (
                 "streamThumbnail.requirements.format.title",
                 "streamThumbnail.requirements.format.value",
-                IconName::ImageThumbnail,
+                IconName::FileImage,
             ),
             (
                 "streamThumbnail.requirements.resolution.title",
                 "streamThumbnail.requirements.resolution.value",
-                IconName::ImageUploadIcon,
+                IconName::ImageAdd,
             ),
             (
                 "streamThumbnail.requirements.sizeLimit.title",
                 "streamThumbnail.requirements.sizeLimit.value",
-                IconName::FileIcon,
+                IconName::File,
             ),
         ] {
             content = content.child(
@@ -599,7 +599,7 @@ impl Render for ThumbnailConfirmation {
             }))
             .when(!upload, |button| {
                 button.icon(
-                    Icon::new(IconName::TrashIcon)
+                    Icon::new(IconName::Trash)
                         .size(px(16.))
                         .text_color(theme.text_primary),
                 )
@@ -637,7 +637,7 @@ impl Render for ThumbnailConfirmation {
                                 .items_center()
                                 .justify_center()
                                 .child(
-                                    Icon::new(IconName::UploadImage)
+                                    Icon::new(IconName::Camera)
                                         .size(px(24.))
                                         .text_color(theme.brand),
                                 ),

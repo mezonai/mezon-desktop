@@ -593,7 +593,7 @@ pub fn render_mini_bar(
                 Icon::new(if link_copied {
                     IconName::Check
                 } else {
-                    IconName::CopyIcon
+                    IconName::Copy
                 })
                 .size(px(16.))
                 .text_color(if link_copied {
@@ -632,7 +632,7 @@ pub fn render_mini_bar(
                         .items_center()
                         .gap_1()
                         .child(
-                            Icon::new(IconName::LoudVolume)
+                            Icon::new(IconName::Speaker)
                                 .size(px(16.))
                                 .text_color(header_color),
                         )
@@ -661,9 +661,9 @@ pub fn render_mini_bar(
         panel_control_button(
             "voice-panel-mic",
             if mic_enabled {
-                IconName::VoiceMicIcon
+                IconName::Mic
             } else {
-                IconName::VoiceMicDisabledIcon
+                IconName::MicOff
             },
             neutral_bg,
             neutral_hover,
@@ -691,9 +691,9 @@ pub fn render_mini_bar(
         panel_control_button(
             "voice-panel-camera",
             if camera_enabled {
-                IconName::VoiceCameraIcon
+                IconName::Video
             } else {
-                IconName::VoiceCameraDisabledIcon
+                IconName::VideoOff
             },
             neutral_bg,
             neutral_hover,
@@ -731,9 +731,9 @@ pub fn render_mini_bar(
         panel_control_button(
             "voice-panel-screen",
             if screen_enabled {
-                IconName::VoiceScreenShareStopIcon
+                IconName::ScreenShareOff
             } else {
-                IconName::VoiceScreenShareIcon
+                IconName::ScreenShare
             },
             bg,
             hover,
@@ -772,7 +772,7 @@ pub fn render_mini_bar(
             (neutral_bg.into(), neutral_hover, theme.text_primary.into())
         };
         push_to_talk_press(
-            panel_control_button("voice-panel-ptt", IconName::InPttCall, bg, hover, color)
+            panel_control_button("voice-panel-ptt", IconName::Ptt, bg, hover, color)
                 .relative()
                 .tooltip(Tooltip::text(mezon_i18n::t(
                     locale,
@@ -787,7 +787,7 @@ pub fn render_mini_bar(
         let voice = voice.clone();
         panel_control_button(
             "voice-panel-leave",
-            IconName::EndCall,
+            IconName::CallEnd,
             gpui::rgb(LEAVE_RED),
             gpui::rgb(LEAVE_RED_HOVER),
             gpui::rgb(0xffffff),
@@ -934,9 +934,9 @@ fn voice_header<H: CallLayoutHost>(
             })
             .when_some(voice.cloned(), |row, voice| {
                 let layout_icon = if voice.read(cx).focused_tile().is_some() {
-                    IconName::VoiceGridIcon
+                    IconName::Grid
                 } else {
-                    IconName::VoiceFocusIcon
+                    IconName::LayoutFocus
                 };
                 row.child(
                     voice_header_icon_shell("voice-layout-toggle", theme, false)
@@ -1136,11 +1136,7 @@ impl RenderOnce for VoiceInboxTrigger {
             .child(
                 div()
                     .relative()
-                    .child(
-                        Icon::new(IconName::EmptyUnread)
-                            .size(px(20.))
-                            .text_color(tint),
-                    )
+                    .child(Icon::new(IconName::Inbox).size(px(20.)).text_color(tint))
                     .when(self.show_badge, |d| {
                         d.child(
                             div()
@@ -1449,7 +1445,7 @@ fn join_role_button(
                         .hover(move |s| s.bg(green_hover))
                         .text_color(gpui::rgb(0xffffff))
                         .child(
-                            Icon::new(IconName::CaretDown)
+                            Icon::new(IconName::ChevronDown)
                                 .size(px(16.))
                                 .text_color(gpui::rgb(0xffffff)),
                         )
@@ -1847,7 +1843,7 @@ fn raised_hands_overlay(
                             .child(name),
                     )
                     .child(
-                        Icon::new(IconName::VoiceRaiseHandIcon)
+                        Icon::new(IconName::HandRaise)
                             .size(px(32.))
                             .text_color(gpui::rgb(RAISE_HAND_GOLD)),
                     )
@@ -2280,7 +2276,7 @@ pub(crate) fn render_screen_fullscreen_overlay(
     let frame_dims = frame_opt.as_ref().map(|f| f.dimensions());
     let media = match frame_opt {
         Some(frame) => render_voice_frame(frame, ObjectFit::Contain),
-        None => Icon::new(IconName::VoiceScreenShareIcon)
+        None => Icon::new(IconName::ScreenShare)
             .size(px(48.))
             .size(px(64.))
             .selected(false)
@@ -2302,7 +2298,7 @@ pub(crate) fn render_screen_fullscreen_overlay(
         .cursor_pointer()
         .hover(|s| s.bg(gpui::rgba(0x000000d9)))
         .child(
-            Icon::new(IconName::ExitFullScreen)
+            Icon::new(IconName::FullscreenExit)
                 .size(px(20.))
                 .text_color(gpui::rgb(0xffffff)),
         )
@@ -2409,7 +2405,7 @@ fn kick_confirm_modal(
                         .rounded_full()
                         .bg(theme.bg_hover)
                         .child(
-                            Icon::new(IconName::CloseIcon)
+                            Icon::new(IconName::CloseCircle)
                                 .size(px(24.))
                                 .text_color(theme.danger_text),
                         ),
@@ -2866,15 +2862,15 @@ fn render_focus_layout<H: CallLayoutHost>(
             })
             .child(
                 Icon::new(if show_members {
-                    IconName::VoiceArowDownIcon
+                    IconName::ChevronDown
                 } else {
-                    IconName::VoiceArowUpIcon
+                    IconName::ChevronUp
                 })
                 .size(px(20.))
                 .text_color(gpui::rgb(0xffffff)),
             )
             .child(
-                Icon::new(IconName::MemberIcon)
+                Icon::new(IconName::Members)
                     .size(px(20.))
                     .text_color(gpui::rgb(0xffffff)),
             )
@@ -3180,7 +3176,7 @@ fn build_participant_menu(
             let identity = identity.clone();
             menu = menu.danger_item_icon(
                 mezon_i18n::t(locale, "contextMenu.muteMic").to_string(),
-                IconName::VoiceMicDisabledIcon,
+                IconName::MicOff,
                 move |_window, cx| {
                     let identity = identity.clone();
                     voice.update(cx, |store, cx| store.mute_participant(identity, cx));
@@ -3192,7 +3188,7 @@ fn build_participant_menu(
         menu = menu
             .danger_item_icon(
                 mezon_i18n::t(locale, "contextMenu.member.kick").to_string(),
-                IconName::CloseIcon,
+                IconName::CloseCircle,
                 move |_window, cx| {
                     let identity = identity.clone();
                     let name = name.clone();
@@ -3208,7 +3204,7 @@ fn build_participant_menu(
         let label = mezon_i18n::t(locale, "contextMenu.giveFlower");
         let locale = locale.to_string();
         menu = menu
-            .item_icon(label, IconName::Flower, move |window, cx| {
+            .item_icon(label, IconName::Gift, move |window, cx| {
                 let identity = identity.clone();
                 let locale = locale.clone();
                 let wallet_available = WalletStore::try_global(cx)
@@ -3232,7 +3228,7 @@ fn build_participant_menu(
 
     menu.item_icon(
         mezon_i18n::t(locale, "contextMenu.copyUserId").to_string(),
-        IconName::CopyIcon,
+        IconName::Copy,
         move |_window, cx| {
             cx.write_to_clipboard(ClipboardItem::new_string(identity.clone()));
         },
@@ -3397,7 +3393,7 @@ fn tile_inner(
     }
 
     if cell.is_screen {
-        return Icon::new(IconName::VoiceScreenShareIcon)
+        return Icon::new(IconName::ScreenShare)
             .size(px(48.))
             .selected(false)
             .into_any_element();
@@ -3453,7 +3449,7 @@ fn tile_metadata(locale: &str, cell: &VideoCell) -> AnyElement {
                 .bg(gpui::rgba(0x00000080))
                 .when(cell.muted && !cell.is_screen, |this| {
                     this.child(
-                        Icon::new(IconName::VoiceMicDisabledIcon)
+                        Icon::new(IconName::MicOff)
                             .size(px(16.))
                             .flex_none()
                             .text_color(gpui::rgba(0xffffff80)),
@@ -3461,7 +3457,7 @@ fn tile_metadata(locale: &str, cell: &VideoCell) -> AnyElement {
                 })
                 .when(cell.is_screen, |this| {
                     this.child(
-                        Icon::new(IconName::VoiceScreenShareIcon)
+                        Icon::new(IconName::ScreenShare)
                             .size(px(16.))
                             .flex_none()
                             .text_color(gpui::rgb(0xffffff)),
@@ -3528,7 +3524,7 @@ fn tile_sound_overlay(store: &VoiceStore, cell: &VideoCell) -> Option<AnyElement
             .border_color(gpui::rgba(0xffffff33))
             .shadow_lg()
             .child(
-                Icon::new(IconName::VoiceSoundControlIcon)
+                Icon::new(IconName::Soundboard)
                     .size(px(16.))
                     .text_color(gpui::rgb(0xffffff)),
             )
@@ -3606,9 +3602,9 @@ fn control_bar(
             neutral_bg,
             neutral_hover,
             if mic_enabled {
-                IconName::VoiceMicIcon
+                IconName::Mic
             } else {
-                IconName::VoiceMicDisabledIcon
+                IconName::MicOff
             },
             theme.text_primary,
         )
@@ -3623,9 +3619,9 @@ fn control_bar(
             neutral_bg,
             neutral_hover,
             if camera_enabled {
-                IconName::VoiceCameraIcon
+                IconName::Video
             } else {
-                IconName::VoiceCameraDisabledIcon
+                IconName::VideoOff
             },
             theme.text_primary,
         )
@@ -3677,9 +3673,9 @@ fn control_bar(
             bg,
             hover,
             if screen_enabled {
-                IconName::VoiceScreenShareStopIcon
+                IconName::ScreenShareOff
             } else {
-                IconName::VoiceScreenShareIcon
+                IconName::ScreenShare
             },
             color,
         )
@@ -3723,9 +3719,9 @@ fn control_bar(
             (neutral_bg.into(), neutral_hover, theme.text_primary.into())
         };
         let button = push_to_talk_press(
-            circle_button("voice-ptt-btn", bg, hover, IconName::InPttCall, color).tooltip(
-                Tooltip::text(mezon_i18n::t(locale, "channelVoice.pushToTalk.hold")),
-            ),
+            circle_button("voice-ptt-btn", bg, hover, IconName::Ptt, color).tooltip(Tooltip::text(
+                mezon_i18n::t(locale, "channelVoice.pushToTalk.hold"),
+            )),
             voice,
         );
         let button = device_control(
@@ -3801,9 +3797,9 @@ fn control_bar(
             bg,
             hover,
             if active {
-                IconName::VoiceRecordStopIcon
+                IconName::Stop
             } else {
-                IconName::VoiceRecordIcon
+                IconName::Record
             },
             color,
         )
@@ -3830,7 +3826,7 @@ fn control_bar(
             "voice-leave-btn",
             gpui::rgb(LEAVE_RED),
             gpui::rgb(LEAVE_RED_HOVER).into(),
-            IconName::EndCall,
+            IconName::CallEnd,
             gpui::rgb(0xffffff),
         )
         .tooltip(Tooltip::text(leave_tooltip))
@@ -3857,7 +3853,7 @@ fn control_bar(
             "voice-raise-hand-btn",
             neutral_bg,
             neutral_hover,
-            IconName::VoiceRaiseHandIcon,
+            IconName::HandRaise,
             raise_color,
         )
         .tooltip(Tooltip::text(raise_tooltip))
@@ -3890,17 +3886,11 @@ fn control_bar(
                 "channelVoice.breakout.title"
             },
         );
-        circle_button(
-            "voice-breakout-btn",
-            bg,
-            hover,
-            IconName::VoiceBreakoutIcon,
-            color,
-        )
-        .tooltip(Tooltip::text(tooltip))
-        .on_click(move |_, window, cx| {
-            crate::chat::voice_breakout::BreakoutRoomsModal::show(voice.clone(), window, cx)
-        })
+        circle_button("voice-breakout-btn", bg, hover, IconName::Breakout, color)
+            .tooltip(Tooltip::text(tooltip))
+            .on_click(move |_, window, cx| {
+                crate::chat::voice_breakout::BreakoutRoomsModal::show(voice.clone(), window, cx)
+            })
     });
     let return_to_main_button = store.breakout_room_id().is_some().then(|| {
         let voice = voice.clone();
@@ -3960,20 +3950,14 @@ fn control_bar(
                 "channelVoice.addAgent"
             },
         );
-        let button = circle_button(
-            "voice-agent-btn",
-            bg,
-            hover,
-            IconName::VoiceAgentIcon,
-            color,
-        )
-        .tooltip(Tooltip::text(agent_tooltip))
-        .on_click(move |_, _, cx| {
-            if !agent_active {
-                dismiss_agent_hint(&hint_settings, cx);
-            }
-            voice.update(cx, |store, cx| store.toggle_agent(cx));
-        });
+        let button = circle_button("voice-agent-btn", bg, hover, IconName::Bot, color)
+            .tooltip(Tooltip::text(agent_tooltip))
+            .on_click(move |_, _, cx| {
+                if !agent_active {
+                    dismiss_agent_hint(&hint_settings, cx);
+                }
+                voice.update(cx, |store, cx| store.toggle_agent(cx));
+            });
         div().relative().child(button).children(
             agent_hint_visible.then(|| render_agent_hint_callout(theme, locale, settings)),
         )
@@ -4001,7 +3985,7 @@ fn control_bar(
                     gpui::transparent_black()
                 },
                 theme.bg_secondary.into(),
-                IconName::PenEdit,
+                IconName::Edit,
                 draw_color,
             )
             .tooltip(Tooltip::text(if draw_active {
@@ -4024,7 +4008,7 @@ fn control_bar(
                 "voice-pip-btn",
                 gpui::transparent_black(),
                 theme.bg_secondary.into(),
-                IconName::VoicePopOutIcon,
+                IconName::ExternalLink,
                 pip_color,
             )
             .on_click(move |_, _, cx| {
@@ -4045,9 +4029,9 @@ fn control_bar(
                 gpui::transparent_black(),
                 theme.bg_secondary.into(),
                 if is_fullscreen {
-                    IconName::ExitFullScreen
+                    IconName::FullscreenExit
                 } else {
-                    IconName::FullScreen
+                    IconName::Fullscreen
                 },
                 theme.text_secondary,
             )
@@ -4075,7 +4059,7 @@ fn control_bar(
             "voice-emoji-btn",
             neutral_bg,
             neutral_hover,
-            IconName::VoiceEmojiControlIcon,
+            IconName::Emoji,
             theme.text_muted,
         )
         .tooltip(Tooltip::text(mezon_i18n::t(
@@ -4094,7 +4078,7 @@ fn control_bar(
             "voice-sound-btn",
             neutral_bg,
             neutral_hover,
-            IconName::VoiceSoundControlIcon,
+            IconName::Soundboard,
             theme.text_muted,
         )
         .on_click(move |_, window, cx| {
@@ -4143,7 +4127,7 @@ fn control_bar(
                     div()
                         .id("voice-record-stalled")
                         .child(
-                            Icon::new(IconName::VoiceScreenShareStopIcon)
+                            Icon::new(IconName::ScreenShareOff)
                                 .size(px(16.))
                                 .text_color(gpui::rgb(RAISE_HAND_GOLD)),
                         )
@@ -4247,7 +4231,7 @@ fn render_network_warning_callout(locale: &str, voice: &Entity<VoiceStore>) -> A
                         .rounded_full()
                         .bg(with_alpha(gpui::rgb(NETWORK_WARNING_ICON), 0.15))
                         .child(
-                            Icon::new(IconName::TriangleAlert)
+                            Icon::new(IconName::Warning)
                                 .size(px(20.))
                                 .text_color(gpui::rgb(NETWORK_WARNING_ICON)),
                         ),
@@ -4298,7 +4282,7 @@ fn render_network_warning_callout(locale: &str, voice: &Entity<VoiceStore>) -> A
                 .ml(px(16. + 22. - PTT_HINT_CARET_PX / 2.))
                 .w(px(PTT_HINT_CARET_PX))
                 .h(px(PTT_HINT_CARET_PX / 2.))
-                .path("icons/tour-caret-down.svg")
+                .path("icons/caret-down.svg")
                 .text_color(card_bg),
         );
     deferred(callout).into_any_element()
@@ -4342,7 +4326,7 @@ fn render_ptt_hint_callout(
     render_control_hint_callout(
         ("voice-ptt-hint", "voice-ptt-hint-close"),
         theme,
-        (IconName::InPttCall, accent),
+        (IconName::Ptt, accent),
         title,
         body,
         move |cx| dismiss.update(cx, |store, cx| store.dismiss_ptt_hint(cx)),
@@ -4360,7 +4344,7 @@ fn render_agent_hint_callout(
     render_control_hint_callout(
         ("voice-agent-hint", "voice-agent-hint-close"),
         theme,
-        (IconName::VoiceAgentIcon, gpui::rgb(ACCENT_BLUE).into()),
+        (IconName::Bot, gpui::rgb(ACCENT_BLUE).into()),
         title,
         body,
         move |cx| dismiss_agent_hint(&settings, cx),
@@ -4467,7 +4451,7 @@ fn hint_caret(fill: impl Into<Hsla>, outline: Hsla) -> gpui::Div {
                 .left_0()
                 .w(px(outer))
                 .h(px(outer / 2.))
-                .path("icons/tour-caret-down.svg")
+                .path("icons/caret-down.svg")
                 .text_color(outline),
         )
         .child(
@@ -4477,7 +4461,7 @@ fn hint_caret(fill: impl Into<Hsla>, outline: Hsla) -> gpui::Div {
                 .left(px(1.))
                 .w(px(PTT_HINT_CARET_PX))
                 .h(px(PTT_HINT_CARET_PX / 2.))
-                .path("icons/tour-caret-down.svg")
+                .path("icons/caret-down.svg")
                 .text_color(fill.into()),
         )
 }
@@ -4550,7 +4534,7 @@ impl RenderOnce for InteractiveAppTrigger {
             "voice-interactive-app-btn",
             if self.open { self.bg_hover } else { self.bg },
             self.bg_hover,
-            IconName::Joystick,
+            IconName::Gamepad,
             self.icon_color,
         )
         .tooltip(Tooltip::text(self.label));
@@ -4654,11 +4638,7 @@ impl Render for InteractiveAppPopoverPanel {
                                 .items_center()
                                 .gap_2()
                                 .text_color(green)
-                                .child(
-                                    Icon::new(IconName::GamingConsoleIcon)
-                                        .size(px(16.))
-                                        .text_color(green),
-                                )
+                                .child(Icon::new(IconName::Gamepad).size(px(16.)).text_color(green))
                                 .child(mezon_i18n::t(&self.locale, key).to_string()),
                         )
                         .child(
@@ -4679,11 +4659,7 @@ impl Render for InteractiveAppPopoverPanel {
                                 .items_center()
                                 .gap_2()
                                 .text_color(green)
-                                .child(
-                                    Icon::new(IconName::GamingConsoleIcon)
-                                        .size(px(16.))
-                                        .text_color(green),
-                                )
+                                .child(Icon::new(IconName::Gamepad).size(px(16.)).text_color(green))
                                 .child(mezon_i18n::t(&self.locale, key).to_string()),
                         )
                         .child(
@@ -4804,9 +4780,9 @@ fn device_control(
             .hover(move |s| s.bg(arrow_hover))
             .child(
                 Icon::new(if is_open {
-                    IconName::VoiceArowUpIcon
+                    IconName::ChevronUp
                 } else {
-                    IconName::VoiceArowDownIcon
+                    IconName::ChevronDown
                 })
                 .size(px(10.))
                 .text_color(theme.text_primary),
@@ -5136,7 +5112,7 @@ fn device_row(
                 ),
         )
         .child(
-            Icon::new(IconName::ArrowRight)
+            Icon::new(IconName::ChevronRight)
                 .size(px(16.))
                 .selected(false),
         )

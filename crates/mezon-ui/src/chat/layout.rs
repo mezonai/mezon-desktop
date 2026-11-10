@@ -1801,7 +1801,7 @@ impl Render for ChatLayout {
                     .hover(|s| s.bg(update_banner_bg(true)))
                     .on_click(|_, _, cx| mezon_store::update_restart_clicked(cx))
                     .child(
-                        Icon::new(IconName::ReloadIcon)
+                        Icon::new(IconName::Refresh)
                             .size(px(16.0))
                             .text_color(gpui::white()),
                     )
@@ -2649,11 +2649,11 @@ impl ChatLayout {
         let enabled = store.noise_suppression_enabled();
         let loading = store.noise_suppression_loading();
         let icon = if enabled {
-            Icon::new(IconName::NoiseSupressionIcon)
+            Icon::new(IconName::NoiseSuppression)
                 .size(px(20.))
                 .text_color(theme.text_primary)
         } else {
-            Icon::new(IconName::NoiseSupressionDisabledIcon)
+            Icon::new(IconName::NoiseSuppressionOff)
                 .size(px(20.))
                 .text_color(theme.danger_text)
         };
@@ -3278,7 +3278,7 @@ impl ChatLayout {
             ),
             Route::Direct => self.render_placeholder(
                 theme,
-                crate::components::primitives::IconName::People,
+                crate::components::primitives::IconName::User,
                 mezon_i18n::t(&locale, "dm.title"),
                 &current_path,
             ),
@@ -3287,7 +3287,7 @@ impl ChatLayout {
                 message_type: _,
             } => self.render_placeholder(
                 theme,
-                crate::components::primitives::IconName::People,
+                crate::components::primitives::IconName::User,
                 &format!("Direct {direct_id}"),
                 &current_path,
             ),
@@ -3297,19 +3297,19 @@ impl ChatLayout {
             | Route::ClanGuide { .. } => div().into_any_element(),
             Route::Friends => self.render_placeholder(
                 theme,
-                crate::components::primitives::IconName::IconFriends,
+                crate::components::primitives::IconName::Friends,
                 mezon_i18n::t(&locale, "directMessage.friends"),
                 &current_path,
             ),
             Route::Thread { channel_id, .. } => self.render_placeholder(
                 theme,
-                crate::components::primitives::IconName::Hashtag,
+                crate::components::primitives::IconName::Channel,
                 &format!("Thread #{channel_id}"),
                 &current_path,
             ),
             Route::Canvas { channel_id, .. } => self.render_placeholder(
                 theme,
-                crate::components::primitives::IconName::Hashtag,
+                crate::components::primitives::IconName::Channel,
                 &format!("Canvas #{channel_id}"),
                 &current_path,
             ),

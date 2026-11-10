@@ -71,9 +71,9 @@ impl Render for DevicePage {
                 .bg(theme.bg_primary)
                 .child(
                     Icon::new(if is_mobile {
-                        IconName::DeviceMobileIcon
+                        IconName::DeviceMobile
                     } else {
-                        IconName::DeviceDesktopIcon
+                        IconName::DeviceDesktop
                     })
                     .size_5()
                     .text_color(theme.text_primary),

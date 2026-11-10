@@ -44,7 +44,7 @@ pub fn render_controls<V: 'static>(
             "window-control-close",
             color,
             icon_size,
-            IconName::WindowClose,
+            IconName::Close,
             WindowControlArea::Close,
             move |style| style.bg(hover_bg),
             cx,

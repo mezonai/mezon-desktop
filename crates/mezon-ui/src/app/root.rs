@@ -789,7 +789,7 @@ fn render_onboarding_preview_bar(clan_id: ClanId, theme: &Theme, locale: &str) -
                 .text_color(theme.text_primary)
                 .hover(|style| style.bg(theme.bg_hover))
                 .child(
-                    Icon::new(IconName::ArrowLeft)
+                    Icon::new(IconName::ChevronLeft)
                         .size(px(16.))
                         .text_color(theme.text_primary),
                 )
@@ -1067,11 +1067,7 @@ fn render_not_found(theme: &Theme, locale: &str) -> gpui::AnyElement {
         .justify_center()
         .flex_col()
         .gap_4()
-        .child(
-            Icon::new(IconName::TriangleAlert)
-                .size(px(32.))
-                .selected(false),
-        )
+        .child(Icon::new(IconName::Warning).size(px(32.)).selected(false))
         .child(
             div()
                 .text_xl()

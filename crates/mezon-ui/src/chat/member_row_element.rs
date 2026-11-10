@@ -403,7 +403,7 @@ impl MemberRowElement {
                 size: size(OWNER_ICON_SIZE, OWNER_ICON_SIZE),
             };
             cache.owner_motion.paint(
-                IconName::OwnerIcon,
+                IconName::Owner,
                 owner_bounds,
                 color,
                 owner_bounds.contains(&window.mouse_position()) && !cx.has_active_drag(),

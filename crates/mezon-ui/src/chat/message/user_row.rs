@@ -96,7 +96,7 @@ pub fn render_user_message(
                 .text_color(theme.tokens.text_theme_primary)
                 .opacity(0.6)
                 .child(
-                    Icon::new(IconName::ForwardRightClick)
+                    Icon::new(IconName::Forward)
                         .size(px(16.))
                         .text_color(theme.tokens.text_theme_primary),
                 )
@@ -340,7 +340,7 @@ fn render_ephemeral_notice(msg: &Message, ctx: &RowCtx) -> AnyElement {
         .text_color(ctx.theme.tokens.text_theme_primary)
         .opacity(0.6)
         .child(
-            Icon::new(IconName::EyeClose)
+            Icon::new(IconName::EyeOff)
                 .size(px(16.))
                 .text_color(ctx.theme.tokens.text_theme_primary),
         )
@@ -403,7 +403,7 @@ fn render_go_to_topic_footer(msg: &Message, ctx: &RowCtx) -> AnyElement {
                 .child(mezon_i18n::t(ctx.locale, "message.goToTopic")),
         )
         .child(
-            Icon::new(IconName::ArrowRight)
+            Icon::new(IconName::ChevronRight)
                 .size(px(16.))
                 .text_color(theme.tokens.text_theme_primary)
                 .opacity(0.5),

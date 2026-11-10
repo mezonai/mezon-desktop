@@ -2021,9 +2021,9 @@ impl RenderOnce for Input {
                 .cursor_pointer()
                 .child(
                     crate::Icon::new(if masked {
-                        crate::IconName::EyeOpen
+                        crate::IconName::Eye
                     } else {
-                        crate::IconName::EyeClose
+                        crate::IconName::EyeOff
                     })
                     .size(px(20.))
                     .text_color(toggle_color),

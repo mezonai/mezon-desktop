@@ -81,7 +81,7 @@ fn viewer_thumb_placeholder(bg: gpui::Rgba, muted: gpui::Rgba) -> gpui::AnyEleme
         .justify_center()
         .bg(bg)
         .child(
-            Icon::new(IconName::ImageThumbnail)
+            Icon::new(IconName::FileImage)
                 .size(px(16.))
                 .text_color(muted),
         )
@@ -1205,10 +1205,12 @@ impl ImageViewer {
             .image_cache(self.image_cache.clone())
             .child(content)
             .when(can_prev, |el| {
-                el.child(nav_button(IconName::ArrowLeft, theme, true).on_mouse_down(
-                    MouseButton::Left,
-                    cx.listener(|this, _: &MouseDownEvent, window, cx| this.prev(window, cx)),
-                ))
+                el.child(
+                    nav_button(IconName::ChevronLeft, theme, true).on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(|this, _: &MouseDownEvent, window, cx| this.prev(window, cx)),
+                    ),
+                )
             })
             .when(can_next, |el| {
                 el.child(
@@ -1414,7 +1416,7 @@ impl ImageViewer {
                                                 .items_center()
                                                 .justify_center()
                                                 .child(
-                                                    Icon::new(IconName::AudioPlay)
+                                                    Icon::new(IconName::Play)
                                                         .size(px(16.))
                                                         .text_color(gpui::white()),
                                                 ),
@@ -1557,20 +1559,20 @@ impl ImageViewer {
             ))
             .when(is_image, |el| {
                 el.child(tool_divider(theme))
-                    .child(tool_button(IconName::RotateLeftIcon, theme).on_mouse_down(
+                    .child(tool_button(IconName::RotateLeft, theme).on_mouse_down(
                         MouseButton::Left,
                         cx.listener(|this, _: &MouseDownEvent, window, cx| {
                             this.rotate_left(window, cx)
                         }),
                     ))
-                    .child(tool_button(IconName::RotateRightIcon, theme).on_mouse_down(
+                    .child(tool_button(IconName::RotateRight, theme).on_mouse_down(
                         MouseButton::Left,
                         cx.listener(|this, _: &MouseDownEvent, window, cx| {
                             this.rotate_right(window, cx)
                         }),
                     ))
                     .child(tool_divider(theme))
-                    .child(tool_button(IconName::MinusCircleIcon, theme).on_mouse_down(
+                    .child(tool_button(IconName::MinusCircle, theme).on_mouse_down(
                         MouseButton::Left,
                         cx.listener(|this, _: &MouseDownEvent, _, cx| {
                             this.set_zoom(this.zoom - ZOOM_STEP, cx)
@@ -1611,7 +1613,7 @@ impl ImageViewer {
                             .text_color(theme.text_muted)
                             .child(counter),
                     )
-                    .child(tool_button(IconName::ImageThumbnail, theme).on_mouse_down(
+                    .child(tool_button(IconName::FileImage, theme).on_mouse_down(
                         MouseButton::Left,
                         cx.listener(|this, _: &MouseDownEvent, _, cx| {
                             this.show_thumbnails = !this.show_thumbnails;
@@ -1641,7 +1643,7 @@ impl ImageViewer {
         };
         let mut menu = ContextMenu::new()
             .on_dismiss(dismiss)
-            .item_icon(t("contextMenu.copyLink"), IconName::CopyIcon, {
+            .item_icon(t("contextMenu.copyLink"), IconName::Copy, {
                 let entity = entity.downgrade();
                 move |_w, cx| {
                     if let Some(this) = entity.upgrade() {

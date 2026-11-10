@@ -28,7 +28,7 @@ use crate::theme::Theme;
 use crate::util::download::save_with_progress_toast;
 
 const DEFAULT_ROLE_COLOR: u32 = 0x99_aab5;
-const TOPIC_DEFAULT_AVATAR: &str = "icons/avatar-user.svg";
+const TOPIC_DEFAULT_AVATAR: &str = "icons/user-circle.svg";
 pub const FOR_YOU_ROW_HEIGHT: f32 = 76.;
 pub const MENTION_ROW_HEIGHT: f32 = 120.;
 pub const MESSAGE_ROW_HEIGHT: f32 = 128.;
@@ -1552,7 +1552,7 @@ fn render_inbox_video(
                             a: 0.5,
                         })
                         .child(
-                            Icon::new(IconName::AudioPlay)
+                            Icon::new(IconName::Play)
                                 .size(px(20.))
                                 .text_color(gpui::white()),
                         ),

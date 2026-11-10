@@ -658,7 +658,7 @@ mod tests {
             let context = click.clone();
             let gear = click.clone();
             div().w(px(240.)).h(px(80.)).child(
-                ChannelRowElement::new("channel-row", IconName::Hashtag, "general".into())
+                ChannelRowElement::new("channel-row", IconName::Channel, "general".into())
                     .trailing_action(Some(ChannelRowTrailingAction {
                         icon: IconName::Settings,
                         hover_color: gpui::white(),
