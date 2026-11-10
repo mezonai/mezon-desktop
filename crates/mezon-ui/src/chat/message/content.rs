@@ -435,7 +435,8 @@ pub(crate) fn render_rich_layout(
     body_color: gpui::Rgba,
 ) -> AnyElement {
     let theme = ctx.theme;
-    let palette = RichRunPalette::from_theme(theme);
+    let mut palette = RichRunPalette::from_theme(theme);
+    palette.link = link_color(body_color, theme).into();
     let colors = palette.memo_key(theme.text_muted.into());
     let cached = ctx.row_memo.borrow().rich_text.get(&msg.id).cloned();
     let plan = match cached {
@@ -913,7 +914,7 @@ fn render_selectable_segmented_spans(
                             div()
                                 .id(("msg-link", link_key))
                                 .cursor_pointer()
-                                .text_color(ctx.theme.tokens.mention_color)
+                                .text_color(link_color(body_color, ctx.theme))
                                 .when(rich_style, |link| link.hover(|style| style.underline()))
                                 .on_mouse_down(
                                     gpui::MouseButton::Right,
@@ -940,7 +941,7 @@ fn render_selectable_segmented_spans(
                     .min_w_0()
                     .w_full()
                     .text_size(px(14.))
-                    .text_color(ctx.theme.tokens.mention_color)
+                    .text_color(link_color(body_color, ctx.theme))
                     .cursor(gpui::CursorStyle::IBeam);
                 let mut line_base = 0usize;
                 for line in text.split('\n') {
@@ -1815,6 +1816,14 @@ fn is_inline_span(span: &MessageSpan) -> bool {
     }
 }
 
+fn link_color(body_color: gpui::Rgba, theme: &Theme) -> gpui::Rgba {
+    if body_color == rgb(BUZZ_RED) {
+        body_color
+    } else {
+        theme.tokens.mention_color
+    }
+}
+
 fn rich_content_row(body_color: gpui::Rgba, inline: bool) -> gpui::Div {
     let mut row = div()
         .flex()
@@ -1944,7 +1953,7 @@ fn append_span(
             row.child(message_link_element(
                 text,
                 &resolve_link_url(url, text),
-                theme.tokens.mention_color,
+                link_color(body_color, theme),
                 ctx.selection.clone(),
                 key,
             ))
