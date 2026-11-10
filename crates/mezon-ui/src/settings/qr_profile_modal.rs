@@ -702,7 +702,7 @@ impl QrProfileModal {
                     let brand = ProfileCardImage::asset(MEZON_LOGO, &renderer)?;
                     let tick = ProfileCardImage::asset(IconName::Check.path(), &renderer)?;
                     let default_avatar =
-                        ProfileCardImage::asset("icons/avatar-user.svg", &renderer)?;
+                        ProfileCardImage::asset(IconName::UserCircle.path(), &renderer)?;
                     let avatar = match avatar {
                         Some(load) => load.await,
                         None => None,
@@ -1314,6 +1314,8 @@ mod tests {
         for path in [
             IconName::Close.path(),
             IconName::Edit.path(),
+            IconName::UserCircle.path(),
+            IconName::Check.path(),
             PROFILE_LINK_ICON,
             MEZON_LOGO,
         ] {
