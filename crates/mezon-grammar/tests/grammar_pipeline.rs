@@ -363,24 +363,45 @@ fn test_mentioned_pronoun_syntactic_extraction_and_masking() {
     use mezon_grammar::extract_mentioned_pronoun;
 
     // 1. Non-pronoun homophones must NOT match false pronouns
-    assert_eq!(extract_mentioned_pronoun("Địa chỉ công ty ở đâu vậy bạn?"), "bạn");
-    assert_eq!(extract_mentioned_pronoun("Gió mùa đông bắc lạnh quá bạn ơi"), "bạn");
+    assert_eq!(
+        extract_mentioned_pronoun("Địa chỉ công ty ở đâu vậy bạn?"),
+        "bạn"
+    );
+    assert_eq!(
+        extract_mentioned_pronoun("Gió mùa đông bắc lạnh quá bạn ơi"),
+        "bạn"
+    );
     assert_eq!(extract_mentioned_pronoun("Đi xe ô tô không bạn?"), "bạn");
     assert_eq!(extract_mentioned_pronoun("Chú ý nhé bạn"), "bạn");
     assert_eq!(extract_mentioned_pronoun("Bác sĩ bảo sao rồi bạn?"), "bạn");
-    assert_eq!(extract_mentioned_pronoun("Cầu Long Biên đẹp lắm bạn"), "bạn");
-    assert_eq!(extract_mentioned_pronoun("Bà con lối xóm chúc mừng bạn"), "bạn");
+    assert_eq!(
+        extract_mentioned_pronoun("Cầu Long Biên đẹp lắm bạn"),
+        "bạn"
+    );
+    assert_eq!(
+        extract_mentioned_pronoun("Bà con lối xóm chúc mừng bạn"),
+        "bạn"
+    );
 
     // 2. Relational pairs: accurately identifies WHO IS MENTIONED
     assert_eq!(extract_mentioned_pronoun("Chị cảm ơn em nhé"), "em");
     assert_eq!(extract_mentioned_pronoun("Em cảm ơn chị nhé"), "chị");
-    assert_eq!(extract_mentioned_pronoun("Anh review pull request giúp em"), "anh");
-    assert_eq!(extract_mentioned_pronoun("Em review pull request giúp anh"), "em");
+    assert_eq!(
+        extract_mentioned_pronoun("Anh review pull request giúp em"),
+        "anh"
+    );
+    assert_eq!(
+        extract_mentioned_pronoun("Em review pull request giúp anh"),
+        "em"
+    );
     assert_eq!(extract_mentioned_pronoun("Anh chào em nhé"), "em");
     assert_eq!(extract_mentioned_pronoun("Em chào anh nhé"), "anh");
     assert_eq!(extract_mentioned_pronoun("Bác chào cháu nhé"), "cháu");
     assert_eq!(extract_mentioned_pronoun("Cháu chào bác ạ"), "bác");
-    assert_eq!(extract_mentioned_pronoun("Cậu ơi tớ gửi file rồi nhé"), "cậu");
+    assert_eq!(
+        extract_mentioned_pronoun("Cậu ơi tớ gửi file rồi nhé"),
+        "cậu"
+    );
     assert_eq!(extract_mentioned_pronoun("Tớ gửi cậu file rồi nhé"), "cậu");
 }
 

@@ -9,14 +9,16 @@ pub const CONFIG_FILE: &str = "config.json";
 pub const VOCAB_FILE: &str = "vocab.json";
 pub const ACCENT_MODEL_FILE: &str = "accent_model.onnx";
 pub const MODEL_FILE: &str = "model.onnx";
+pub const SYLLABLE_VOCAB_FILE: &str = "syllable_vocab.json";
 
-pub const ALL_ASSETS: [&str; 6] = [
+pub const ALL_ASSETS: [&str; 7] = [
     ACCENT_VOCAB_FILE,
     COLLOCATIONS_FILE,
     CONFIG_FILE,
     VOCAB_FILE,
     ACCENT_MODEL_FILE,
     MODEL_FILE,
+    SYLLABLE_VOCAB_FILE,
 ];
 
 static PREFETCH_STARTED: AtomicBool = AtomicBool::new(false);
@@ -75,6 +77,21 @@ fn find_local_fallback(filename: &str) -> Option<PathBuf> {
     let local = PathBuf::from("crates/mezon-grammar/assets").join(filename);
     if local.is_file() {
         return Some(local);
+    }
+    None
+}
+
+fn find_external_fallback(filename: &str) -> Option<PathBuf> {
+    for base in [
+        "../mezon-grammar/weights/nanolm",
+        "../mezon-grammar/weights/tinylm",
+        "/mnt/mezonai/mezon-grammar/weights/nanolm",
+        "/mnt/mezonai/mezon-grammar/weights/tinylm",
+    ] {
+        let p = PathBuf::from(base).join(filename);
+        if p.is_file() {
+            return Some(p);
+        }
     }
     None
 }
@@ -173,6 +190,14 @@ pub fn load_asset_bytes(filename: &str) -> Option<Vec<u8>> {
         }
         Err(err) => {
             tracing::warn!("Failed to fetch grammar asset {filename}: {err}");
+            if let Some(fallback) = find_external_fallback(filename) {
+                if let Ok(bytes) = std::fs::read(&fallback) {
+                    if !bytes.is_empty() {
+                        let _ = save_asset_to_disk(&dir, filename, &bytes);
+                        return Some(bytes);
+                    }
+                }
+            }
             None
         }
     }
