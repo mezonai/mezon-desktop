@@ -1099,7 +1099,13 @@ fn match_copied_mention<'a>(
             .or_else(|| members.clone().find(named));
         let user_id = match member {
             Some(member) => member.user_id.clone(),
-            None if roster_partial => mention.user_id.clone(),
+            None if roster_partial
+                && !members
+                    .clone()
+                    .any(|member| member.user_id == mention.user_id) =>
+            {
+                mention.user_id.clone()
+            }
             None => return None,
         };
         TokenKind::Mention {
@@ -1916,7 +1922,8 @@ impl MentionInput {
                 self.refresh_pool(Sigil::At, cx);
                 self.pooled[Sigil::At.slot()] = (!self.pool_is_empty(Sigil::At)).then_some(scope);
             }
-            let roster_partial = mention_remote_search_scope(cx).is_some();
+            let roster_partial =
+                mention_remote_search_scope(cx).is_some() || self.pool_is_empty(Sigil::At);
             let (rebuilt, tokens) = rebuild_pasted_mentions(pasted, &mentions, |mention| {
                 self.resolve_copied_mention(mention, roster_partial)
             });
@@ -5571,6 +5578,15 @@ mod draft_tests {
         assert_eq!(
             matched(&copied("@Bob Builder", "9", ""), &members, &[]),
             Some(("@Bob Builder".to_string(), "2".to_string(), String::new()))
+        );
+    }
+
+    #[test]
+    fn a_cut_roster_still_drops_a_loaded_member_whose_name_no_longer_matches() {
+        let members = [pool_member("9", "New Nick", "newnick", "")];
+        assert_eq!(
+            super::match_copied_mention(&copied("@Old Nick", "9", ""), members.iter(), &[], true),
+            None
         );
     }
 
