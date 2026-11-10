@@ -1,3 +1,4 @@
+use std::borrow::Cow;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, OnceLock};
@@ -43,6 +44,14 @@ pub struct CdnSigner {
 }
 
 static SIGNER: OnceLock<Arc<CdnSigner>> = OnceLock::new();
+
+pub fn escape_imgproxy_source(source: &str) -> Cow<'_, str> {
+    if source.contains(['?', '@']) {
+        Cow::Owned(utf8_percent_encode(source, IMGPROXY_SOURCE_ESCAPES).to_string())
+    } else {
+        Cow::Borrowed(source)
+    }
+}
 
 pub fn install(signer: CdnSigner) {
     let _ = SIGNER.set(Arc::new(signer));
@@ -243,6 +252,7 @@ impl CdnSigner {
             .any(|rest| rest.starts_with('/'))
             .then(|| imgproxy_source(url))
             .flatten()
+            .filter(|(_, source, _)| !source.contains("%3F") && !source.contains("%3f"))
     }
 
     pub async fn send<B, F, Fut>(&self, url: &str, send: F) -> anyhow::Result<http::Response<B>>
@@ -724,6 +734,43 @@ mod tests {
         let foreign = "https://imgproxy.komu.vn/k/rs:fill:80:80:1/mb:2097152/plain/https://media.tenor.com/a.gif@webp";
         assert!(!signer.wants(foreign));
         assert!(signer.sign(foreign).await.is_none());
+    }
+
+    #[tokio::test]
+    async fn a_rendition_of_an_already_signed_source_is_sent_as_it_is() {
+        let (fetch, calls) = counting_fetcher(|_| Ok(SIGNATURE.to_string()));
+        let signer = signer_for(fetch);
+        let bot_url = format!("{FILE}?1791000000-botsig%2Babc%3D");
+        let escaped = escape_imgproxy_source(&bot_url);
+        let rendition =
+            format!("https://imgproxy.komu.vn/k/rs:fit:800:600:1/mb:2097152/plain/{escaped}@webp");
+        assert!(!signer.wants(&rendition));
+        assert!(signer.sign(&rendition).await.is_none());
+        let sent = Arc::new(Mutex::new(Vec::new()));
+        let log = sent.clone();
+        signer
+            .send(&rendition, move |url| {
+                log.lock().push(url);
+                async { Ok(http::Response::builder().status(200).body(()).unwrap()) }
+            })
+            .await
+            .unwrap();
+        assert_eq!(*sent.lock(), vec![rendition.clone()]);
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn escaping_an_imgproxy_source_keeps_a_query_whole_and_leaves_plain_urls_alone() {
+        assert_eq!(escape_imgproxy_source(FILE), FILE);
+        let bot_url = format!("{FILE}?1791000000-botsig%2Babc%3D");
+        let escaped = escape_imgproxy_source(&bot_url);
+        assert!(!escaped.contains(['?', '@']), "{escaped}");
+        assert_eq!(
+            percent_encoding::percent_decode_str(&escaped)
+                .decode_utf8()
+                .unwrap(),
+            bot_url
+        );
     }
 
     #[tokio::test]
