@@ -583,7 +583,11 @@ impl Render for CreatePollModal {
                             .border_color(theme.tokens.bg_button_primary)
                     })
                     .when(allow_multiple, |d| {
-                        d.child(Icon::new(IconName::Check).size(px(16.)).selected(false))
+                        d.child(
+                            Icon::new(IconName::Check)
+                                .size(px(16.))
+                                .color(gpui::white()),
+                        )
                     }),
             )
             .child(

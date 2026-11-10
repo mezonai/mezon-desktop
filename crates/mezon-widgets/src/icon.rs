@@ -1,7 +1,7 @@
 use gpui::{
     App, Bounds, DispatchPhase, Element, ElementId, GlobalElementId, Hitbox, HitboxBehavior,
     InspectorElementId, InteractiveElement, Interactivity, IntoElement, LayoutId, MouseMoveEvent,
-    Pixels, StyleRefinement, Svg, Transformation, Window, prelude::*, px, svg,
+    Pixels, StyleRefinement, Svg, Transformation, Window, point, prelude::*, px, size, svg,
 };
 
 use crate::icon_motion::{ColorPlayback, MotionPlayback, MotionSpec};
@@ -775,6 +775,20 @@ impl Icon {
         explicit.unwrap_or_else(|| window.text_style().color)
     }
 
+    fn glyph_bounds(&self, bounds: Bounds<Pixels>) -> Bounds<Pixels> {
+        let aspect_ratio = match self.path {
+            "icons/caret-up.svg" | "icons/caret-down.svg" => 2.,
+            "icons/caret-left.svg" | "icons/caret-right.svg" => 0.5,
+            _ => return bounds,
+        };
+        let width = bounds.size.width.min(bounds.size.height * aspect_ratio);
+        let height = width / aspect_ratio;
+        Bounds::new(
+            bounds.center() - point(width / 2., height / 2.),
+            size(width, height),
+        )
+    }
+
     fn supports_hover_motion(&self) -> bool {
         self.motion_enabled
             && self
@@ -838,7 +852,7 @@ impl Element for Icon {
             .svg
             .prepaint(global_id, inspector_id, bounds, state, window, cx);
         hitbox.or_else(|| {
-            self.supports_hover_motion()
+            (self.supports_hover_motion() && crate::icon_motion::IconMotionPreferences::enabled(cx))
                 .then(|| window.insert_hitbox(bounds, HitboxBehavior::Normal))
         })
     }
@@ -862,11 +876,14 @@ impl Element for Icon {
             window,
             cx,
             |style, window, cx| {
-                let mut paint_bounds = bounds;
+                let mut paint_bounds = self.glyph_bounds(bounds);
                 let target_color = self.resolve_color(style.text.color, window, cx);
                 let mut paint_color = target_color;
                 let mut transformation = self.base_transformation;
-                if let Some(global_id) = global_id {
+                if self.motion_enabled
+                    && crate::icon_motion::IconMotionPreferences::enabled(cx)
+                    && let Some(global_id) = global_id
+                {
                     let enabled = self.supports_hover_motion()
                         && window.is_window_active()
                         && crate::icon_motion::IconMotionPreferences::enabled(cx);
@@ -895,9 +912,9 @@ impl Element for Icon {
                     }
                     if let Some(frame) = frame {
                         if self.explicit_transformation {
-                            paint_bounds = frame.translated_bounds(bounds);
+                            paint_bounds = frame.translated_bounds(paint_bounds);
                         } else {
-                            transformation = frame.transformation(bounds);
+                            transformation = frame.transformation(paint_bounds);
                         }
                         if frame.running {
                             window.request_animation_frame();
@@ -913,6 +930,7 @@ impl Element for Icon {
         );
         self.svg = inner;
         if self.supports_hover_motion()
+            && crate::icon_motion::IconMotionPreferences::enabled(cx)
             && crate::icon_motion::scoped_hover(cx).is_none()
             && let Some(hitbox) = hitbox.as_ref()
         {
@@ -934,6 +952,253 @@ impl Element for Icon {
 mod tests {
     use super::*;
     use gpui::{Context, MouseButton, Render, TestApp, div, point};
+
+    #[derive(Clone)]
+    struct PaintSample {
+        id: GlobalElementId,
+        hitbox: bool,
+        started: Option<std::time::Instant>,
+        color: gpui::Hsla,
+    }
+
+    struct PaintProbe {
+        icon: Icon,
+        target: gpui::Hsla,
+        samples: std::rc::Rc<std::cell::RefCell<Vec<PaintSample>>>,
+    }
+
+    impl IntoElement for PaintProbe {
+        type Element = Self;
+        fn into_element(self) -> Self {
+            self
+        }
+    }
+
+    impl Element for PaintProbe {
+        type RequestLayoutState = ();
+        type PrepaintState = Option<Hitbox>;
+        fn id(&self) -> Option<ElementId> {
+            Element::id(&self.icon)
+        }
+        fn source_location(&self) -> Option<&'static std::panic::Location<'static>> {
+            self.icon.source_location()
+        }
+        fn request_layout(
+            &mut self,
+            id: Option<&GlobalElementId>,
+            inspector: Option<&InspectorElementId>,
+            window: &mut Window,
+            cx: &mut App,
+        ) -> (LayoutId, ()) {
+            self.icon.request_layout(id, inspector, window, cx)
+        }
+        fn prepaint(
+            &mut self,
+            id: Option<&GlobalElementId>,
+            inspector: Option<&InspectorElementId>,
+            bounds: Bounds<Pixels>,
+            state: &mut (),
+            window: &mut Window,
+            cx: &mut App,
+        ) -> Option<Hitbox> {
+            self.icon.prepaint(id, inspector, bounds, state, window, cx)
+        }
+        fn paint(
+            &mut self,
+            id: Option<&GlobalElementId>,
+            inspector: Option<&InspectorElementId>,
+            bounds: Bounds<Pixels>,
+            state: &mut (),
+            hitbox: &mut Option<Hitbox>,
+            window: &mut Window,
+            cx: &mut App,
+        ) {
+            self.icon
+                .paint(id, inspector, bounds, state, hitbox, window, cx);
+            let id = id.unwrap();
+            let (started, color) =
+                window.with_element_state(id, |state: Option<IconPlayback>, _| {
+                    let mut state = state.unwrap_or_default();
+                    let color = if state.color.has_target() {
+                        state.color.frame(self.target, std::time::Instant::now()).0
+                    } else {
+                        self.target
+                    };
+                    ((state.motion.started_at(), color), state)
+                });
+            self.samples.borrow_mut().push(PaintSample {
+                id: id.clone(),
+                hitbox: hitbox.is_some(),
+                started,
+                color,
+            });
+        }
+    }
+
+    struct PlaybackFixture {
+        users: Vec<usize>,
+        color: gpui::Hsla,
+        clicks: usize,
+        samples: std::rc::Rc<std::cell::RefCell<Vec<PaintSample>>>,
+    }
+
+    impl Render for PlaybackFixture {
+        fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+            div()
+                .id("playback-fixture")
+                .flex()
+                .flex_col()
+                .children(self.users.iter().map(|user| {
+                    div()
+                        .id(("user", *user))
+                        .w(px(80.))
+                        .h(px(40.))
+                        .on_click(cx.listener(|view, _, _, cx| {
+                            view.clicks += 1;
+                            cx.notify();
+                        }))
+                        .child(PaintProbe {
+                            icon: Icon::new(IconName::HandRaise)
+                                .size(px(24.))
+                                .color(self.color),
+                            target: self.color,
+                            samples: self.samples.clone(),
+                        })
+                }))
+        }
+    }
+
+    #[test]
+    fn keyed_repeated_icons_keep_independent_playback_when_rows_change() {
+        use std::{cell::RefCell, rc::Rc};
+        let mut app = TestApp::new();
+        let samples = Rc::new(RefCell::new(Vec::new()));
+        let mut window = app.open_window(|window, _| {
+            window.activate_window();
+            PlaybackFixture {
+                users: vec![1, 2],
+                color: gpui::white(),
+                clicks: 0,
+                samples: samples.clone(),
+            }
+        });
+        window.update(|_, window, _| window.activate_window());
+        window.draw();
+        window.simulate_mouse_move(point(px(10.), px(10.)));
+        samples.borrow_mut().clear();
+        window.draw();
+        let first = samples.borrow().clone();
+        assert_ne!(first[0].id, first[1].id);
+        assert!(first[0].started.is_some());
+        assert!(first[1].started.is_none());
+        samples.borrow_mut().clear();
+        window.draw();
+        assert_eq!(samples.borrow()[0].started, first[0].started);
+        window.update(|view, _, cx| {
+            view.users = vec![2, 1];
+            cx.notify();
+        });
+        window.draw();
+        samples.borrow_mut().clear();
+        window.draw();
+        assert_eq!(samples.borrow()[0].id, first[1].id);
+        assert_eq!(samples.borrow()[1].id, first[0].id);
+        assert!(samples.borrow()[0].started.is_some());
+        assert!(samples.borrow()[1].started.is_none());
+        window.update(|view, _, cx| {
+            view.users = vec![2];
+            cx.notify();
+        });
+        window.draw();
+        window.simulate_click(point(px(10.), px(10.)), MouseButton::Left);
+        assert_eq!(window.read(|view, _| view.clicks), 1);
+    }
+
+    #[test]
+    fn animations_off_skip_motion_hitboxes_and_apply_colors_immediately() {
+        use gpui::AppContext;
+        use std::{cell::RefCell, rc::Rc};
+        let mut app = TestApp::new();
+        let settings = app.update(|cx| {
+            let settings = cx.new(|_| mezon_store::Settings {
+                icon_motion: false,
+                ..Default::default()
+            });
+            mezon_store::Settings::init_global(&settings, cx);
+            settings
+        });
+        let samples = Rc::new(RefCell::new(Vec::new()));
+        let mut window = app.open_window(|window, _| {
+            window.activate_window();
+            PlaybackFixture {
+                users: vec![1],
+                color: gpui::white(),
+                clicks: 0,
+                samples: samples.clone(),
+            }
+        });
+        window.update(|_, window, _| window.activate_window());
+        window.draw();
+        assert!(!samples.borrow().last().unwrap().hitbox);
+        window.update(|view, _, cx| {
+            view.color = gpui::black();
+            cx.notify();
+        });
+        window.draw();
+        assert_eq!(samples.borrow().last().unwrap().color, gpui::black());
+        window.simulate_mouse_move(point(px(10.), px(10.)));
+        window.simulate_click(point(px(10.), px(10.)), MouseButton::Left);
+        assert_eq!(window.read(|view, _| view.clicks), 1);
+        window.update(|_, _, cx| {
+            settings.update(cx, |settings, cx| {
+                settings.icon_motion = true;
+                cx.notify();
+            });
+            cx.refresh_windows();
+        });
+        window.draw();
+        assert!(samples.borrow().last().unwrap().hitbox);
+        assert!(samples.borrow().last().unwrap().started.is_some());
+        window.update(|view, _, cx| {
+            settings.update(cx, |settings, cx| {
+                settings.icon_motion = false;
+                cx.notify();
+            });
+            view.color = gpui::white();
+            cx.refresh_windows();
+            cx.notify();
+        });
+        window.draw();
+        assert!(!samples.borrow().last().unwrap().hitbox);
+    }
+
+    #[test]
+    fn caret_glyphs_fit_square_and_rectangular_slots_without_changing_layout() {
+        for (name, ratio) in [
+            (IconName::CaretUp, 2.),
+            (IconName::CaretDown, 2.),
+            (IconName::CaretLeft, 0.5),
+            (IconName::CaretRight, 0.5),
+        ] {
+            let mut icon = Icon::new(name).size(px(16.));
+            assert_eq!(icon.svg.style().size.width, Some(px(16.).into()));
+            assert_eq!(icon.svg.style().size.height, Some(px(16.).into()));
+            for slot in [
+                size(px(16.), px(16.)),
+                size(px(12.), px(6.)),
+                size(px(6.), px(12.)),
+            ] {
+                let bounds = Bounds::new(point(px(10.), px(20.)), slot);
+                let glyph = icon.glyph_bounds(bounds);
+                assert_eq!(glyph.center(), bounds.center());
+                assert_eq!(glyph.size.width, glyph.size.height * ratio);
+                assert!(glyph.size.width <= slot.width);
+                assert!(glyph.size.height <= slot.height);
+            }
+        }
+        let bounds = Bounds::new(point(px(10.), px(20.)), size(px(16.), px(16.)));
+        assert_eq!(Icon::new(IconName::Bell).glyph_bounds(bounds), bounds);
+    }
 
     #[test]
     fn one_asset_supports_different_display_sizes() {

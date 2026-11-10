@@ -437,18 +437,20 @@ fn stream_header(
                 .hover(|s| s.bg(theme.bg_tertiary))
                 .when(show_chat, |el| el.bg(theme.bg_tertiary))
                 .tooltip(Tooltip::text(chat_label))
-                .child(crate::chat::voice::chat_toggle_icon(
-                    if show_chat {
-                        theme.tokens.bg_icon_theme_active
-                    } else {
-                        theme.tokens.bg_icon_theme
-                    },
-                    px(20.),
+                .child(Icon::motion_scope(
+                    crate::chat::voice::chat_toggle_icon(
+                        if show_chat {
+                            theme.tokens.bg_icon_theme_active
+                        } else {
+                            theme.tokens.bg_icon_theme
+                        },
+                        px(20.),
+                    ),
+                    true,
                 ))
                 .on_click(move |_, _, cx| {
                     stream_toggle.update(cx, |store, cx| store.toggle_chat(cx));
-                })
-                .map(|element| Icon::motion_scope(element, true)),
+                }),
         )
         .into_any_element()
 }

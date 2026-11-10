@@ -35,22 +35,24 @@ impl IconMotion {
         window: &mut Window,
         cx: &mut App,
     ) {
-        let view = window.current_view();
-        let mut was_inside = bounds.contains(&window.mouse_position());
-        window.on_mouse_event(move |event: &MouseMoveEvent, phase, _, cx| {
-            let inside = bounds.contains(&event.position);
-            if phase == DispatchPhase::Capture && inside != was_inside {
-                was_inside = inside;
-                cx.notify(view);
-            }
-        });
-        let hovered = hovered && window.is_window_active() && IconMotionPreferences::enabled(cx);
-        let frame = self.playback.frame(
-            icon.path(),
-            MotionSpec::for_path(icon.path()),
-            hovered,
-            Instant::now(),
-        );
+        let spec = MotionSpec::for_path(icon.path());
+        let enabled =
+            IconMotionPreferences::enabled(cx) && spec.is_some_and(MotionSpec::has_hover_motion);
+        if enabled {
+            let view = window.current_view();
+            let mut was_inside = bounds.contains(&window.mouse_position());
+            window.on_mouse_event(move |event: &MouseMoveEvent, phase, _, cx| {
+                let inside = bounds.contains(&event.position);
+                if phase == DispatchPhase::Capture && inside != was_inside {
+                    was_inside = inside;
+                    cx.notify(view);
+                }
+            });
+        }
+        let hovered = hovered && window.is_window_active() && enabled;
+        let frame = self
+            .playback
+            .frame(icon.path(), spec, hovered, Instant::now());
         let transformation = frame
             .as_ref()
             .map_or_else(Transformation::default, |frame| {
@@ -100,7 +102,7 @@ impl IntoElement for IconMotionScope {
 
 impl Element for IconMotionScope {
     type RequestLayoutState = ();
-    type PrepaintState = Hitbox;
+    type PrepaintState = Option<Hitbox>;
 
     fn id(&self) -> Option<ElementId> {
         None
@@ -128,8 +130,9 @@ impl Element for IconMotionScope {
         _: &mut (),
         window: &mut Window,
         cx: &mut App,
-    ) -> Hitbox {
-        let hitbox = window.insert_hitbox(bounds, HitboxBehavior::Normal);
+    ) -> Option<Hitbox> {
+        let hitbox = (self.enabled && IconMotionPreferences::enabled(cx))
+            .then(|| window.insert_hitbox(bounds, HitboxBehavior::Normal));
         self.element.prepaint(window, cx);
         hitbox
     }
@@ -140,15 +143,20 @@ impl Element for IconMotionScope {
         _: Option<&InspectorElementId>,
         _: Bounds<Pixels>,
         _: &mut (),
-        hitbox: &mut Hitbox,
+        hitbox: &mut Option<Hitbox>,
         window: &mut Window,
         cx: &mut App,
     ) {
-        let hovered = self.enabled && scoped_hover(cx) != Some(false) && hitbox.is_hovered(window);
+        let hovered = self.enabled
+            && IconMotionPreferences::enabled(cx)
+            && scoped_hover(cx) != Some(false)
+            && hitbox
+                .as_ref()
+                .is_some_and(|hitbox| hitbox.is_hovered(window));
         let previous = cx.default_global::<MotionScopeState>().0.replace(hovered);
         self.element.paint(window, cx);
         cx.global_mut::<MotionScopeState>().0 = previous;
-        if self.enabled {
+        if let Some(hitbox) = hitbox.as_ref() {
             let hitbox = hitbox.clone();
             let view = window.current_view();
             let mut was_hovered = hovered;
@@ -234,6 +242,11 @@ pub(crate) struct MotionPlayback {
 }
 
 impl MotionPlayback {
+    #[cfg(test)]
+    pub(crate) fn started_at(&self) -> Option<Instant> {
+        self.started
+    }
+
     pub(crate) fn frame(
         &mut self,
         path: &'static str,
@@ -372,6 +385,11 @@ pub(crate) struct ColorPlayback {
 }
 
 impl ColorPlayback {
+    #[cfg(test)]
+    pub(crate) fn has_target(&self) -> bool {
+        self.target.is_some()
+    }
+
     pub(crate) fn frame(&mut self, target: gpui::Hsla, now: Instant) -> (gpui::Hsla, bool) {
         let target = gpui::Rgba::from(target);
         if self.target != Some(target) {
@@ -685,23 +703,26 @@ mod tests {
         impl Render for Fixture {
             fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
                 let observed = self.observed.clone();
-                IconMotionScope::new(
-                    div()
-                        .id("motion-scope-row")
-                        .size(px(80.))
-                        .on_click(cx.listener(|view, _, _, cx| {
-                            view.clicks += 1;
-                            cx.notify();
-                        }))
-                        .child(
-                            canvas(
-                                |_, _, _| (),
-                                move |_, _, _, cx| observed.borrow_mut().push(scoped_hover(cx)),
-                            )
-                            .size(px(16.)),
-                        ),
-                    self.enabled,
-                )
+                div()
+                    .id("occluding-container")
+                    .occlude()
+                    .child(IconMotionScope::new(
+                        div()
+                            .id("motion-scope-row")
+                            .size(px(80.))
+                            .on_click(cx.listener(|view, _, _, cx| {
+                                view.clicks += 1;
+                                cx.notify();
+                            }))
+                            .child(
+                                canvas(
+                                    |_, _, _| (),
+                                    move |_, _, _, cx| observed.borrow_mut().push(scoped_hover(cx)),
+                                )
+                                .size(px(16.)),
+                            ),
+                        self.enabled,
+                    ))
             }
         }
 
