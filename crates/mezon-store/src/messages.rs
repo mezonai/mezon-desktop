@@ -1117,6 +1117,10 @@ impl MessagesStore {
         cx.try_global::<GlobalMessagesStore>().map(|g| g.0.clone())
     }
 
+    pub fn has_running_uploads(&self) -> bool {
+        !self.running_upload_jobs.is_empty()
+    }
+
     pub fn reset(&mut self, cx: &mut Context<Self>) {
         self.close(cx);
         self.cache.clear();
