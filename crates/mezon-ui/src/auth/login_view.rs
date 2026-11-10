@@ -752,7 +752,11 @@ impl LoginView {
         if self.otp_step == 0 {
             let country_items: Vec<SharedString> = LOGIN_COUNTRIES
                 .iter()
-                .map(|(name, dial)| SharedString::from(format!("{name} ({dial})")))
+                .map(|(_, dial)| SharedString::from(format!("({dial})")))
+                .collect();
+            let country_images: Vec<Option<SharedString>> = LOGIN_COUNTRIES
+                .iter()
+                .map(|(flag, _)| Some(SharedString::from(*flag)))
                 .collect();
             if let Some(input) = &self.phone_input {
                 col = col.child(
@@ -771,6 +775,7 @@ impl LoginView {
                                     div().w(px(150.)).child(
                                         Dropdown::new("login-phone-country")
                                             .items(country_items)
+                                            .images(country_images)
                                             .selected(Some(0))
                                             .open(self.country_open)
                                             .trigger_style(DropdownTriggerStyle::InputPrimary)

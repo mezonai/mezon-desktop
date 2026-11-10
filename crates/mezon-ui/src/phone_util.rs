@@ -1,4 +1,4 @@
-pub const LOGIN_COUNTRIES: [(&str, &str); 1] = [("Vietnam", "+84")];
+pub const LOGIN_COUNTRIES: [(&str, &str); 1] = [("icons/flags/vi.svg", "+84")];
 
 pub const COUNTRIES: [(&str, &str); 3] = [("Vietnam", "+84"), ("Japan", "+81"), ("US", "+1")];
 
