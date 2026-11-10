@@ -2630,6 +2630,25 @@ impl From<String> for ClipboardString {
     }
 }
 
+// mezon vendor edit: clipboard html for rich paste.
+static CLIPBOARD_HTML_WANTED: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+// mezon vendor edit: clipboard html for rich paste.
+#[allow(missing_docs)]
+pub fn clipboard_html_wanted() -> bool {
+    CLIPBOARD_HTML_WANTED.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+// mezon vendor edit: clipboard html for rich paste.
+#[allow(missing_docs)]
+pub fn with_clipboard_html<R>(f: impl FnOnce() -> R) -> R {
+    CLIPBOARD_HTML_WANTED.store(true, std::sync::atomic::Ordering::Relaxed);
+    let result = f();
+    CLIPBOARD_HTML_WANTED.store(false, std::sync::atomic::Ordering::Relaxed);
+    result
+}
+
 #[cfg(test)]
 mod image_tests {
     use super::*;

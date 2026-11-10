@@ -262,7 +262,7 @@ fn read_string() -> Option<ClipboardEntry> {
     let text = get_clipboard_string(CF_UNICODETEXT.0 as u32)?;
     let metadata = read_clipboard_metadata(&text);
     // mezon vendor edit: clipboard html for rich paste.
-    let html = read_clipboard_html();
+    let html = gpui::clipboard_html_wanted().then(read_clipboard_html).flatten();
     Some(ClipboardEntry::String(ClipboardString {
         text,
         metadata,
@@ -271,9 +271,15 @@ fn read_string() -> Option<ClipboardEntry> {
 }
 
 // mezon vendor edit: clipboard html for rich paste.
+const MAX_CLIPBOARD_HTML_BYTES: usize = 2 * 1024 * 1024 + 1024;
+
+// mezon vendor edit: clipboard html for rich paste.
 fn read_clipboard_html() -> Option<String> {
     let locked = get_clipboard_data(*CLIPBOARD_HTML_FORMAT)?;
     let bytes = locked.as_bytes();
+    if bytes.len() > MAX_CLIPBOARD_HTML_BYTES {
+        return None;
+    }
     let end = bytes.iter().position(|&b| b == 0).unwrap_or(bytes.len());
     String::from_utf8(bytes[..end].to_vec()).ok()
 }

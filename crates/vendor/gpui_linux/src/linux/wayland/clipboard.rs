@@ -118,7 +118,7 @@ impl<T: ReceiveData> DataOffer<T> {
         // lines, and that is super annoying.
         let result = text_content.replace("\r\n", "\n");
         // mezon vendor edit: clipboard html for rich paste.
-        let html = if self.has_mime_type("text/html") {
+        let html = if gpui::clipboard_html_wanted() && self.has_mime_type("text/html") {
             self.read_bytes(connection, "text/html").and_then(|html_bytes| {
                 if let Some(rest) = html_bytes.strip_prefix(&[0xFF, 0xFE]) {
                     let units: Vec<u16> = rest

@@ -17,6 +17,34 @@ pub fn read_then<T: 'static>(
 ) {
     #[cfg(target_os = "macos")]
     if OFF_MAIN_THREAD_READS.load(Ordering::Relaxed) && mac::advertises_plain_text_only() {
+        let content = cx.background_spawn(async { mac::plain_text() });
+        cx.spawn_in(window, async move |entity, cx| {
+            let Some(text) = content.await else {
+                return;
+            };
+            let item = ClipboardItem::new_string(text);
+            entity
+                .update_in(cx, |this, window, cx| apply(this, item, window, cx))
+                .ok();
+        })
+        .detach();
+        return;
+    }
+
+    let Some(item) = cx.read_from_clipboard() else {
+        return;
+    };
+    apply(this, item, window, cx);
+}
+
+pub fn read_rich_then<T: 'static>(
+    this: &mut T,
+    window: &mut Window,
+    cx: &mut Context<T>,
+    apply: impl FnOnce(&mut T, ClipboardItem, &mut Window, &mut Context<T>) + 'static,
+) {
+    #[cfg(target_os = "macos")]
+    if OFF_MAIN_THREAD_READS.load(Ordering::Relaxed) && mac::advertises_plain_text_only() {
         let content = cx.background_spawn(async { mac::plain_text_and_html() });
         cx.spawn_in(window, async move |entity, cx| {
             let Some((text, html)) = content.await else {
@@ -35,7 +63,7 @@ pub fn read_then<T: 'static>(
         return;
     }
 
-    let Some(item) = cx.read_from_clipboard() else {
+    let Some(item) = gpui::with_clipboard_html(|| cx.read_from_clipboard()) else {
         return;
     };
     apply(this, item, window, cx);
@@ -66,6 +94,20 @@ mod mac {
             contains(types, PLAIN_TEXT)
                 && !contains(types, FILENAMES)
                 && !contains(types, ZED_TEXT_HASH)
+        }
+    }
+
+    pub(super) fn plain_text() -> Option<String> {
+        unsafe {
+            let pool: *mut Object = msg_send![class!(NSAutoreleasePool), new];
+            let pasteboard: *mut Object = msg_send![class!(NSPasteboard), generalPasteboard];
+            let result = if pasteboard.is_null() {
+                None
+            } else {
+                string_for_type(pasteboard, PLAIN_TEXT)
+            };
+            let _: () = msg_send![pool, release];
+            result
         }
     }
 

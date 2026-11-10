@@ -494,6 +494,44 @@ fn style_is_monospace(style: Option<&str>) -> bool {
     })
 }
 
+fn style_keep_newlines(style: Option<&str>) -> Option<bool> {
+    let style = style?;
+    let mut result = None;
+    for decl in style.split(';') {
+        let Some((prop, val)) = decl.split_once(':') else {
+            continue;
+        };
+        let prop = prop.trim();
+        let val = strip_important(val.trim()).trim();
+        let Some(token) = val.split_ascii_whitespace().next() else {
+            continue;
+        };
+        if prop.eq_ignore_ascii_case("white-space") {
+            if token.eq_ignore_ascii_case("pre")
+                || token.eq_ignore_ascii_case("pre-wrap")
+                || token.eq_ignore_ascii_case("pre-line")
+                || token.eq_ignore_ascii_case("break-spaces")
+            {
+                result = Some(true);
+            } else if token.eq_ignore_ascii_case("normal") || token.eq_ignore_ascii_case("nowrap") {
+                result = Some(false);
+            }
+        } else if prop.eq_ignore_ascii_case("white-space-collapse") {
+            if token.eq_ignore_ascii_case("preserve")
+                || token.eq_ignore_ascii_case("preserve-breaks")
+                || token.eq_ignore_ascii_case("break-spaces")
+            {
+                result = Some(true);
+            } else if token.eq_ignore_ascii_case("collapse")
+                || token.eq_ignore_ascii_case("preserve-spaces")
+            {
+                result = Some(false);
+            }
+        }
+    }
+    result
+}
+
 fn is_code_tag(tag: &str) -> bool {
     matches!(tag, "pre" | "code" | "kbd" | "samp" | "tt")
 }
@@ -545,6 +583,7 @@ enum ListKind {
 struct LinkState {
     url: Option<String>,
     label: String,
+    line_start_bytes: Option<usize>,
 }
 
 struct OpenElem {
@@ -552,6 +591,7 @@ struct OpenElem {
     bold: bool,
     dropped: bool,
     in_pre: bool,
+    keep_newlines: bool,
     code: bool,
     list: Option<ListKind>,
     link: Option<LinkState>,
@@ -579,6 +619,7 @@ struct Builder {
     line: LineBuf,
     pending_li_prefix: Option<String>,
     open_links: usize,
+    after_link_suffix: bool,
     has_bold: bool,
     has_link_url: bool,
     has_list: bool,
@@ -593,6 +634,7 @@ impl Builder {
             line: LineBuf::default(),
             pending_li_prefix: None,
             open_links: 0,
+            after_link_suffix: false,
             has_bold: false,
             has_link_url: false,
             has_list: false,
@@ -610,6 +652,40 @@ impl Builder {
 
     fn current_in_pre(&self) -> bool {
         self.stack.last().is_some_and(|e| e.in_pre)
+    }
+
+    fn current_keep_newlines(&self) -> bool {
+        self.stack.last().is_some_and(|e| e.keep_newlines)
+    }
+
+    fn line_text_len(&self) -> usize {
+        self.line.runs.iter().map(|r| r.text.len()).sum()
+    }
+
+    fn unbold_line_from(&mut self, start_byte: usize) {
+        let mut offset = 0usize;
+        let old_runs = std::mem::take(&mut self.line.runs);
+        for run in old_runs {
+            let run_end = offset + run.text.len();
+            if run_end <= start_byte || !run.bold {
+                self.push_run(&run.text, run.bold);
+            } else if offset >= start_byte {
+                if !run.text.trim().is_empty() {
+                    self.has_link_url = true;
+                }
+                self.push_run(&run.text, false);
+            } else if run.text.is_char_boundary(start_byte - offset) {
+                let split_at = start_byte - offset;
+                self.push_run(&run.text[..split_at], true);
+                if !run.text[split_at..].trim().is_empty() {
+                    self.has_link_url = true;
+                }
+                self.push_run(&run.text[split_at..], false);
+            } else {
+                self.push_run(&run.text, run.bold);
+            }
+            offset = run_end;
+        }
     }
 
     fn quote_depth(&self) -> usize {
@@ -706,6 +782,12 @@ impl Builder {
                     self.push_line();
                 } else {
                     self.take_li_prefix_if_needed();
+                    if std::mem::take(&mut self.after_link_suffix)
+                        && !ch.is_whitespace()
+                        && !matches!(ch, '.' | ',' | ';' | ':' | '!' | '?' | ')')
+                    {
+                        self.push_char(' ', false);
+                    }
                     self.push_char(ch, bold);
                     self.append_link_label_char(ch);
                 }
@@ -713,8 +795,18 @@ impl Builder {
             return;
         }
 
-        for ch in decoded.chars() {
-            if ch.is_whitespace() {
+        let keep_newlines = self.current_keep_newlines();
+        let mut chars = decoded.chars().peekable();
+        while let Some(ch) = chars.next() {
+            if keep_newlines && ch == '\r' && chars.peek() == Some(&'\n') {
+                chars.next();
+                self.line.pending_space = false;
+                self.push_line();
+            } else if keep_newlines && ch == '\n' {
+                self.line.pending_space = false;
+                self.push_line();
+            } else if ch.is_whitespace() {
+                self.after_link_suffix = false;
                 if self.line_has_content() && !self.line.suppress_space && !self.line.pending_space
                 {
                     self.line.pending_space = true;
@@ -726,7 +818,12 @@ impl Builder {
                 if self.line.pending_space {
                     let space_bold = self.line.pending_space_bold;
                     self.line.pending_space = false;
+                    self.after_link_suffix = false;
                     self.push_char(' ', space_bold);
+                } else if std::mem::take(&mut self.after_link_suffix)
+                    && !matches!(ch, '.' | ',' | ';' | ':' | '!' | '?' | ')')
+                {
+                    self.push_char(' ', false);
                 }
                 self.line.suppress_space = false;
                 self.push_char(ch, bold);
@@ -774,6 +871,7 @@ impl Builder {
                 *cells += 1;
                 if index > 0 {
                     self.line.pending_space = false;
+                    self.after_link_suffix = false;
                     self.push_char('\t', false);
                     self.line.suppress_space = true;
                 }
@@ -787,6 +885,7 @@ impl Builder {
 
         let parent_bold = self.current_bold();
         let parent_in_pre = self.current_in_pre();
+        let parent_keep_newlines = self.current_keep_newlines();
         let code = self.stack.last().is_some_and(|e| e.code)
             || is_code_tag(&tag.name)
             || style_is_monospace(tag.style.as_deref());
@@ -794,6 +893,8 @@ impl Builder {
             && style_font_weight(tag.style.as_deref())
                 .unwrap_or_else(|| is_bold_tag(&tag.name) || parent_bold);
         let in_pre = parent_in_pre || tag.name == "pre";
+        let keep_newlines =
+            style_keep_newlines(tag.style.as_deref()).unwrap_or(parent_keep_newlines);
         let list = if dropped {
             None
         } else {
@@ -815,6 +916,7 @@ impl Builder {
             Some(LinkState {
                 url: parse_http_url(tag.href.as_deref()),
                 label: String::new(),
+                line_start_bytes: Some(self.line_text_len()),
             })
         } else {
             None
@@ -830,6 +932,7 @@ impl Builder {
             bold,
             dropped,
             in_pre,
+            keep_newlines,
             code,
             list,
             link,
@@ -873,39 +976,44 @@ impl Builder {
         };
         let label = link.label.trim();
         if label.is_empty() {
-            self.take_li_prefix_if_needed();
-            if self.line.pending_space {
-                let space_bold = self.line.pending_space_bold;
-                self.line.pending_space = false;
-                self.push_char(' ', space_bold);
-            }
-            self.line.suppress_space = false;
-            self.push_run(&url, false);
-            self.has_link_url = true;
-        } else if !same_url(label, &url) {
-            let had_trailing_space = self.line.pending_space;
-            self.line.pending_space = false;
-            self.line.suppress_space = false;
-            let suffix = format!(" ({url})");
-            if self.line_has_content() {
-                self.push_run(&suffix, false);
-            } else if let Some(prev) = self.lines.last_mut().filter(|l| !l.is_empty()) {
-                prev.push_str(&suffix);
-            } else {
-                self.push_run(&url, false);
-            }
-            if had_trailing_space && self.line_has_content() {
-                self.line.pending_space = true;
-                self.line.pending_space_bold = false;
-            }
-            self.has_link_url = true;
+            return;
         }
+        if same_url(label, &url) {
+            if let Some(start_byte) = link.line_start_bytes {
+                self.unbold_line_from(start_byte);
+            }
+            return;
+        }
+        let had_trailing_space = self.line.pending_space;
+        self.line.pending_space = false;
+        self.line.suppress_space = false;
+        let suffix = format!(" ({url})");
+        if self.line_has_content() {
+            self.push_run(&suffix, false);
+            self.after_link_suffix = true;
+        } else if let Some(prev) = self.lines.last_mut().filter(|l| !l.is_empty()) {
+            prev.push_str(&suffix);
+            self.after_link_suffix = true;
+        } else {
+            self.push_run(&url, false);
+        }
+        if had_trailing_space && self.line_has_content() {
+            self.line.pending_space = true;
+            self.line.pending_space_bold = false;
+        }
+        self.has_link_url = true;
     }
 
     fn push_line(&mut self) {
         let in_pre = self.current_in_pre();
         let quote_depth = self.quote_depth();
         let mut line = std::mem::take(&mut self.line);
+        self.after_link_suffix = false;
+        for elem in &mut self.stack {
+            if let Some(link) = elem.link.as_mut() {
+                link.line_start_bytes = None;
+            }
+        }
 
         if !in_pre {
             while let Some(last) = line.runs.last_mut() {
@@ -1237,8 +1345,103 @@ mod tests {
         assert_eq!(
             clipboard_html_to_markdown(html).as_deref(),
             Some(
-                "**Summary**\n\n**Service**\tStatus\nAPI\tOK\nfn main() {\n    println!(\"hi\");\n}\nLink: https://mezon.vn/status"
+                "**Summary**\n\n**Service**\tStatus\nAPI\tOK\nfn main() {\n    println!(\"hi\");\n}\nLink:"
             )
+        );
+    }
+
+    #[test]
+    fn link_suffix_separates_following_text_while_keeping_punctuation_attached() {
+        assert_eq!(
+            clipboard_html_to_markdown(
+                r#"<p><a href="https://github.com/mezonai">Mezon</a>'s new <b>release</b></p>"#
+            )
+            .as_deref(),
+            Some("Mezon (https://github.com/mezonai) 's new **release**")
+        );
+        assert_eq!(
+            clipboard_html_to_markdown(
+                r#"<p>请看<a href="https://x.com/doc">文档</a>了解<b>更多</b></p>"#
+            )
+            .as_deref(),
+            Some("请看文档 (https://x.com/doc) 了解**更多**")
+        );
+        assert_eq!(
+            clipboard_html_to_markdown(r#"<p>Two <a href="https://x.com/pr">PR</a>s merged</p>"#)
+                .as_deref(),
+            Some("Two PR (https://x.com/pr) s merged")
+        );
+        assert_eq!(
+            clipboard_html_to_markdown(
+                r#"<p>See <a href="https://en.wikipedia.org/wiki/Rust_(programming_language)">Rust</a>.</p>"#
+            )
+            .as_deref(),
+            Some("See Rust (https://en.wikipedia.org/wiki/Rust_(programming_language)).")
+        );
+    }
+
+    #[test]
+    fn bold_url_is_unbolded_when_label_matches_href() {
+        assert_eq!(
+            clipboard_html_to_markdown(
+                r#"<b>Meeting: <a href="https://meet.google.com/abc">https://meet.google.com/abc</a></b>"#
+            )
+            .as_deref(),
+            Some("**Meeting:** https://meet.google.com/abc")
+        );
+        assert_eq!(
+            clipboard_html_to_markdown(
+                r#"<a href="https://mezon.vn/x"><span style="font-weight:700">https://mezon.vn/x</span></a>"#
+            )
+            .as_deref(),
+            Some("https://mezon.vn/x")
+        );
+        assert_eq!(
+            clipboard_html_to_markdown(r#"<b><a href="https://mezon.vn/docs">Docs</a></b>"#)
+                .as_deref(),
+            Some("**Docs** (https://mezon.vn/docs)")
+        );
+    }
+
+    #[test]
+    fn whitespace_preserving_styles_keep_newlines_until_overridden_by_normal() {
+        assert_eq!(
+            clipboard_html_to_markdown(
+                "<span style=\"white-space: break-spaces;\"><b> Release notes </b>\nfix A\nfix B</span>"
+            )
+            .as_deref(),
+            Some("**Release notes**\nfix A\nfix B")
+        );
+        assert_eq!(
+            clipboard_html_to_markdown(
+                "<div style=\"white-space: pre-wrap;\">Line one\nLine two <a href=\"https://t.co/abc\">example.com/post</a>\nLine three</div>"
+            )
+            .as_deref(),
+            Some("Line one\nLine two example.com/post (https://t.co/abc)\nLine three")
+        );
+        assert_eq!(
+            clipboard_html_to_markdown(
+                "<div style=\"white-space: pre-wrap;\"><b>Header</b>\n<span style=\"white-space: normal;\">alpha\nbeta</span>\ngamma</div>"
+            )
+            .as_deref(),
+            Some("**Header**\nalpha beta\ngamma")
+        );
+    }
+
+    #[test]
+    fn image_only_link_does_not_inject_href() {
+        assert_eq!(
+            clipboard_html_to_markdown(
+                r#"<p>Top stories today</p><a href="https://news.example.com/r?u=abc&amp;t=1"><img src="t.jpg"></a><p>Markets rally</p>"#
+            ),
+            None
+        );
+        assert_eq!(
+            clipboard_html_to_markdown(
+                r#"<p><a href="https://news.example.com/r?u=abc&amp;t=1"><img src="t.jpg"></a><b>Markets</b> rally</p>"#
+            )
+            .as_deref(),
+            Some("**Markets** rally")
         );
     }
 

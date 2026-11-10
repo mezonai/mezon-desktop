@@ -198,6 +198,7 @@ pub(crate) enum MentionFieldEvent {
     NavUp,
     NavDown,
     Paste(String),
+    PasteRich { markdown: String, plain: String },
     PasteWithMentions(String, Vec<CopiedMention>),
     PasteImages(Vec<Image>),
     PastePaths(Vec<PathBuf>, ClipboardItem),
@@ -816,7 +817,7 @@ impl MentionInputState {
     }
 
     fn paste(&mut self, _: &Paste, window: &mut Window, cx: &mut Context<Self>) {
-        mezon_widgets::clipboard::read_then(self, window, cx, |this, item, _window, cx| {
+        mezon_widgets::clipboard::read_rich_then(self, window, cx, |this, item, _window, cx| {
             this.apply_paste(item, false, cx)
         });
     }
@@ -878,7 +879,14 @@ impl MentionInputState {
                     .flatten()
                 && let Some(markdown) = super::rich_paste::clipboard_html_to_markdown(html)
             {
-                cx.emit(MentionFieldEvent::Paste(normalize_pasted(&markdown)));
+                let plain = item
+                    .text()
+                    .map(|text| normalize_pasted(&text))
+                    .unwrap_or_default();
+                cx.emit(MentionFieldEvent::PasteRich {
+                    markdown: normalize_pasted(&markdown),
+                    plain,
+                });
                 return;
             }
             if let Some(text) = item.text() {
@@ -2156,19 +2164,22 @@ mod tests {
     #[gpui::test]
     fn rich_html_clipboard_pastes_markdown_unless_plain_requested(cx: &mut gpui::TestAppContext) {
         let item = clipboard(vec![ClipboardEntry::String(
-            gpui::ClipboardString::new("Hello world".into())
+            gpui::ClipboardString::new("Hello\r\nworld".into())
                 .with_html(Some("<p>Hello <b>world</b></p>".into())),
         )]);
         assert!(
             paste_events(cx, true, item.clone())
-                == vec![MentionFieldEvent::Paste("Hello **world**".into())]
+                == vec![MentionFieldEvent::PasteRich {
+                    markdown: "Hello **world**".into(),
+                    plain: "Hello\nworld".into(),
+                }]
         );
         assert!(
             field_events(cx, true, |field, _, cx| field.paste_images_or_text(
                 item.clone(),
                 true,
                 cx
-            )) == vec![MentionFieldEvent::Paste("Hello world".into())]
+            )) == vec![MentionFieldEvent::Paste("Hello\nworld".into())]
         );
         cx.update(|cx| cx.write_to_clipboard(item));
         assert!(
@@ -2176,7 +2187,7 @@ mod tests {
                 &PastePlainText,
                 window,
                 cx
-            )) == vec![MentionFieldEvent::Paste("Hello world".into())]
+            )) == vec![MentionFieldEvent::Paste("Hello\nworld".into())]
         );
     }
 
