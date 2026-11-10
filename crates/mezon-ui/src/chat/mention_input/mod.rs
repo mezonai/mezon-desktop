@@ -1068,6 +1068,66 @@ fn copied_mention_start(pasted: &str, cursor: usize, mention: &CopiedMention) ->
         .map(|rel| cursor + rel)
 }
 
+fn match_copied_mention<'a>(
+    mention: &CopiedMention,
+    members: impl Iterator<Item = &'a MentionMemberRaw> + Clone,
+    roles: &[Rc<RoleSuggestRaw>],
+    roster_partial: bool,
+) -> Option<(String, TokenKind)> {
+    if mention.user_id == MENTION_HERE_USER_ID {
+        return Some((
+            "@here".to_string(),
+            TokenKind::Mention {
+                user_id: MENTION_HERE_USER_ID.into(),
+                role_id: String::new(),
+            },
+        ));
+    }
+    let name = mention.display.strip_prefix('@')?.to_lowercase();
+    if name.is_empty() {
+        return None;
+    }
+    let kind = if !mention.user_id.is_empty() {
+        let named = |member: &&MentionMemberRaw| {
+            member.username_lc == name || member.display_lc == name || member.alt_lc == name
+        };
+        let member = members
+            .clone()
+            .filter(named)
+            .find(|member| member.user_id == mention.user_id)
+            .or_else(|| members.clone().find(|member| member.username_lc == name))
+            .or_else(|| members.clone().find(named));
+        let user_id = match member {
+            Some(member) => member.user_id.clone(),
+            None if roster_partial
+                && !members
+                    .clone()
+                    .any(|member| member.user_id == mention.user_id) =>
+            {
+                mention.user_id.clone()
+            }
+            None => return None,
+        };
+        TokenKind::Mention {
+            user_id,
+            role_id: String::new(),
+        }
+    } else if !mention.role_id.is_empty() {
+        let role = roles
+            .iter()
+            .filter(|role| role.title_lc == name)
+            .find(|role| role.role_id == mention.role_id)
+            .or_else(|| roles.iter().find(|role| role.title_lc == name))?;
+        TokenKind::Mention {
+            user_id: String::new(),
+            role_id: role.role_id.clone(),
+        }
+    } else {
+        return None;
+    };
+    Some((mention.display.clone(), kind))
+}
+
 fn rebuild_pasted_mentions(
     pasted: &str,
     mentions: &[CopiedMention],
@@ -1819,46 +1879,17 @@ impl MentionInput {
         }
     }
 
-    fn resolve_copied_mention(&self, mention: &CopiedMention) -> Option<(String, TokenKind)> {
-        if !mention.user_id.is_empty() {
-            if mention.user_id == MENTION_HERE_USER_ID {
-                return Some((
-                    "@here".to_string(),
-                    TokenKind::Mention {
-                        user_id: MENTION_HERE_USER_ID.into(),
-                        role_id: String::new(),
-                    },
-                ));
-            }
-            let display = self
-                .session_members
-                .iter()
-                .chain(self.remote_members.iter())
-                .find(|member| member.user_id == mention.user_id)
-                .map(|member| format!("@{}", member.display))
-                .unwrap_or_else(|| mention.display.clone());
-            return Some((
-                display,
-                TokenKind::Mention {
-                    user_id: mention.user_id.clone(),
-                    role_id: String::new(),
-                },
-            ));
-        }
-        if !mention.role_id.is_empty() {
-            let role = self
-                .session_roles
-                .iter()
-                .find(|role| role.role_id == mention.role_id)?;
-            return Some((
-                format!("@{}", role.title),
-                TokenKind::Mention {
-                    user_id: String::new(),
-                    role_id: mention.role_id.clone(),
-                },
-            ));
-        }
-        None
+    fn resolve_copied_mention(
+        &self,
+        mention: &CopiedMention,
+        roster_partial: bool,
+    ) -> Option<(String, TokenKind)> {
+        let members = self
+            .session_members
+            .iter()
+            .chain(self.remote_members.iter())
+            .map(Rc::as_ref);
+        match_copied_mention(mention, members, &self.session_roles, roster_partial)
     }
 
     fn on_paste(
@@ -1901,8 +1932,10 @@ impl MentionInput {
                 self.refresh_pool(Sigil::At, cx);
                 self.pooled[Sigil::At.slot()] = (!self.pool_is_empty(Sigil::At)).then_some(scope);
             }
+            let roster_partial =
+                mention_remote_search_scope(cx).is_some() || self.pool_is_empty(Sigil::At);
             let (rebuilt, tokens) = rebuild_pasted_mentions(pasted, &mentions, |mention| {
-                self.resolve_copied_mention(mention)
+                self.resolve_copied_mention(mention, roster_partial)
             });
             let replaced = self.input.read(cx).insert_range();
             shift_committed_for_paste(&mut self.committed, &replaced, rebuilt.len());
@@ -4972,6 +5005,7 @@ mod suggestion_order_tests {
                 display_norm: display.to_uppercase(),
                 username_norm: display.to_uppercase(),
                 alt_norm: String::new(),
+                alt_lc: String::new(),
             }),
             SharedString::default(),
         )
@@ -5011,6 +5045,7 @@ mod suggestion_order_tests {
             display_norm: display.to_lowercase(),
             username_norm: username.to_lowercase(),
             alt_norm: String::new(),
+            alt_lc: String::new(),
         })
     }
 
@@ -5473,6 +5508,168 @@ mod draft_tests {
         assert_eq!(tokens[0].0, 4..8);
     }
 
+    fn pool_member(
+        user_id: &str,
+        display: &str,
+        username: &str,
+        alt: &str,
+    ) -> super::MentionMemberRaw {
+        super::MentionMemberRaw {
+            user_id: user_id.to_string(),
+            display: display.to_string(),
+            username: username.to_string(),
+            avatar_raw: String::new(),
+            display_lc: display.to_lowercase(),
+            username_lc: username.to_lowercase(),
+            display_norm: String::new(),
+            username_norm: String::new(),
+            alt_norm: String::new(),
+            alt_lc: alt.to_lowercase(),
+        }
+    }
+
+    fn pool_role(role_id: &str, title: &str) -> std::rc::Rc<super::RoleSuggestRaw> {
+        std::rc::Rc::new(super::RoleSuggestRaw {
+            role_id: role_id.to_string(),
+            title: title.to_string(),
+            title_lc: title.to_lowercase(),
+            title_norm: String::new(),
+            icon_src: gpui::SharedString::default(),
+            color: super::role_fallback_color(),
+        })
+    }
+
+    fn copied(display: &str, user_id: &str, role_id: &str) -> super::CopiedMention {
+        super::CopiedMention {
+            display: display.to_string(),
+            user_id: user_id.to_string(),
+            role_id: role_id.to_string(),
+            at: 0,
+        }
+    }
+
+    fn matched(
+        mention: &super::CopiedMention,
+        members: &[super::MentionMemberRaw],
+        roles: &[std::rc::Rc<super::RoleSuggestRaw>],
+    ) -> Option<(String, String, String)> {
+        super::match_copied_mention(mention, members.iter(), roles, false).map(|(display, kind)| {
+            match kind {
+                TokenKind::Mention { user_id, role_id } => (display, user_id, role_id),
+                _ => panic!("pasted mentions resolve to mention tokens"),
+            }
+        })
+    }
+
+    #[test]
+    fn a_pasted_user_mention_stays_a_mention_when_its_name_matches_a_member_field() {
+        let members = [pool_member("1", "Alice Nick", "alice", "Alice Nguyen")];
+        for name in ["@Alice Nick", "@alice", "@Alice Nguyen", "@ALICE"] {
+            assert_eq!(
+                matched(&copied(name, "1", ""), &members, &[]),
+                Some((name.to_string(), "1".to_string(), String::new())),
+                "{name}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_pasted_user_mention_becomes_plain_text_when_no_member_has_that_name() {
+        let members = [pool_member("1", "New Nick", "alice", "Alice Nguyen")];
+        assert_eq!(matched(&copied("@Old Nick", "1", ""), &members, &[]), None);
+        assert_eq!(matched(&copied("@Old Nick", "9", ""), &[], &[]), None);
+    }
+
+    #[test]
+    fn a_pasted_user_mention_of_a_non_member_binds_to_the_member_with_that_name() {
+        let members = [
+            pool_member("2", "Bob Builder", "bob", ""),
+            pool_member("3", "bob", "bobby", ""),
+        ];
+        assert_eq!(
+            matched(&copied("@bob", "9", ""), &members, &[]),
+            Some(("@bob".to_string(), "2".to_string(), String::new()))
+        );
+        assert_eq!(
+            matched(&copied("@Bob Builder", "9", ""), &members, &[]),
+            Some(("@Bob Builder".to_string(), "2".to_string(), String::new()))
+        );
+    }
+
+    #[test]
+    fn a_cut_roster_still_drops_a_loaded_member_whose_name_no_longer_matches() {
+        let members = [pool_member("9", "New Nick", "newnick", "")];
+        assert_eq!(
+            super::match_copied_mention(&copied("@Old Nick", "9", ""), members.iter(), &[], true),
+            None
+        );
+    }
+
+    #[test]
+    fn a_clan_whose_roster_is_cut_by_the_server_keeps_an_unknown_user_mention_by_id() {
+        let members = [pool_member("2", "Bob", "bob", "")];
+        assert_eq!(
+            super::match_copied_mention(
+                &copied("@Early Joiner", "9", ""),
+                members.iter(),
+                &[],
+                true
+            ),
+            Some((
+                "@Early Joiner".to_string(),
+                TokenKind::Mention {
+                    user_id: "9".to_string(),
+                    role_id: String::new(),
+                }
+            ))
+        );
+        assert!(
+            super::match_copied_mention(&copied("@Mod", "", "7"), members.iter(), &[], true)
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn a_shared_display_name_prefers_the_copied_user() {
+        let members = [
+            pool_member("2", "Minh", "minh.a", ""),
+            pool_member("3", "Minh", "minh.b", ""),
+        ];
+        assert_eq!(
+            matched(&copied("@Minh", "3", ""), &members, &[]),
+            Some(("@Minh".to_string(), "3".to_string(), String::new()))
+        );
+    }
+
+    #[test]
+    fn a_pasted_role_mention_needs_a_role_with_that_name_here() {
+        let clan_a = [pool_role("7", "Mod")];
+        let clan_b = [pool_role("8", "Dev")];
+        let clan_c = [pool_role("5", "mod"), pool_role("6", "Mod")];
+        assert_eq!(
+            matched(&copied("@Mod", "", "7"), &[], &clan_a),
+            Some(("@Mod".to_string(), String::new(), "7".to_string()))
+        );
+        assert_eq!(matched(&copied("@Mod", "", "7"), &[], &clan_b), None);
+        assert_eq!(
+            matched(&copied("@Mod", "", "7"), &[], &clan_c),
+            Some(("@Mod".to_string(), String::new(), "5".to_string()))
+        );
+        assert_eq!(matched(&copied("@Mod", "", "7"), &[], &[]), None);
+    }
+
+    #[test]
+    fn a_pasted_here_mention_is_kept() {
+        assert_eq!(
+            matched(&copied("@here", super::MENTION_HERE_USER_ID, ""), &[], &[]),
+            Some((
+                "@here".to_string(),
+                super::MENTION_HERE_USER_ID.to_string(),
+                String::new()
+            ))
+        );
+    }
+
     #[test]
     fn paste_drops_tokens_it_replaces_and_shifts_the_ones_after() {
         use super::{CommittedToken, TokenKind, shift_committed_for_paste};
@@ -5569,6 +5766,7 @@ mod mention_trigger_tests {
             display_norm: normalize_search_string(display),
             username_norm: normalize_search_string(username),
             alt_norm: String::new(),
+            alt_lc: String::new(),
         })
     }
 
