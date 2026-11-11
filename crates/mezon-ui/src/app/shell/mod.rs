@@ -8,14 +8,16 @@ use std::rc::Rc;
 use std::time::Duration;
 
 use gpui::{
-    AnyView, App, AppContext, Context, Entity, Global, MouseButton, SharedString, Task, Window,
-    deferred, div, hsla, prelude::*, px,
+    AnyView, App, AppContext, Context, Entity, Global, MouseButton, SharedString, Task, WeakEntity,
+    Window, deferred, div, hsla, prelude::*, px,
 };
 
+use crate::chat::MentionInput;
 use crate::components::primitives::{InputState, Toast, ToastKind};
 use crate::router::Route;
 
 mod confirm_archive_channel_modal;
+mod confirm_convert_to_file_modal;
 mod confirm_delete_account_modal;
 mod confirm_delete_canvas_modal;
 mod confirm_delete_category_modal;
@@ -40,6 +42,7 @@ mod transfer_owner_modal;
 mod upload_limit_modal;
 mod wallet_not_available_modal;
 use confirm_archive_channel_modal::ConfirmArchiveChannelModal;
+use confirm_convert_to_file_modal::ConfirmConvertToFileModal;
 use confirm_delete_account_modal::ConfirmDeleteAccountModal;
 use confirm_delete_canvas_modal::ConfirmDeleteCanvasModal;
 use confirm_delete_category_modal::ConfirmDeleteCategoryModal;
@@ -464,6 +467,32 @@ impl Shell {
         let focus_handle = view.read(cx).focus_handle.clone();
         window.focus(&focus_handle, cx);
         self.show_modal(view.into(), cx);
+    }
+
+    pub fn confirm_convert_to_file(
+        &mut self,
+        composer: WeakEntity<MentionInput>,
+        locale: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let title: SharedString =
+            mezon_i18n::t(locale, "messageBox.convertToFileConfirm.title").into();
+        let description: SharedString =
+            mezon_i18n::t(locale, "messageBox.convertToFileConfirm.description").into();
+        let cancel_label: SharedString = mezon_i18n::t(locale, "common.cancel").into();
+        let confirm_label: SharedString = mezon_i18n::t(locale, "common.confirm").into();
+        let view = cx.new(|cx| ConfirmConvertToFileModal {
+            focus_handle: cx.focus_handle(),
+            composer,
+            title,
+            description,
+            cancel_label,
+            confirm_label,
+        });
+        let focus_handle = view.read(cx).focus_handle.clone();
+        self.show_modal_restoring_focus(view.into(), window, cx);
+        window.focus(&focus_handle, cx);
     }
 
     pub fn confirm_archive_channel(

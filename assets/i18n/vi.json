@@ -3579,6 +3579,8 @@
   "message.wallet.enabling": "Đang kích hoạt…",
   "message.wallet.notAvailable": "Ví không khả dụng",
   "message.wallet.notConfigured": "Ví chưa được cấu hình",
+  "messageBox.convertToFileConfirm.description": "Bạn có muốn chuyển nội dung này thành tệp không?",
+  "messageBox.convertToFileConfirm.title": "Chuyển thành tệp?",
   "messageBox.ephemeralMessage": "Tin nhắn tạm thời cho {{username}}...",
   "messageBox.mentionCategories.commands": "LỆNH",
   "messageBox.mentionCategories.emojiMatching": "Tìm thấy biểu cảm",

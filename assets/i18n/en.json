@@ -3577,6 +3577,8 @@
   "message.wallet.enabling": "Enabling…",
   "message.wallet.notAvailable": "Wallet not available",
   "message.wallet.notConfigured": "Wallet is not configured",
+  "messageBox.convertToFileConfirm.description": "Would you like to convert this content into a file?",
+  "messageBox.convertToFileConfirm.title": "Convert to file?",
   "messageBox.ephemeralMessage": "Ephemeral message to {{username}}...",
   "messageBox.mentionCategories.commands": "COMMANDS",
   "messageBox.mentionCategories.emojiMatching": "EMOJI MATCHING",

@@ -1600,10 +1600,12 @@ impl MentionInput {
                 Self::show_upload_limit(AttachmentLimit::Count, window, cx);
                 return None;
             }
-            // The draft stays in the composer until the .txt exists; the conversion re-emits
-            // Submit, so one Enter still sends. A second Enter meanwhile is a no-op.
             if !self.converting_to_file {
-                self.convert_text_to_file(text, true, window, cx);
+                let weak = cx.entity().downgrade();
+                let locale = self.settings.read(cx).language.clone();
+                Shell::global(cx).update(cx, |shell, cx| {
+                    shell.confirm_convert_to_file(weak, &locale, window, cx);
+                });
             }
             return None;
         }
@@ -1619,6 +1621,25 @@ impl MentionInput {
             input.clear_after_send(swallow, window, cx);
         });
         Some((text, content, attachments, ogp))
+    }
+
+    pub(crate) fn convert_confirmed(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let raw = self.input.read(cx).value().to_string();
+        let text = if self.committed.is_empty() {
+            raw.trim().to_string()
+        } else {
+            raw.trim_end().to_string()
+        };
+        if self.overflow_to_file
+            && !text.is_empty()
+            && exceeds_convert_threshold(&text)
+            && !MessagesStore::global(cx).read(cx).is_anonymous_mode()
+            && self.pending_attachments.len() < MAX_FILE_ATTACHMENTS
+            && !self.converting_to_file
+        {
+            self.convert_text_to_file(text, true, window, cx);
+        }
+        self.focus_input(window, cx);
     }
 
     fn toggle_file_menu(&mut self, cx: &mut Context<Self>) {
@@ -6015,5 +6036,125 @@ mod grammar_committed_mask_tests {
         let restored = unmask_committed_for_grammar(&masked.replace("hoi", "Hoi"), &originals);
         assert!(restored.contains(display), "{restored}");
         assert!(!restored.contains("@huy. Lexuan"), "{restored}");
+    }
+}
+
+#[cfg(test)]
+mod convert_confirm_tests {
+    use super::*;
+    use std::sync::Arc;
+
+    fn build_composer(cx: &mut gpui::VisualTestContext) -> Entity<MentionInput> {
+        cx.update(|window, cx| {
+            let api = Arc::new(mezon_client::AppApi::new(
+                Arc::new(mezon_client::TransportClient::new(String::new())),
+                String::new(),
+            ));
+            mezon_store::RealtimeDispatch::init(api.clone(), cx);
+            let auth = cx.new(|_| AuthState::NotAuthenticated);
+            BadgeService::init(auth, cx);
+            ClanList::init(api.clone(), cx);
+            ChannelList::init(api.clone(), cx);
+            MessagesStore::init(api.clone(), cx);
+            DirectMessageStore::init(api.clone(), cx);
+            ClanMembersStore::init(api.clone(), cx);
+            ChannelMembersStore::init(api.clone(), cx);
+            GroupMembersStore::init(api, cx);
+            Shell::init(cx);
+            let settings = cx.new(|_| Settings::default());
+            cx.new(|cx| MentionInput::new("", settings, window, cx))
+        })
+    }
+
+    #[gpui::test]
+    fn take_payload_prompts_without_converting_over_threshold_draft(cx: &mut gpui::TestAppContext) {
+        let cx = cx.add_empty_window();
+        let composer = build_composer(cx);
+        let over = "a".repeat(CONVERT_TO_FILE_THRESHOLD);
+
+        composer.update_in(cx, |composer, window, cx| {
+            composer
+                .input
+                .update(cx, |input, cx| input.set_value(over.clone(), window, cx));
+            let payload = composer.take_payload(window, cx);
+            assert!(payload.is_none());
+            assert!(!composer.converting_to_file);
+            assert!(composer.pending_attachments.is_empty());
+            assert_eq!(composer.input.read(cx).value(), over.as_str());
+            assert!(Shell::global(cx).read(cx).has_modal());
+        });
+
+        cx.run_until_parked();
+
+        composer.update_in(cx, |composer, _window, cx| {
+            assert!(!composer.converting_to_file);
+            assert!(composer.pending_attachments.is_empty());
+            assert_eq!(composer.input.read(cx).value(), over.as_str());
+        });
+    }
+
+    #[gpui::test]
+    fn dismissing_the_prompt_from_outside_returns_focus_to_the_composer(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let cx = cx.add_empty_window();
+        let composer = build_composer(cx);
+        let over = "a".repeat(CONVERT_TO_FILE_THRESHOLD);
+
+        composer.update_in(cx, |composer, window, cx| {
+            composer
+                .input
+                .update(cx, |input, cx| input.set_value(over.clone(), window, cx));
+            composer.focus_input(window, cx);
+            assert!(composer.take_payload(window, cx).is_none());
+            let input_focus = composer.input.read(cx).focus_handle(cx);
+            assert!(!input_focus.is_focused(window));
+            Shell::global(cx).update(cx, |shell, cx| shell.dismiss_modal(window, cx));
+            assert!(!Shell::global(cx).read(cx).has_modal());
+            assert!(input_focus.is_focused(window));
+            assert_eq!(composer.input.read(cx).value(), over.as_str());
+        });
+    }
+
+    #[gpui::test]
+    fn convert_confirmed_converts_over_threshold_and_ignores_short_draft(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let cx = cx.add_empty_window();
+        let composer = build_composer(cx);
+
+        composer.update_in(cx, |composer, window, cx| {
+            composer
+                .input
+                .update(cx, |input, cx| input.set_value("short draft", window, cx));
+            composer.convert_confirmed(window, cx);
+            assert!(!composer.converting_to_file);
+            assert!(composer.pending_attachments.is_empty());
+            assert_eq!(composer.input.read(cx).value(), "short draft");
+        });
+
+        cx.run_until_parked();
+
+        composer.update_in(cx, |composer, window, cx| {
+            assert!(!composer.converting_to_file);
+            assert!(composer.pending_attachments.is_empty());
+            assert_eq!(composer.input.read(cx).value(), "short draft");
+
+            let over = "a".repeat(CONVERT_TO_FILE_THRESHOLD);
+            composer
+                .input
+                .update(cx, |input, cx| input.set_value(over, window, cx));
+            composer.convert_confirmed(window, cx);
+            assert!(composer.converting_to_file);
+        });
+
+        cx.run_until_parked();
+
+        composer.update_in(cx, |composer, _window, cx| {
+            assert!(!composer.converting_to_file);
+            assert_eq!(composer.pending_attachments.len(), 1);
+            assert_eq!(composer.input.read(cx).value(), "");
+            let _ = std::fs::remove_file(&composer.pending_attachments[0].path);
+        });
     }
 }
