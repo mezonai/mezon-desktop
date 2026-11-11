@@ -894,6 +894,17 @@ fn render_selectable_segmented_spans(
             }
             MessageSpan::Link { text, url, kind } if *kind == LinkKind::Plain => {
                 let resolved = SharedString::from(resolve_link_url(url, text));
+                let link_range = base..base + text.len();
+                let link_hovered = ctx
+                    .row_memo
+                    .borrow()
+                    .hovered_rich_link
+                    .as_ref()
+                    .is_some_and(|(id, range)| {
+                        *id == msg.id
+                            && range.start >= link_range.start
+                            && range.end <= link_range.end
+                    });
                 let mut line_base = 0usize;
                 for (line_index, line) in text.split('\n').enumerate() {
                     if line_index > 0 {
@@ -909,12 +920,33 @@ fn render_selectable_segmented_spans(
                         let target = resolved.clone();
                         let link_key = link_part_index;
                         link_part_index += 1;
+                        let row_memo = ctx.row_memo.clone();
+                        let hover_host = ctx.video_host.clone();
+                        let message_id = msg.id;
                         row = row.child(
                             div()
                                 .id(("msg-link", link_key))
                                 .cursor_pointer()
                                 .text_color(ctx.theme.tokens.mention_color)
-                                .when(rich_style, |link| link.hover(|style| style.underline()))
+                                .when(rich_style && link_hovered, |link| link.underline())
+                                .when(rich_style, |link| {
+                                    link.on_hover(move |hovered, _, cx| {
+                                        let part = (message_id, start..end);
+                                        let mut memo = row_memo.borrow_mut();
+                                        if *hovered {
+                                            if memo.hovered_rich_link.as_ref() == Some(&part) {
+                                                return;
+                                            }
+                                            memo.hovered_rich_link = Some(part);
+                                        } else if memo.hovered_rich_link.as_ref() == Some(&part) {
+                                            memo.hovered_rich_link = None;
+                                        } else {
+                                            return;
+                                        }
+                                        drop(memo);
+                                        let _ = hover_host.update(cx, |_, cx| cx.notify());
+                                    })
+                                })
                                 .on_mouse_down(
                                     gpui::MouseButton::Right,
                                     note_context_link(ctx, msg.id, resolved.clone()),
