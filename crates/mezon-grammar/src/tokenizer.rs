@@ -1,6 +1,3 @@
-//! Vietnamese Syllable and Subword Tokenizer with embedded 511-token vocabulary.
-//! Decodes and encodes text for TinyLM transformer inference on Desktop & Mobile.
-
 use crate::assets::{VOCAB_FILE, load_asset_str};
 use regex::Regex;
 use std::collections::HashMap;
@@ -31,7 +28,6 @@ impl VietnameseTokenizer {
         TOKEN_TO_ID.len()
     }
 
-    /// Splits text into words, punctuation, and whitespace tokens.
     pub fn tokenize(&self, text: &str) -> Vec<String> {
         let re = Regex::new(r"[\w]+|[^\w\s]|\s+").unwrap();
         let mut tokens = Vec::new();
@@ -45,7 +41,6 @@ impl VietnameseTokenizer {
                 if TOKEN_TO_ID.contains_key(&lower) {
                     tokens.push(part.to_string());
                 } else {
-                    // Character fallback
                     for ch in part.chars() {
                         tokens.push(ch.to_string());
                     }
@@ -80,7 +75,6 @@ impl VietnameseTokenizer {
         let mut result = String::new();
         for &id in ids {
             if id < 5 {
-                // Skip special tokens (<pad>, <unk>, <s>, </s>, <mask>)
                 continue;
             }
             if let Some(tok) = ID_TO_TOKEN.get(&id) {
