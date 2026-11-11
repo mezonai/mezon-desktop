@@ -2,8 +2,8 @@ use gpui::{
     AnyElement, App, Bounds, Corners, Entity, FontWeight, ImageCache, MouseButton, Pixels,
     Resource, Window, canvas, div, point, prelude::*, px, rgba, size,
 };
-use mezon_client::transport::{location_map_preview, mezon_location_tile_base};
-use mezon_store::{AppConfig, Message, MessageLocation};
+use mezon_client::transport::{LOCATION_MAP_TILE_ROOT, location_map_preview};
+use mezon_store::{Message, MessageLocation};
 
 use super::content::{SelectableSectionCursor, SelectableTextContext, open_message_link};
 use super::context::RowCtx;
@@ -39,17 +39,12 @@ pub fn render_location_card(
         CARD_MAX_WIDTH
     };
 
-    let tile_base = mezon_location_tile_base(
-        AppConfig::try_global(ctx.app)
-            .map(|cfg| cfg.mezon_cdn_url.as_str())
-            .unwrap_or("https://cdn.mezon.ai"),
-    );
     let map_preview = location_map_preview(
         location.latitude,
         location.longitude,
         card_width,
         MAP_HEIGHT,
-        &tile_base,
+        LOCATION_MAP_TILE_ROOT,
     );
     let map_origin_left = map_preview.origin_left_px;
     let map_origin_top = map_preview.origin_top_px;
@@ -120,7 +115,7 @@ pub fn render_location_card(
                     .absolute()
                     .inset_0(),
                 )
-                .child(map_credit(ctx.locale))
+                .child(map_credit(msg.row_anchor_id.0, ctx.locale))
                 .child(
                     div()
                         .absolute()
@@ -213,8 +208,9 @@ fn paint_location_map(
     }
 }
 
-fn map_credit(locale: &str) -> AnyElement {
+fn map_credit(row_id: i64, locale: &str) -> AnyElement {
     div()
+        .id(("msg-location-credit", row_id as usize))
         .absolute()
         .bottom(px(4.))
         .left(px(6.))
@@ -268,13 +264,7 @@ mod tests {
             "{}/15/",
             mezon_client::transport::LOCATION_MAP_TILE_ROOT
         )));
-        assert!(
-            !preview
-                .tile_urls
-                .iter()
-                .flatten()
-                .any(|url| url.contains("openstreetmap.org"))
-        );
+        assert!(preview.tile_urls[1][1].contains("tile.openstreetmap.org/15/"));
         assert!(preview.origin_top_px + 256. * 3. >= 150.);
     }
 }

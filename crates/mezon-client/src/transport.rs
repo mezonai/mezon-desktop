@@ -670,16 +670,7 @@ pub fn lat_lon_map_tile(latitude: f64, longitude: f64, zoom: u32) -> (u32, u32) 
 
 pub const LOCATION_MAP_PREVIEW_ZOOM: u32 = 15;
 
-pub const LOCATION_MAP_TILE_ROOT: &str = "https://cdn.mezon.ai/maps";
-
-pub fn mezon_location_tile_base(cdn_url: &str) -> String {
-    let cdn = cdn_url.trim().trim_end_matches('/');
-    if cdn.is_empty() {
-        LOCATION_MAP_TILE_ROOT.to_string()
-    } else {
-        format!("{cdn}/maps")
-    }
-}
+pub const LOCATION_MAP_TILE_ROOT: &str = "https://tile.openstreetmap.org";
 
 pub fn location_map_tile_url(tile_base: &str, zoom: u32, x: u32, y: u32) -> String {
     let base = tile_base.trim().trim_end_matches('/');
@@ -13834,13 +13825,7 @@ mod tests {
         assert!(preview.tile_urls[1][1].contains(&format!(
             "/{LOCATION_MAP_PREVIEW_ZOOM}/{tile_x}/{tile_y}.png"
         )));
-        assert!(
-            !preview
-                .tile_urls
-                .iter()
-                .flatten()
-                .any(|url| url.contains("openstreetmap.org"))
-        );
+        assert!(preview.tile_urls[1][1].contains("tile.openstreetmap.org/"));
     }
 
     #[test]
