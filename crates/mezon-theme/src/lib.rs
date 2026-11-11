@@ -1,3 +1,4 @@
+mod icon_colors;
 pub mod surface;
 mod surfaces;
 pub mod tokens;
@@ -20,6 +21,10 @@ impl ActiveTheme for App {
     fn theme(&self) -> &Arc<Theme> {
         &self.global::<GlobalTheme>().0
     }
+}
+
+pub fn try_theme(cx: &App) -> Option<&Arc<Theme>> {
+    cx.try_global::<GlobalTheme>().map(|theme| &theme.0)
 }
 
 struct MezonThemeSettings {

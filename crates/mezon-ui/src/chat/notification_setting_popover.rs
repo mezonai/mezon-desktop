@@ -135,7 +135,7 @@ impl Render for NotificationSettingPanel {
                 .when(!muted, |row| {
                     row.child(
                         Icon::new(IconName::ChevronRight)
-                            .size(px(14.))
+                            .size(px(16.))
                             .text_color(tokens.text_secondary),
                     )
                 }),

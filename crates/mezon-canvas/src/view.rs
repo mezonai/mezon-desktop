@@ -361,7 +361,7 @@ impl gpui::Render for CanvasView {
                 Button::new("canvas-back")
                     .label(mezon_i18n::t(&locale, "common.close"))
                     .with_size(Size::Small)
-                    .icon(Icon::new(IconName::Close).size_4())
+                    .icon(Icon::new(IconName::Close).size(px(16.)))
                     .on_click({
                         let clan_id = self.clan_id;
                         let channel_id = self.channel_id;

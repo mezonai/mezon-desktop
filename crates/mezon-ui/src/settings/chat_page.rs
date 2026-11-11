@@ -136,7 +136,13 @@ impl Render for ChatPage {
                 "setting.chat.grammarCorrection.title",
                 "setting.chat.grammarCorrection.description",
                 grammar,
-                |s| s.grammar_correction_enabled = !s.grammar_correction_enabled,
+                |s| {
+                    s.grammar_correction_enabled = !s.grammar_correction_enabled;
+                    mezon_grammar::set_download_enabled(s.grammar_correction_enabled);
+                    if s.grammar_correction_enabled {
+                        mezon_grammar::prefetch_all_assets();
+                    }
+                },
                 cx,
             ))
             .child(self.only_friends_row(cx))

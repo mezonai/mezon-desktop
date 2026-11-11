@@ -1,6 +1,7 @@
+use crate::components::primitives::{Icon, IconName};
+
 use gpui::{div, prelude::*, px};
 
-use crate::components::primitives::{Icon, IconName};
 use crate::theme::Theme;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -94,7 +95,7 @@ pub fn pagination_button(
             matches!(button, PaginationButton::Previous | PaginationButton::Next),
             |element| {
                 element.child(
-                    Icon::new(IconName::ArrowRight)
+                    Icon::new(IconName::ChevronRight)
                         .size(px(20.0))
                         .text_color(gpui::white())
                         .when(button == PaginationButton::Previous, |icon| {

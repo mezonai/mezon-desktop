@@ -61,9 +61,9 @@ pub fn render_create_thread_panel(params: CreateThreadPanelParams<'_>) -> AnyEle
     });
 
     let thread_icon = if create_private {
-        IconName::ThreadIconLocker
+        IconName::ThreadPrivate
     } else {
-        IconName::ThreadIcon
+        IconName::Thread
     };
 
     v_flex()
@@ -113,7 +113,7 @@ pub fn render_create_thread_panel(params: CreateThreadPanelParams<'_>) -> AnyEle
                         .cursor_pointer()
                         .child(
                             Icon::new(IconName::Close)
-                                .size_4()
+                                .size(px(16.))
                                 .text_color(tokens.text_theme_primary_hover),
                         )
                         .on_click(move |_: &ClickEvent, _window, cx| {

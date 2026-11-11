@@ -93,7 +93,7 @@ pub fn render_topic_view_button(msg: &Message, ctx: &RowCtx) -> AnyElement {
         })
         .child(left)
         .child(
-            Icon::new(IconName::ArrowRight)
+            Icon::new(IconName::ChevronRight)
                 .size(px(16.))
                 .text_color(theme.tokens.text_theme_primary),
         );

@@ -302,7 +302,7 @@ impl Render for GifStickerEmojiPopup {
                         .items_center()
                         .child(
                             Icon::new(IconName::Search)
-                                .size(px(18.))
+                                .size(px(20.))
                                 .text_color(theme.tokens.text_theme_primary),
                         ),
                 ),

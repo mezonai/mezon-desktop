@@ -577,8 +577,8 @@ fn render_sound_card(
                             .ghost()
                             .with_size(Size::XSmall)
                             .icon(
-                                Icon::new(IconName::QuickActionEdit)
-                                    .size(px(12.0))
+                                Icon::new(IconName::Edit)
+                                    .size(px(16.0))
                                     .text_color(theme.tokens.text_theme_message),
                             )
                             .on_click(move |_, window, cx| {
@@ -611,7 +611,7 @@ fn render_sound_card(
                             .with_size(Size::XSmall)
                             .icon(
                                 Icon::new(IconName::Close)
-                                    .size(px(12.0))
+                                    .size(px(16.0))
                                     .text_color(theme.danger_text),
                             )
                             .on_click(move |_, window, cx| {
@@ -645,9 +645,9 @@ fn render_sound_card(
                         .cursor_pointer()
                         .child(
                             Icon::new(if previewing {
-                                IconName::AudioPause
+                                IconName::Pause
                             } else {
-                                IconName::AudioPlay
+                                IconName::Play
                             })
                             .size(px(16.0))
                             .text_color(gpui::white()),

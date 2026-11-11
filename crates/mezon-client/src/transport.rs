@@ -1125,6 +1125,7 @@ impl MezonTransport {
 /// API response types (simplified - expand as needed)
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ApiAccount {
+    pub banner: Option<String>,
     pub user_id: i64,
     pub username: String,
     pub email: Option<String>,
@@ -4856,6 +4857,20 @@ impl MezonTransport {
         self.send_api_request(cid, api_name, body).await
     }
 
+    fn account_from_proto(account: api::Account) -> Result<ApiAccount> {
+        let user = account
+            .user
+            .ok_or_else(|| anyhow::anyhow!("GetAccount response missing user"))?;
+        let mut mapped = Self::account_from_user(
+            user,
+            (!account.email.is_empty()).then_some(account.email),
+            account.password_setted,
+            (!account.logo.is_empty()).then_some(account.logo),
+        );
+        mapped.banner = (!account.banner.is_empty()).then_some(account.banner);
+        Ok(mapped)
+    }
+
     fn account_from_user(
         user: api::User,
         email: Option<String>,
@@ -4863,6 +4878,7 @@ impl MezonTransport {
         logo: Option<String>,
     ) -> ApiAccount {
         ApiAccount {
+            banner: None,
             user_id: user.id,
             username: user.username,
             email,
@@ -5374,15 +5390,7 @@ impl MezonTransport {
                 }
 
                 let account = api::Account::decode(response.as_slice())?;
-                let user = account
-                    .user
-                    .ok_or_else(|| anyhow::anyhow!("GetAccount response missing user"))?;
-                let account = Self::account_from_user(
-                    user,
-                    (!account.email.is_empty()).then_some(account.email),
-                    account.password_setted,
-                    (!account.logo.is_empty()).then_some(account.logo),
-                );
+                let account = Self::account_from_proto(account)?;
                 tracing::debug!("Decoded account response: {} bytes", response.len());
                 Ok(account)
             }
@@ -10823,6 +10831,7 @@ impl MezonTransport {
         about_me: Option<&str>,
         logo: Option<&str>,
         dob_seconds: Option<u32>,
+        banner: Option<&str>,
     ) -> Result<()> {
         let cid = self.generate_cid();
 
@@ -10833,6 +10842,7 @@ impl MezonTransport {
             avatar_url: avatar_url.map(str::to_string),
             about_me: about_me.map(str::to_string),
             logo: logo.map(str::to_string),
+            banner: banner.map(str::to_string),
             dob_seconds: dob_seconds.unwrap_or_default(),
             ..Default::default()
         }
@@ -11239,6 +11249,56 @@ fn bare_jwt(body: &[u8]) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn account_cover_survives_decode_after_restart() {
+        let response = super::api::Account {
+            banner: "https://example.test/cover.png".into(),
+            user: Some(super::api::User {
+                id: 7,
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let bytes = prost::Message::encode_to_vec(&response);
+        let response = <super::api::Account as prost::Message>::decode(bytes.as_slice()).unwrap();
+        let account = super::MezonTransport::account_from_proto(response).unwrap();
+        assert_eq!(
+            account.banner.as_deref(),
+            Some("https://example.test/cover.png")
+        );
+    }
+
+    #[test]
+    fn account_cover_is_authoritative_including_removal() {
+        for (account_banner, user_banner, expected) in [
+            ("account.png", "user.png", Some("account.png")),
+            ("", "user.png", None),
+            ("", "", None),
+        ] {
+            let response = super::api::Account {
+                banner: account_banner.into(),
+                user: Some(super::api::User {
+                    id: 7,
+                    banner: user_banner.into(),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            };
+            assert_eq!(
+                super::MezonTransport::account_from_proto(response)
+                    .unwrap()
+                    .banner
+                    .as_deref(),
+                expected
+            );
+        }
+    }
+
+    #[test]
+    fn account_cover_decode_rejects_missing_identity() {
+        assert!(super::MezonTransport::account_from_proto(super::api::Account::default()).is_err());
+    }
+
     use super::*;
 
     #[test]

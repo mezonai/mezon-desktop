@@ -4414,7 +4414,7 @@ impl ChannelMessages {
             })
             .child(
                 Icon::new(IconName::ArrowDown)
-                    .size(px(18.))
+                    .size(px(20.))
                     .text_color(theme.text_primary),
             )
     }

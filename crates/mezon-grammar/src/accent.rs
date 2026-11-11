@@ -86,7 +86,8 @@ struct Collocations {
 }
 
 static COLLOCATIONS: LazyLock<Collocations> = LazyLock::new(|| {
-    let parsed: CollocationFile = serde_json::from_str(include_str!("../assets/collocations.json"))
+    let parsed: CollocationFile = crate::assets::load_asset_str(crate::assets::COLLOCATIONS_FILE)
+        .and_then(|json| serde_json::from_str(&json).ok())
         .unwrap_or(CollocationFile {
             trigram: Vec::new(),
             bigram: Vec::new(),
@@ -116,9 +117,21 @@ static COLLOCATIONS: LazyLock<Collocations> = LazyLock::new(|| {
         ("xong", "ngay", "xong", "ngay"),
         ("den", "ngay", "đến", "ngay"),
         ("ve", "ngay", "về", "ngay"),
+        ("mili", "giay", "mili", "giây"),
+        ("micro", "giay", "micro", "giây"),
+        ("nano", "giay", "nano", "giây"),
+        ("mili", "met", "mili", "mét"),
+        ("kilo", "met", "kilo", "mét"),
+        ("kilo", "gam", "kilo", "gam"),
     ];
     for (u1, u2, w1, w2) in priority_bigrams {
         bigram.insert(pair_key(u1, u2, None), (w1.to_string(), w2.to_string()));
+    }
+    for &(u1, u2) in BAD_COLLOCATIONS.iter() {
+        bigram.remove(&pair_key(u1, u2, None));
+    }
+    for &(u1, u2, u3) in BAD_TRIGRAMS.iter() {
+        trigram.remove(&pair_key(u1, u2, Some(u3)));
     }
     let priority_trigrams = [
         ("di", "ngay", "nhe", "đi", "ngay", "nhé"),
@@ -136,6 +149,55 @@ static COLLOCATIONS: LazyLock<Collocations> = LazyLock::new(|| {
     }
     Collocations { trigram, bigram }
 });
+
+static BAD_COLLOCATIONS: LazyLock<HashSet<(&'static str, &'static str)>> = LazyLock::new(|| {
+    [
+        ("lon", "tao"),
+        ("viec", "bai"),
+        ("kem", "phan"),
+        ("san", "ban"),
+        ("da", "tay"),
+        ("thay", "da"),
+        ("vai", "kieu"),
+        ("dip", "duoc"),
+        ("neu", "tai"),
+        ("de", "dung"),
+        ("rat", "de"),
+        ("mot", "nhan"),
+        ("bom", "tu"),
+        ("sang", "hoc"),
+        ("trong", "thanh"),
+        ("nhat", "va"),
+        ("tai", "le"),
+        ("gay", "mui"),
+        ("sau", "tai"),
+        ("sam", "mau"),
+        ("may", "ban"),
+        ("thu", "bay"),
+        ("quyen", "cung"),
+        ("co", "tram"),
+        ("truong", "sitc"),
+        ("ban", "nghe"),
+        ("nhan", "dinh"),
+        ("dang", "tai"),
+        ("vai", "lan"),
+        ("vai", "nguoi"),
+        ("buoc", "tren"),
+        ("tren", "san"),
+        ("vao", "nam"),
+        ("chi", "nguyen"),
+        ("di", "thi"),
+        ("nhan", "hieu"),
+        ("dung", "day"),
+        ("vang", "toi"),
+        ("co", "khoi"),
+    ]
+    .into_iter()
+    .collect()
+});
+
+static BAD_TRIGRAMS: LazyLock<HashSet<(&'static str, &'static str, &'static str)>> =
+    LazyLock::new(|| [("gian", "vi", "co")].into_iter().collect());
 
 static RE_SENTENCE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"[.?!]\s+").unwrap());
 static RE_DELIMITER_ONLY: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^[.?!]\s+$").unwrap());
@@ -252,7 +314,9 @@ fn add_accents_chunk(text: &str, infer: &dyn Fn(&str) -> Option<Vec<f32>>) -> St
             let mut sub_res = Vec::new();
             let mut curr_buf = String::new();
             for sp in subparts {
-                if curr_buf.chars().count() + sp.chars().count() > ACCENT_MAX_CHARS && !curr_buf.is_empty() {
+                if curr_buf.chars().count() + sp.chars().count() > ACCENT_MAX_CHARS
+                    && !curr_buf.is_empty()
+                {
                     sub_res.push(add_accents_chunk(&curr_buf, infer));
                     curr_buf = sp.to_string();
                 } else {
@@ -283,7 +347,8 @@ fn add_accents_chunk(text: &str, infer: &dyn Fn(&str) -> Option<Vec<f32>>) -> St
                 chunks.push(curr_chunk.join(" "));
             }
             if chunks.len() > 1 {
-                let res_chunks: Vec<String> = chunks.iter().map(|c| add_accents_chunk(c, infer)).collect();
+                let res_chunks: Vec<String> =
+                    chunks.iter().map(|c| add_accents_chunk(c, infer)).collect();
                 return rescore_with_collocations(&res_chunks.join(" "), &text);
             } else {
                 // Single huge word with no spaces or clauses; chunk strictly by char length
@@ -663,6 +728,9 @@ fn is_valid_vietnamese_syllable(syllable: &str) -> bool {
     if syllable.is_empty() {
         return true;
     }
+    if crate::syllable::is_valid_vietnamese_syllable(&syllable) {
+        return true;
+    }
     if !RE_VN_SYLLABLE.is_match(&syllable) {
         return false;
     }
@@ -700,65 +768,267 @@ fn extract_tone(word: &str) -> (String, u8) {
     (chars, tone)
 }
 
+fn has_punct_between(tokens: &[String], start_idx: usize, end_idx: usize) -> bool {
+    const PUNCT: &[char] = &[
+        ',', '.', '?', '!', ':', ';', '(', ')', '[', ']', '{', '}', '"', '\'', '-', '/', '\\', '–',
+        '—',
+    ];
+    for token in &tokens[start_idx + 1..end_idx] {
+        if token.chars().any(|c| PUNCT.contains(&c)) {
+            return true;
+        }
+    }
+    false
+}
+
 fn rescore_with_collocations(text: &str, original: &str) -> String {
     let mut tokens = tokenize(text);
     let original_tokens = tokenize(original);
-    let mut unaccented = vec![true; tokens.len()];
-    if original_tokens.len() == tokens.len() {
-        for index in 0..tokens.len() {
-            let source = &original_tokens[index];
-            unaccented[index] = source.to_lowercase() == strip_accents(source).to_lowercase();
-        }
-    }
-    let mut matched = HashSet::new();
-    let alpha: Vec<usize> = tokens
+    let alpha_indices: Vec<usize> = tokens
         .iter()
         .enumerate()
         .filter(|(_, token)| token.chars().any(|ch| ch.is_alphabetic()))
         .map(|(index, _)| index)
         .collect();
-    if alpha.len() >= 3 {
-        for index in 0..alpha.len() - 2 {
-            let (i0, i1, i2) = (alpha[index], alpha[index + 1], alpha[index + 2]);
-            let u0 = strip_accents(&tokens[i0]).to_lowercase();
-            let u1 = strip_accents(&tokens[i1]).to_lowercase();
-            let u2 = strip_accents(&tokens[i2]).to_lowercase();
-            if let Some((c0, c1, c2)) = COLLOCATIONS.trigram.get(&pair_key(&u0, &u1, Some(&u2))) {
-                if unaccented[i0] {
-                    tokens[i0] = match_case(&tokens[i0], c0);
+
+    if alpha_indices.is_empty() {
+        return text.to_string();
+    }
+
+    let mut unaccented_mask = vec![true; tokens.len()];
+    if original_tokens.len() == tokens.len() {
+        for index in 0..tokens.len() {
+            let source = &original_tokens[index];
+            unaccented_mask[index] = source.to_lowercase() == strip_accents(source).to_lowercase();
+        }
+    }
+
+    let k_len = alpha_indices.len();
+    let mut candidates_per_pos: Vec<Vec<String>> = Vec::with_capacity(k_len);
+
+    for k in 0..k_len {
+        let idx = alpha_indices[k];
+        let tok = &tokens[idx];
+        let u = strip_accents(tok).to_lowercase();
+        let mut cands = vec![tok.clone()];
+
+        if unaccented_mask[idx] {
+            // Left bigram suggestion
+            if k > 0 && !has_punct_between(&tokens, alpha_indices[k - 1], idx) {
+                let u_prev = strip_accents(&tokens[alpha_indices[k - 1]]).to_lowercase();
+                if !BAD_COLLOCATIONS.contains(&(u_prev.as_str(), u.as_str())) {
+                    if let Some((_, c1)) = COLLOCATIONS.bigram.get(&pair_key(&u_prev, &u, None)) {
+                        cands.push(match_case(tok, c1));
+                    }
                 }
-                if unaccented[i1] {
-                    tokens[i1] = match_case(&tokens[i1], c1);
+            }
+
+            // Right bigram suggestion
+            if k + 1 < k_len && !has_punct_between(&tokens, idx, alpha_indices[k + 1]) {
+                let u_next = strip_accents(&tokens[alpha_indices[k + 1]]).to_lowercase();
+                if !BAD_COLLOCATIONS.contains(&(u.as_str(), u_next.as_str())) {
+                    if let Some((c0, _)) = COLLOCATIONS.bigram.get(&pair_key(&u, &u_next, None)) {
+                        cands.push(match_case(tok, c0));
+                    }
                 }
-                if unaccented[i2] {
-                    tokens[i2] = match_case(&tokens[i2], c2);
+            }
+
+            // Trigram suggestions
+            if k >= 2 && !has_punct_between(&tokens, alpha_indices[k - 2], idx) {
+                let u_pp = strip_accents(&tokens[alpha_indices[k - 2]]).to_lowercase();
+                let u_p = strip_accents(&tokens[alpha_indices[k - 1]]).to_lowercase();
+                if let Some((_, _, c2)) = COLLOCATIONS.trigram.get(&pair_key(&u_pp, &u_p, Some(&u)))
+                {
+                    cands.push(match_case(tok, c2));
                 }
-                matched.insert(i0);
-                matched.insert(i1);
-                matched.insert(i2);
+            }
+
+            if k >= 1
+                && k + 1 < k_len
+                && !has_punct_between(&tokens, alpha_indices[k - 1], alpha_indices[k + 1])
+            {
+                let u_p = strip_accents(&tokens[alpha_indices[k - 1]]).to_lowercase();
+                let u_n = strip_accents(&tokens[alpha_indices[k + 1]]).to_lowercase();
+                if let Some((_, c1, _)) = COLLOCATIONS.trigram.get(&pair_key(&u_p, &u, Some(&u_n)))
+                {
+                    cands.push(match_case(tok, c1));
+                }
+            }
+
+            if k + 2 < k_len && !has_punct_between(&tokens, idx, alpha_indices[k + 2]) {
+                let u_n = strip_accents(&tokens[alpha_indices[k + 1]]).to_lowercase();
+                let u_nn = strip_accents(&tokens[alpha_indices[k + 2]]).to_lowercase();
+                if let Some((c0, _, _)) = COLLOCATIONS
+                    .trigram
+                    .get(&pair_key(&u_n, &u_nn, None))
+                    .or_else(|| COLLOCATIONS.trigram.get(&pair_key(&u, &u_n, Some(&u_nn))))
+                {
+                    cands.push(match_case(tok, c0));
+                }
+            }
+        }
+
+        // Deduplicate candidates preserving order (Top-K per position, up to 6)
+        let mut unique_cands = Vec::new();
+        let mut seen = HashSet::new();
+        for c in cands {
+            let cl = c.to_lowercase();
+            if seen.insert(cl) {
+                unique_cands.push(c);
+                if unique_cands.len() >= 6 {
+                    break;
+                }
+            }
+        }
+        candidates_per_pos.push(unique_cands);
+    }
+
+    let emission = |k: usize, c: &str| -> f32 {
+        let idx = alpha_indices[k];
+        let tok = &tokens[idx];
+        let mut score = 0.0f32;
+        if c == tok {
+            score += 2.5;
+        }
+        if !unaccented_mask[idx] {
+            score += if c == tok { 100.0 } else { -100.0 };
+        }
+        score
+    };
+
+    let trans2 = |k: usize, c_prev: &str, c_curr: &str| -> f32 {
+        let idx_prev = alpha_indices[k - 1];
+        let idx_curr = alpha_indices[k];
+        if has_punct_between(&tokens, idx_prev, idx_curr) {
+            return 0.0;
+        }
+        let u_prev = strip_accents(c_prev).to_lowercase();
+        let u_curr = strip_accents(c_curr).to_lowercase();
+        if BAD_COLLOCATIONS.contains(&(u_prev.as_str(), u_curr.as_str())) {
+            return -15.0;
+        }
+        if let Some((t_prev, t_curr)) = COLLOCATIONS.bigram.get(&pair_key(&u_prev, &u_curr, None)) {
+            if c_prev.eq_ignore_ascii_case(t_prev) && c_curr.eq_ignore_ascii_case(t_curr) {
+                return 6.0;
+            } else {
+                return -3.0;
+            }
+        }
+        0.0
+    };
+
+    let trans3 = |k: usize, c_pprev: &str, c_prev: &str, c_curr: &str| -> f32 {
+        let idx_pprev = alpha_indices[k - 2];
+        let idx_curr = alpha_indices[k];
+        if has_punct_between(&tokens, idx_pprev, idx_curr) {
+            return 0.0;
+        }
+        let u_pprev = strip_accents(c_pprev).to_lowercase();
+        let u_prev = strip_accents(c_prev).to_lowercase();
+        let u_curr = strip_accents(c_curr).to_lowercase();
+        if BAD_TRIGRAMS.contains(&(u_pprev.as_str(), u_prev.as_str(), u_curr.as_str())) {
+            return -15.0;
+        }
+        if let Some((t_pprev, t_prev, t_curr)) =
+            COLLOCATIONS
+                .trigram
+                .get(&pair_key(&u_pprev, &u_prev, Some(&u_curr)))
+        {
+            if c_pprev.eq_ignore_ascii_case(t_pprev)
+                && c_prev.eq_ignore_ascii_case(t_prev)
+                && c_curr.eq_ignore_ascii_case(t_curr)
+            {
+                return 10.0;
+            } else {
+                return -4.0;
+            }
+        }
+        0.0
+    };
+
+    if k_len == 1 {
+        let mut best_c = &candidates_per_pos[0][0];
+        let mut best_score = -f32::INFINITY;
+        for c in &candidates_per_pos[0] {
+            let sc = emission(0, c);
+            if sc > best_score {
+                best_score = sc;
+                best_c = c;
+            }
+        }
+        tokens[alpha_indices[0]] = best_c.clone();
+        let rescored = apply_confusable_prepass(&tokens.concat());
+        return crate::rules::preclean_phonetics_and_units(&rescored);
+    }
+
+    // 2nd-Order Viterbi Dynamic Programming
+    let mut v: Vec<HashMap<(usize, usize), f32>> = vec![HashMap::new(); k_len];
+    let mut bp: Vec<HashMap<(usize, usize), usize>> = vec![HashMap::new(); k_len];
+
+    // Step k = 0
+    for (c_idx, c) in candidates_per_pos[0].iter().enumerate() {
+        v[0].insert((0, c_idx), emission(0, c));
+    }
+
+    // Step k = 1
+    for (p_idx, p) in candidates_per_pos[0].iter().enumerate() {
+        let prev_v = v[0].get(&(0, p_idx)).copied().unwrap_or(0.0);
+        for (c_idx, c) in candidates_per_pos[1].iter().enumerate() {
+            let score = prev_v + trans2(1, p, c) + emission(1, c);
+            v[1].insert((p_idx, c_idx), score);
+        }
+    }
+
+    // Step k >= 2
+    for k in 2..k_len {
+        for (p_idx, p) in candidates_per_pos[k - 1].iter().enumerate() {
+            for (c_idx, c) in candidates_per_pos[k].iter().enumerate() {
+                let mut best_score = -f32::INFINITY;
+                let mut best_pp = None;
+                let t2 = trans2(k, p, c);
+                let em = emission(k, c);
+
+                for (pp_idx, pp) in candidates_per_pos[k - 2].iter().enumerate() {
+                    if let Some(&prev_sc) = v[k - 1].get(&(pp_idx, p_idx)) {
+                        let sc = prev_sc + t2 + trans3(k, pp, p, c) + em;
+                        if sc > best_score {
+                            best_score = sc;
+                            best_pp = Some(pp_idx);
+                        }
+                    }
+                }
+                if let Some(pp_idx) = best_pp {
+                    v[k].insert((p_idx, c_idx), best_score);
+                    bp[k].insert((p_idx, c_idx), pp_idx);
+                }
             }
         }
     }
-    if alpha.len() >= 2 {
-        for index in 0..alpha.len() - 1 {
-            let (i0, i1) = (alpha[index], alpha[index + 1]);
-            if matched.contains(&i0) && matched.contains(&i1) {
-                continue;
-            }
-            let u0 = strip_accents(&tokens[i0]).to_lowercase();
-            let u1 = strip_accents(&tokens[i1]).to_lowercase();
-            if let Some((c0, c1)) = COLLOCATIONS.bigram.get(&pair_key(&u0, &u1, None)) {
-                if !matched.contains(&i0) && unaccented[i0] {
-                    tokens[i0] = match_case(&tokens[i0], c0);
-                    matched.insert(i0);
-                }
-                if !matched.contains(&i1) && unaccented[i1] {
-                    tokens[i1] = match_case(&tokens[i1], c1);
-                    matched.insert(i1);
-                }
-            }
+
+    // Traceback to find globally optimal sequence
+    let mut best_pair = (0, 0);
+    let mut max_total_score = -f32::INFINITY;
+    for (&(p_idx, c_idx), &score) in &v[k_len - 1] {
+        if score > max_total_score {
+            max_total_score = score;
+            best_pair = (p_idx, c_idx);
         }
     }
+
+    let mut result_indices = vec![0usize; k_len];
+    result_indices[k_len - 1] = best_pair.1;
+    result_indices[k_len - 2] = best_pair.0;
+
+    for k in (2..k_len).rev() {
+        let pair = (result_indices[k - 1], result_indices[k]);
+        let pp_idx = bp[k].get(&pair).copied().unwrap_or(0);
+        result_indices[k - 2] = pp_idx;
+    }
+
+    for k in 0..k_len {
+        tokens[alpha_indices[k]] = candidates_per_pos[k][result_indices[k]].clone();
+    }
+
     let rescored = apply_confusable_prepass(&tokens.concat());
     crate::rules::preclean_phonetics_and_units(&rescored)
 }

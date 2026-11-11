@@ -794,7 +794,7 @@ impl IntegrationsTab {
                             .gap_4()
                             .min_w_0()
                             .child(
-                                Icon::new(IconName::WebhooksIcon)
+                                Icon::new(IconName::Webhook)
                                     .size(px(20.0))
                                     .flex_shrink_0()
                                     .text_color(theme.tokens.text_theme_primary),
@@ -834,7 +834,7 @@ impl IntegrationsTab {
                             .child(mezon_i18n::t(locale, "integrations.viewWebhook"))
                             .child(
                                 Icon::new(IconName::ChevronRight)
-                                    .size(px(15.0))
+                                    .size(px(16.0))
                                     .text_color(theme.tokens.text_theme_primary),
                             )
                             .into_any_element()
@@ -894,7 +894,7 @@ impl IntegrationsTab {
                             .child(selected_label),
                     )
                     .child(
-                        Icon::new(IconName::ArrowDownFill)
+                        Icon::new(IconName::CaretDown)
                             .size(px(16.0))
                             .flex_shrink_0()
                             .text_color(theme.tokens.text_theme_primary),
@@ -950,10 +950,10 @@ impl IntegrationsTab {
                                                 .font_weight(FontWeight::SEMIBOLD)
                                         })
                                         .child(
-                                            Icon::new(IconName::Hashtag)
+                                            Icon::new(IconName::Channel)
                                                 .size(px(16.0))
                                                 .flex_shrink_0()
-                                                .text_color(theme.text_muted),
+                                                .selected(false),
                                         )
                                         .child(
                                             div()
@@ -1032,9 +1032,7 @@ impl IntegrationsTab {
                                             },
                                         ));
                                         pick.child(
-                                            Icon::new(IconName::SelectFileIcon)
-                                                .size(px(12.0))
-                                                .text_color(theme.text_secondary),
+                                            Icon::new(IconName::ImageAdd).size(px(16.)).selected(false),
                                         )
                                     })
                                     .when(self.avatar_uploading, |el| {
@@ -1359,7 +1357,7 @@ fn render_webhook_row(
                                         .items_center()
                                         .gap_1()
                                         .child(
-                                            Icon::new(IconName::ClockIcon)
+                                            Icon::new(IconName::Clock)
                                                 .size(px(16.0))
                                                 .flex_shrink_0()
                                                 .text_color(theme.tokens.text_theme_primary),
@@ -1377,14 +1375,14 @@ fn render_webhook_row(
                         )
                         .child(if expanded {
                             Icon::new(IconName::ChevronDown)
-                                .size(px(30.0))
+                                .size(px(32.))
                                 .flex_shrink_0()
-                                .text_color(theme.text_secondary)
+                                .selected(false)
                         } else {
                             Icon::new(IconName::ChevronRight)
-                                .size(px(30.0))
+                                .size(px(32.))
                                 .flex_shrink_0()
-                                .text_color(theme.text_secondary)
+                                .selected(false)
                         }),
                 ),
         )

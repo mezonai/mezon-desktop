@@ -4910,12 +4910,20 @@
   "chat.activityStrip.hideAction": "Схаваць панэль замацаванняў і тэм",
   "chat.activityStrip.hideConfirm.title": "Схаваць панэль замацаванняў і тэм",
   "chat.activityStrip.hideConfirm.description": "Схаваць панэль замацаванняў і тэм для гэтага канала? Яна аўтаматычна з’явіцца зноў пасля новага замацавання або новай тэмы.",
-  "setting.account.qrProfile.centerLogo": "Лагатып у цэнтры QR",
+  "setting.profile.cover": "ВОКЛАДКА ПРОФІЛЮ",
+  "setting.profile.changeCover": "Змяніць вокладку",
+  "setting.profile.uploadingCover": "Загрузка вокладкі…",
+  "setting.profile.chooseCover": "Выбраць вокладку",
+  "setting.profile.coverUploadFailed": "Не ўдалося загрузіць вокладку. Выкарыстоўвайце JPEG, PNG, GIF або WebP памерам да 10 МБ.",
+  "setting.profile.removeCover": "Выдаліць вокладку"
+,  "setting.account.qrProfile.centerLogo": "Лагатып у цэнтры QR",
   "setting.account.qrProfile.chooseFromDevice": "Выбраць з прылады",
   "setting.account.qrProfile.resetDefaultLogo": "Скінуць лагатып Mezon",
   "setting.account.qrProfile.qrDownloaded": "Выява QR спампавана",
   "setting.account.qrProfile.brandName": "MEZON",
   "setting.account.qrProfile.verifiedByMezon": "VERIFIED BY MEZON",
   "setting.account.qrProfile.errorExport": "Не ўдалося экспартаваць QR-код профілю",
-  "setting.account.qrProfile.errorImage": "Не ўдалося загрузіць выяву"
+  "setting.account.qrProfile.errorImage": "Не ўдалося загрузіць выяву",
+  "setting.appearance.iconAnimations": "Анімацыя значкоў",
+  "setting.appearance.iconAnimationsDescription": "Аніміраваць значкі пры навядзенні ўказальніка на кнопкі і радкі."
 }

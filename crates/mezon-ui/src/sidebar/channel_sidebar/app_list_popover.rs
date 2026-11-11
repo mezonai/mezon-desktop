@@ -1,3 +1,5 @@
+use crate::components::primitives::{Icon, IconName};
+
 use gpui::{
     App, FontWeight, MouseDownEvent, SharedString, WeakEntity, Window, deferred, div, prelude::*,
     px,
@@ -5,7 +7,6 @@ use gpui::{
 use mezon_store::PlatformStore;
 use ui::Tooltip;
 
-use crate::components::primitives::{Icon, IconName};
 use crate::sidebar::channel_sidebar::ChannelSidebar;
 use crate::sidebar::channel_sidebar::items::AppChannelSlot;
 use crate::theme::ActiveTheme;
@@ -52,10 +53,8 @@ pub fn app_list_popover_overlay(
                 .aspect_square()
                 .into_any_element()
         } else {
-            gpui::svg()
-                .path("icons/channel-app-fallback.svg")
-                .w(px(28.))
-                .h(px(28.))
+            Icon::new(IconName::ChannelApp)
+                .size(px(32.))
                 .text_color(theme.text_primary)
                 .into_any_element()
         };
@@ -198,9 +197,9 @@ pub fn app_list_popover_overlay(
                                     ),
                             )
                             .child(
-                                Icon::new(IconName::ArrowRight)
+                                Icon::new(IconName::ChevronRight)
                                     .size(px(20.))
-                                    .text_color(theme.text_secondary),
+                                    .selected(false),
                             ),
                     ),
             ),

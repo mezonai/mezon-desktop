@@ -117,13 +117,19 @@ fn test_neural_model_called_after_pipeline_for_final_spelling_result() {
 #[test]
 fn test_model2_precision_collocations() {
     let client = MezonGrammarClient::new();
-    let res1 = client.correct("tho lanh nghe cung duoc sang loc ky hon").corrected;
+    let res1 = client
+        .correct("tho lanh nghe cung duoc sang loc ky hon")
+        .corrected;
     assert!(res1.to_lowercase().contains("thợ lành nghề"));
 
-    let res2 = client.correct("cac tu lieu hoc tap: phieu hoc tap").corrected;
+    let res2 = client
+        .correct("cac tu lieu hoc tap: phieu hoc tap")
+        .corrected;
     assert!(res2.to_lowercase().contains("tư liệu học tập"));
 
-    let res3 = client.correct("doanh nghiep co gang dam phan de co loi nhat").corrected;
+    let res3 = client
+        .correct("doanh nghiep co gang dam phan de co loi nhat")
+        .corrected;
     assert!(res3.to_lowercase().contains("cố gắng đàm phán"));
 
     let res4 = client.correct("goc giua chung bang 90 do").corrected;
@@ -158,4 +164,96 @@ fn test_restore_sentence_tab_prediction() {
     assert!(res4.contains("thể lực đang đi xuống"));
     assert!(res4.contains("cho bạn thân") || res4.contains("cho bản thân"));
     assert!(res4.starts_with("Tuổi tác"));
+}
+
+#[test]
+fn test_download_only_when_config_enabled() {
+    let temp = std::env::temp_dir().join(format!("mezon_test_cfg_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&temp);
+    unsafe {
+        std::env::set_var("MEZON_GRAMMAR_DIR", &temp);
+    }
+
+    // When disabled, load_asset_bytes should NOT download and return None
+    mezon_grammar::set_download_enabled(false);
+    assert!(!mezon_grammar::is_download_enabled());
+    let missing = mezon_grammar::assets::load_asset_bytes(mezon_grammar::assets::CONFIG_FILE);
+    assert!(missing.is_none());
+    assert!(!temp.join(mezon_grammar::assets::CONFIG_FILE).is_file());
+
+    // When enabled, download succeeds
+    mezon_grammar::set_download_enabled(true);
+    assert!(mezon_grammar::is_download_enabled());
+    let loaded = mezon_grammar::assets::load_asset_str(mezon_grammar::assets::CONFIG_FILE);
+    assert!(loaded.is_some());
+    assert!(temp.join(mezon_grammar::assets::CONFIG_FILE).is_file());
+
+    let _ = std::fs::remove_dir_all(&temp);
+    unsafe {
+        std::env::remove_var("MEZON_GRAMMAR_DIR");
+    }
+}
+
+#[test]
+fn test_syllable_vocab_download_and_loading() {
+    assert_eq!(mezon_grammar::SYLLABLE_VOCAB_FILE, "syllable_vocab.json");
+    let loaded = mezon_grammar::assets::load_asset_str(mezon_grammar::SYLLABLE_VOCAB_FILE);
+    assert!(
+        loaded.is_some(),
+        "syllable_vocab.json should be loaded/downloadable"
+    );
+    assert!(mezon_grammar::is_valid_syllable_vocab("người"));
+    assert!(mezon_grammar::is_valid_syllable_vocab("việt"));
+    assert!(mezon_grammar::is_valid_syllable_vocab("nam"));
+    let cands = mezon_grammar::candidates_for_syllable("muon");
+    assert!(cands.is_some());
+    let list = cands.unwrap();
+    assert!(list.iter().any(|s| s == "muốn"));
+}
+
+#[test]
+fn test_model2_mined_pairs() {
+    let client = MezonGrammarClient::new();
+    assert!(
+        client
+            .correct("16 máu")
+            .corrected
+            .to_lowercase()
+            .contains("16 màu")
+    );
+    assert!(
+        client
+            .correct("be thui")
+            .corrected
+            .to_lowercase()
+            .contains("bê thui")
+    );
+    assert!(
+        client
+            .correct("bo xung")
+            .corrected
+            .to_lowercase()
+            .contains("bổ sung")
+    );
+    assert!(
+        client
+            .correct("con luon")
+            .corrected
+            .to_lowercase()
+            .contains("con lươn")
+    );
+    assert!(
+        client
+            .correct("chuan doan")
+            .corrected
+            .to_lowercase()
+            .contains("chẩn đoán")
+    );
+    assert!(
+        client
+            .correct("xap sep")
+            .corrected
+            .to_lowercase()
+            .contains("sắp xếp")
+    );
 }

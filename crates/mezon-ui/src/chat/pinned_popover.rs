@@ -912,8 +912,8 @@ fn render_header(theme: &Theme, locale: &str) -> impl IntoElement {
         .border_color(tokens.border_primary)
         .bg(tokens.theme_setting_nav)
         .child(
-            Icon::new(IconName::PinRight)
-                .size_4()
+            Icon::new(IconName::Pin)
+                .size(px(16.))
                 .text_color(tokens.bg_icon_theme),
         )
         .child(
@@ -2224,7 +2224,13 @@ fn render_pin_file_attachment(
                 .justify_center()
                 .w(px(32.))
                 .h(px(40.))
-                .child(img(icon.path()).w(px(32.)).h(px(40.)).flex_none()),
+                .child(
+                    Icon::new(icon)
+                        .text_color(theme.tokens.text_secondary)
+                        .w(px(32.))
+                        .h(px(40.))
+                        .flex_none(),
+                ),
         )
         .child(
             div()

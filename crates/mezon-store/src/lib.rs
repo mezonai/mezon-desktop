@@ -289,7 +289,7 @@ pub use topics::{TopicsEvent, TopicsStore};
 pub use ui_state::UiState;
 pub use user_profile::{
     ProfileContext, UserProfileView, active_clan_id, cached_username, current_user_clan_avatar,
-    resolve_avatar_url, resolve_user_profile,
+    resolve_avatar_url, resolve_profile_banner, resolve_user_profile,
 };
 pub use users_by_user::{UsersByUserEvent, UsersByUserStore};
 #[cfg(debug_assertions)]
@@ -487,6 +487,8 @@ pub struct ActivityStripDismissal {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Settings {
+    #[serde(default = "icon_motion_default")]
+    pub icon_motion: bool,
     /// Launch app on system login
     pub auto_start: bool,
     /// Enable GPU hardware acceleration
@@ -566,6 +568,7 @@ pub struct Settings {
 impl Default for Settings {
     fn default() -> Self {
         Self {
+            icon_motion: true,
             auto_start: false,
             hardware_acceleration: true,
             zoom_factor: 1.0,
@@ -602,6 +605,10 @@ impl Default for Settings {
             last_download_dir: None,
         }
     }
+}
+
+fn icon_motion_default() -> bool {
+    true
 }
 
 impl Settings {
@@ -839,6 +846,17 @@ pub(crate) mod cdn_test_signer {
 
 #[cfg(test)]
 mod settings_tests {
+    #[test]
+    fn settings_without_icon_motion_defaults_to_true() {
+        let settings: super::Settings = serde_json::from_str("{}").unwrap();
+        assert!(settings.icon_motion);
+        let settings: super::Settings = serde_json::from_str(r#"{"icon_motion":false}"#).unwrap();
+        assert!(!settings.icon_motion);
+        let restored: super::Settings =
+            serde_json::from_str(&serde_json::to_string(&settings).unwrap()).unwrap();
+        assert!(!restored.icon_motion);
+    }
+
     use super::{ActivityStripDismissal, Settings};
 
     #[test]

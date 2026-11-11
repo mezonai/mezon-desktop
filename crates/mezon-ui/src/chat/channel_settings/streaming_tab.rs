@@ -450,7 +450,7 @@ impl StreamingTab {
                 Icon::new(if copied {
                     IconName::Check
                 } else {
-                    IconName::CopyIcon
+                    IconName::Copy
                 })
                 .size(px(16.0))
                 .text_color(if copied {
@@ -475,11 +475,7 @@ impl StreamingTab {
         can_manage: bool,
         entity: Entity<Self>,
     ) -> impl IntoElement {
-        let stream_key = self
-            .result
-            .as_ref()
-            .and_then(|r| r.key.as_ref())
-            .cloned();
+        let stream_key = self.result.as_ref().and_then(|r| r.key.as_ref()).cloned();
         let is_error = self.result.as_ref().is_some_and(|r| r.key.is_none());
         let loading = self.loading_key;
         let revealed = self.revealed;
@@ -542,7 +538,7 @@ impl StreamingTab {
                             .border_1()
                             .border_color(theme.border)
                             .child(
-                                Icon::new(IconName::Stream)
+                                Icon::new(IconName::Live)
                                     .size(px(16.0))
                                     .text_color(theme.text_primary),
                             )
@@ -807,7 +803,7 @@ impl StreamingTab {
                             Button::new("thumbnail-change")
                                 .large()
                                 .label(self.t("streamThumbnail.buttons.change", cx))
-                                .icon(Icon::new(IconName::PenEdit).text_color(theme.text_primary))
+                                .icon(Icon::new(IconName::Edit).text_color(theme.text_primary))
                                 .primary()
                                 .disabled(disabled)
                                 .on_click(cx.listener(|this, _, _, cx| this.choose(cx))),
@@ -816,7 +812,7 @@ impl StreamingTab {
                             Button::new("thumbnail-remove")
                                 .large()
                                 .label(self.t("streamThumbnail.buttons.remove", cx))
-                                .icon(Icon::new(IconName::TrashIcon).text_color(theme.text_primary))
+                                .icon(Icon::new(IconName::Trash).text_color(theme.text_primary))
                                 .danger()
                                 .disabled(disabled)
                                 .on_click(cx.listener(|this, _, _, cx| this.confirm(None, cx))),
@@ -855,7 +851,7 @@ impl StreamingTab {
                                 .items_center()
                                 .justify_center()
                                 .child(
-                                    Icon::new(IconName::UploadImage)
+                                    Icon::new(IconName::Camera)
                                         .size(px(48.))
                                         .text_color(theme.brand),
                                 ),
@@ -875,9 +871,7 @@ impl StreamingTab {
                             Button::new("thumbnail-select")
                                 .large()
                                 .label(self.t("streamThumbnail.buttons.selectFile", cx))
-                                .icon(
-                                    Icon::new(IconName::UploadImage).text_color(theme.text_primary),
-                                )
+                                .icon(Icon::new(IconName::Camera).text_color(theme.text_primary))
                                 .primary()
                                 .disabled(disabled)
                                 .on_click(cx.listener(|this, _, _, cx| {
@@ -921,17 +915,17 @@ impl StreamingTab {
             (
                 "streamThumbnail.requirements.format.title",
                 "streamThumbnail.requirements.format.value",
-                IconName::ImageThumbnail,
+                IconName::FileImage,
             ),
             (
                 "streamThumbnail.requirements.resolution.title",
                 "streamThumbnail.requirements.resolution.value",
-                IconName::ImageUploadIcon,
+                IconName::ImageAdd,
             ),
             (
                 "streamThumbnail.requirements.sizeLimit.title",
                 "streamThumbnail.requirements.sizeLimit.value",
-                IconName::FileIcon,
+                IconName::File,
             ),
         ] {
             content = content.child(
@@ -951,7 +945,7 @@ impl StreamingTab {
                             .flex()
                             .items_center()
                             .justify_center()
-                            .child(if icon == IconName::ImageUploadIcon {
+                            .child(if icon == IconName::ImageAdd {
                                 img(icon.path())
                                     .size(px(20.))
                                     .flex_none()
@@ -1030,9 +1024,12 @@ impl StreamingTab {
                             .text_color(theme.text_primary),
                     )
                     .child(
-                        Label::new(mezon_i18n::t(locale, "setting.streaming.qualityDescription"))
-                            .text_xs()
-                            .text_color(theme.tokens.text_theme_primary),
+                        Label::new(mezon_i18n::t(
+                            locale,
+                            "setting.streaming.qualityDescription",
+                        ))
+                        .text_xs()
+                        .text_color(theme.tokens.text_theme_primary),
                     ),
             )
             .child(
@@ -1203,7 +1200,7 @@ impl Render for ThumbnailConfirmation {
                 "streamThumbnail.buttons.removeThumbnail"
             }))
             .when(!upload, |button| {
-                button.icon(Icon::new(IconName::TrashIcon).text_color(theme.text_primary))
+                button.icon(Icon::new(IconName::Trash).text_color(theme.text_primary))
             })
             .on_click(cx.listener(|this, _, _, cx| this.submit(cx)));
         v_flex()
@@ -1234,15 +1231,13 @@ impl Render for ThumbnailConfirmation {
                                     "streamThumbnail.confirmModal.removeTitle"
                                 },
                             )))
-                            .child(
-                                div().text_sm().text_color(theme.text_muted).child(t(
-                                    if upload {
-                                        "streamThumbnail.confirmModal.uploadDescription"
-                                    } else {
-                                        "streamThumbnail.confirmModal.removeQuestion"
-                                    },
-                                )),
-                            ),
+                            .child(div().text_sm().text_color(theme.text_muted).child(t(
+                                if upload {
+                                    "streamThumbnail.confirmModal.uploadDescription"
+                                } else {
+                                    "streamThumbnail.confirmModal.removeQuestion"
+                                },
+                            ))),
                     )
                     .child(
                         div()
@@ -1276,7 +1271,11 @@ impl Render for ThumbnailConfirmation {
                                 Shell::global(cx).update(cx, |shell, cx| shell.close_modal(cx))
                             }),
                     )
-                    .child(if upload { confirm.primary() } else { confirm.danger() }),
+                    .child(if upload {
+                        confirm.primary()
+                    } else {
+                        confirm.danger()
+                    }),
             )
     }
 }

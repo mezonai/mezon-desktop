@@ -698,7 +698,7 @@ impl Render for MediaImageModal {
                                             this.select(this.index.saturating_sub(1), window, cx);
                                         }))
                                         .child(
-                                            Icon::new(IconName::ArrowLeft)
+                                            Icon::new(IconName::ChevronLeft)
                                                 .size(px(20.))
                                                 .text_color(modal_fg),
                                         ),
@@ -719,7 +719,7 @@ impl Render for MediaImageModal {
                                             this.select(this.index + 1, window, cx);
                                         }))
                                         .child(
-                                            Icon::new(IconName::ArrowRight)
+                                            Icon::new(IconName::ChevronRight)
                                                 .size(px(20.))
                                                 .text_color(modal_fg),
                                         ),
@@ -776,31 +776,32 @@ impl Render for MediaImageModal {
                             .justify_center()
                             .gap_1()
                             .child(
-                                modal_tool_button(IconName::HomepageDownload, modal_fg)
+                                modal_tool_button(IconName::Download, modal_fg)
                                     .on_click(cx.listener(|this, _, _, cx| this.save_image(cx))),
                             )
                             .when(show_image_tools, |row| {
                                 row.child(modal_tool_divider(modal_fg))
                                     .child(
-                                        modal_tool_button(IconName::RotateLeftIcon, modal_fg)
-                                            .on_click(cx.listener(|this, _, window, cx| {
+                                        modal_tool_button(IconName::RotateLeft, modal_fg).on_click(
+                                            cx.listener(|this, _, window, cx| {
                                                 this.rotate_left(window, cx)
-                                            })),
+                                            }),
+                                        ),
                                     )
                                     .child(
-                                        modal_tool_button(IconName::RotateRightIcon, modal_fg)
+                                        modal_tool_button(IconName::RotateRight, modal_fg)
                                             .on_click(cx.listener(|this, _, window, cx| {
                                                 this.rotate_right(window, cx)
                                             })),
                                     )
                                     .child(modal_tool_divider(modal_fg))
                                     .child(
-                                        modal_tool_button(IconName::ZoomIcon, modal_fg).on_click(
+                                        modal_tool_button(IconName::ZoomIn, modal_fg).on_click(
                                             cx.listener(|this, _, _, cx| this.zoom_in(cx)),
                                         ),
                                     )
                                     .child(
-                                        modal_tool_button(IconName::AspectRatioIcon, modal_fg)
+                                        modal_tool_button(IconName::AspectRatio, modal_fg)
                                             .on_click(
                                                 cx.listener(|this, _, _, cx| this.reset_zoom(cx)),
                                             ),
@@ -808,14 +809,12 @@ impl Render for MediaImageModal {
                             }),
                     )
                     .child(div().flex_1().flex().justify_end().when(total > 1, |row| {
-                        row.child(
-                            modal_tool_button(IconName::SideMenuIcon, modal_fg).on_click(
-                                cx.listener(|this, _, _, cx| {
-                                    this.show_list = !this.show_list;
-                                    cx.notify();
-                                }),
-                            ),
-                        )
+                        row.child(modal_tool_button(IconName::Sidebar, modal_fg).on_click(
+                            cx.listener(|this, _, _, cx| {
+                                this.show_list = !this.show_list;
+                                cx.notify();
+                            }),
+                        ))
                     })),
             )
             .child(window_controls::render_app_drag_header())

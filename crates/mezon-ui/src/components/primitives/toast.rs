@@ -67,7 +67,7 @@ impl RenderOnce for Toast {
         let (accent, icon) = match self.kind {
             ToastKind::Info => (theme.text_link, IconName::Inbox),
             ToastKind::Success => (theme.status_online, IconName::Check),
-            ToastKind::Error => (theme.danger_text, IconName::TriangleAlert),
+            ToastKind::Error => (theme.danger_text, IconName::Warning),
         };
         let fill = div().h_full().rounded_full().bg(accent);
         let bar = match (self.countdown, self.progress) {

@@ -2074,8 +2074,8 @@ fn render_canvas_chip(title: SharedString) -> AnyElement {
                 .text_color(rgb(CANVAS_HOVER_TEXT))
         })
         .child(
-            Icon::new(IconName::CanvasIcon)
-                .size_4()
+            Icon::new(IconName::Canvas)
+                .size(px(16.))
                 .text_color(rgb(CANVAS_TEXT)),
         )
         .child(div().min_w_0().child(title))
@@ -2172,7 +2172,7 @@ fn render_social_poster(poster: SocialPoster, cache: Entity<LruImageCache>) -> A
                             a: 0.5,
                         })
                         .child(
-                            Icon::new(IconName::PlayButton)
+                            Icon::new(IconName::Play)
                                 .size(px(20.))
                                 .text_color(gpui::white()),
                         ),
@@ -2616,7 +2616,7 @@ pub(crate) fn hidden_hashtag_label(
     cx: &App,
 ) -> Option<SharedString> {
     let chip = hashtag_chip(display, channel_id, meta, locale, cx);
-    matches!(chip.icon, IconName::LockedPrivate).then_some(chip.label)
+    matches!(chip.icon, IconName::Lock).then_some(chip.label)
 }
 
 fn private_channel_chip(
@@ -2626,7 +2626,7 @@ fn private_channel_chip(
 ) -> HashtagChip {
     HashtagChip {
         label: SharedString::new_static(mezon_i18n::t(locale, "message.privateChannel")),
-        icon: IconName::LockedPrivate,
+        icon: IconName::Lock,
         italic: false,
         channel_id,
         clan_hint,
@@ -2653,7 +2653,7 @@ fn hashtag_chip_for(
     if display.starts_with("http://") || display.starts_with("https://") {
         return HashtagChip {
             label: SharedString::new_static(mezon_i18n::t(locale, "message.unknown")),
-            icon: IconName::Hashtag,
+            icon: IconName::Channel,
             italic: true,
             channel_id: None,
             clan_hint: None,
@@ -2664,7 +2664,7 @@ fn hashtag_chip_for(
     }
     HashtagChip {
         label: hashtag_display_label(display),
-        icon: IconName::Hashtag,
+        icon: IconName::Channel,
         italic: false,
         channel_id: None,
         clan_hint: None,
@@ -2859,34 +2859,34 @@ fn hashtag_channel(channel_id: ChannelId, cx: &App) -> Option<ResolvedHashtag> {
 
 fn mention_channel_icon(kind: ChannelType, private: bool, age_restricted: i32) -> IconName {
     match kind {
-        ChannelType::Text if is_age_restricted(age_restricted) => IconName::HashtagWarning,
+        ChannelType::Text if is_age_restricted(age_restricted) => IconName::ChannelWarning,
         ChannelType::Voice => {
             if private {
-                IconName::SpeakerLocked
+                IconName::SpeakerLock
             } else {
                 IconName::Speaker
             }
         }
-        ChannelType::Stream => IconName::Stream,
+        ChannelType::Stream => IconName::Live,
         ChannelType::App => {
             if private {
-                IconName::PrivateAppChannelIcon
+                IconName::ChannelAppPrivate
             } else {
-                IconName::AppChannelIcon
+                IconName::ChannelApp
             }
         }
         ChannelType::Thread => {
             if private {
-                IconName::ThreadIconLocker
+                IconName::ThreadPrivate
             } else {
-                IconName::ThreadIcon
+                IconName::Thread
             }
         }
         _ => {
             if private {
-                IconName::HashtagLocked
+                IconName::ChannelPrivate
             } else {
-                IconName::Hashtag
+                IconName::Channel
             }
         }
     }
@@ -3661,7 +3661,7 @@ mod hashtag_label_tests {
     fn resolved(name: Option<&str>) -> Option<ResolvedHashtag> {
         Some(ResolvedHashtag {
             name: name.map(SharedString::from),
-            icon: IconName::Hashtag,
+            icon: IconName::Channel,
         })
     }
 
@@ -3687,7 +3687,7 @@ mod hashtag_label_tests {
 
         assert_eq!(chip.label, "unknown");
         assert!(chip.italic);
-        assert_eq!(chip.icon.path(), IconName::Hashtag.path());
+        assert_eq!(chip.icon.path(), IconName::Channel.path());
     }
 
     #[test]
@@ -3706,7 +3706,7 @@ mod hashtag_label_tests {
 
         assert_eq!(chip.label, "private-channel");
         assert!(!chip.italic);
-        assert_eq!(chip.icon.path(), IconName::LockedPrivate.path());
+        assert_eq!(chip.icon.path(), IconName::Lock.path());
     }
 
     #[test]
@@ -3793,7 +3793,7 @@ mod hashtag_label_tests {
 
         assert_eq!(chip.label, "private-channel");
         assert!(!chip.italic);
-        assert_eq!(chip.icon.path(), IconName::LockedPrivate.path());
+        assert_eq!(chip.icon.path(), IconName::Lock.path());
         assert_eq!(chip.channel_id, Some(ChannelId(2)));
         assert_eq!(chip.clan_hint, Some(ClanId(1)));
     }
@@ -3813,7 +3813,7 @@ mod hashtag_label_tests {
 
         assert_eq!(chip.label, "private-channel");
         assert!(!chip.italic);
-        assert_eq!(chip.icon.path(), IconName::LockedPrivate.path());
+        assert_eq!(chip.icon.path(), IconName::Lock.path());
         assert_eq!(chip.channel_id, None);
     }
 }

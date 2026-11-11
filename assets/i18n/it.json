@@ -4911,12 +4911,20 @@
   "chat.activityStrip.hideAction": "Nascondi barra dei pin e topic",
   "chat.activityStrip.hideConfirm.title": "Nascondi barra dei pin e topic",
   "chat.activityStrip.hideConfirm.description": "Nascondere la barra dei pin e topic per questo canale? Riapparirà automaticamente quando ci sarà un nuovo pin o topic.",
-  "setting.account.qrProfile.centerLogo": "Logo centrale QR",
+  "setting.profile.cover": "COPERTINA DEL PROFILO",
+  "setting.profile.changeCover": "Cambia copertina",
+  "setting.profile.uploadingCover": "Caricamento copertina…",
+  "setting.profile.chooseCover": "Scegli copertina",
+  "setting.profile.coverUploadFailed": "Impossibile caricare la copertina. Usa JPEG, PNG, GIF o WebP fino a 10 MB.",
+  "setting.profile.removeCover": "Rimuovi copertina"
+,  "setting.account.qrProfile.centerLogo": "Logo centrale QR",
   "setting.account.qrProfile.chooseFromDevice": "Scegli dal dispositivo",
   "setting.account.qrProfile.resetDefaultLogo": "Reimposta logo Mezon",
   "setting.account.qrProfile.qrDownloaded": "Immagine QR scaricata",
   "setting.account.qrProfile.brandName": "MEZON",
   "setting.account.qrProfile.verifiedByMezon": "VERIFIED BY MEZON",
   "setting.account.qrProfile.errorExport": "Impossibile esportare il QR del profilo",
-  "setting.account.qrProfile.errorImage": "Impossibile caricare l’immagine"
+  "setting.account.qrProfile.errorImage": "Impossibile caricare l’immagine",
+  "setting.appearance.iconAnimations": "Animazioni delle icone",
+  "setting.appearance.iconAnimationsDescription": "Anima le icone quando passi il puntatore su pulsanti e righe."
 }

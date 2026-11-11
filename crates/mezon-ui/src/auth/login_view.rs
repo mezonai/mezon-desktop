@@ -4,14 +4,15 @@ use std::time::Duration;
 use gpui::{
     Animation, AnimationExt as _, App, Context, Entity, FocusHandle, Focusable, FontWeight, Hsla,
     MouseButton, RenderImage, SharedString, Subscription, Task, Window, div, img,
-    linear_color_stop, linear_gradient, prelude::*, px, rgb, rgba, svg, white,
+    linear_color_stop, linear_gradient, prelude::*, px, rgb, rgba, white,
 };
 use mezon_store::{AuthState, LoginMethod, LoginStore, Session, Settings, WalletStore};
 
 use crate::app::window_controls;
 use crate::components::compositions::OtpInput;
 use crate::components::primitives::{
-    Dropdown, DropdownTriggerStyle, FocusCycle, Input, InputEvent, InputState, Spinner,
+    Dropdown, DropdownTriggerStyle, FocusCycle, Icon, IconName, Input, InputEvent, InputState,
+    Spinner,
 };
 use crate::phone_util::{LOGIN_COUNTRIES, build_login_phone, mask_phone, phone_error_key};
 
@@ -752,7 +753,11 @@ impl LoginView {
         if self.otp_step == 0 {
             let country_items: Vec<SharedString> = LOGIN_COUNTRIES
                 .iter()
-                .map(|(name, dial)| SharedString::from(format!("{name} ({dial})")))
+                .map(|(_, dial)| SharedString::from(format!("({dial})")))
+                .collect();
+            let country_images: Vec<Option<SharedString>> = LOGIN_COUNTRIES
+                .iter()
+                .map(|(flag, _)| Some(SharedString::from(*flag)))
                 .collect();
             if let Some(input) = &self.phone_input {
                 col = col.child(
@@ -771,6 +776,7 @@ impl LoginView {
                                     div().w(px(150.)).child(
                                         Dropdown::new("login-phone-country")
                                             .items(country_items)
+                                            .images(country_images)
                                             .selected(Some(0))
                                             .open(self.country_open)
                                             .trigger_style(DropdownTriggerStyle::InputPrimary)
@@ -1103,9 +1109,8 @@ impl LoginView {
                             .bg(white())
                             .shadow_md()
                             .child(
-                                svg()
-                                    .path("icons/reload-icon.svg")
-                                    .size(px(22.))
+                                Icon::new(IconName::Refresh)
+                                    .size(px(24.))
                                     .text_color(rgb(0x155eef)),
                             ),
                     ),
@@ -1227,12 +1232,7 @@ impl Render for LoginView {
                         .justify_center()
                         .when(checked, |el| el.bg(blue))
                         .when(checked, |el| {
-                            el.child(
-                                svg()
-                                    .path("icons/check.svg")
-                                    .size(px(11.))
-                                    .text_color(white()),
-                            )
+                            el.child(Icon::new(IconName::Check).size(px(16.)).text_color(white()))
                         }),
                 )
                 .child(

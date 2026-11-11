@@ -490,9 +490,9 @@ impl Render for AudioPlayerView {
             .map(|player| player.is_playing())
             .unwrap_or(false);
         let play_icon = match self.state {
-            LoadState::Failed => IconName::TriangleAlert,
-            _ if playing => IconName::AudioPause,
-            _ => IconName::AudioPlay,
+            LoadState::Failed => IconName::Warning,
+            _ if playing => IconName::Pause,
+            _ => IconName::Play,
         };
         let download_url = self.download_url.clone();
         let download_name = self.download_name.clone();
@@ -802,7 +802,7 @@ pub(crate) fn audio_failed_pill(duration: f64) -> gpui::AnyElement {
                         .rounded_full()
                         .bg(gpui::white())
                         .child(
-                            Icon::new(IconName::TriangleAlert)
+                            Icon::new(IconName::Warning)
                                 .size(px(16.))
                                 .text_color(PILL_BG),
                         ),
