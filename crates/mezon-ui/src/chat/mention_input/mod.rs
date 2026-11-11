@@ -1,5 +1,6 @@
 mod attachments;
 mod recorder;
+mod rich_paste;
 mod text_field;
 
 use std::any::Any;
@@ -93,6 +94,7 @@ actions!(
     [
         MentionAccept,
         MentionDismiss,
+        PastePlainText,
         ToggleAnonymous,
         OpenMessageBuzz
     ]
@@ -102,6 +104,8 @@ pub fn init(cx: &mut App) {
     cx.bind_keys([
         KeyBinding::new("tab", MentionAccept, Some(KEY_CONTEXT)),
         KeyBinding::new("escape", MentionDismiss, Some(KEY_CONTEXT)),
+        KeyBinding::new("cmd-shift-v", PastePlainText, Some(KEY_CONTEXT)),
+        KeyBinding::new("ctrl-shift-v", PastePlainText, Some(KEY_CONTEXT)),
         KeyBinding::new("cmd-shift-enter", ToggleAnonymous, None),
         KeyBinding::new("ctrl-shift-enter", ToggleAnonymous, None),
         KeyBinding::new("ctrl-g", OpenMessageBuzz, None),
@@ -967,6 +971,12 @@ fn should_convert_paste_to_file(current_input: &str, pasted: &str) -> bool {
     current_input.trim().is_empty() && exceeds_convert_threshold(pasted)
 }
 
+fn paste_file_text<'a>(pasted: &'a str, file_text: Option<&'a str>) -> &'a str {
+    file_text
+        .filter(|plain| !plain.is_empty())
+        .unwrap_or(pasted)
+}
+
 fn trim_paste_to_utf16_cap<'a>(current: &str, pasted: &'a str, cap: usize) -> &'a str {
     let current_len = current.encode_utf16().count();
     if current_len >= cap {
@@ -1292,10 +1302,17 @@ impl MentionInput {
                 MentionFieldEvent::NavUp => this.on_nav_up(cx),
                 MentionFieldEvent::NavDown => this.on_nav_down(cx),
                 MentionFieldEvent::Paste(text) => {
-                    this.on_paste(text.clone(), Vec::new(), window, cx)
+                    this.on_paste(text.clone(), Vec::new(), None, window, cx)
                 }
+                MentionFieldEvent::PasteRich { markdown, plain } => this.on_paste(
+                    markdown.clone(),
+                    Vec::new(),
+                    Some(plain.clone()),
+                    window,
+                    cx,
+                ),
                 MentionFieldEvent::PasteWithMentions(text, mentions) => {
-                    this.on_paste(text.clone(), mentions.clone(), window, cx)
+                    this.on_paste(text.clone(), mentions.clone(), None, window, cx)
                 }
                 MentionFieldEvent::PasteImages(images) => {
                     this.on_paste_images(images.clone(), window, cx)
@@ -1848,8 +1865,9 @@ impl MentionInput {
                 (Ok(pending), Some(clipboard))
                     if pending.is_empty() && this.bind_generation == generation =>
                 {
-                    this.input
-                        .update(cx, |input, cx| input.paste_images_or_text(clipboard, cx));
+                    this.input.update(cx, |input, cx| {
+                        input.paste_images_or_text(clipboard, false, cx)
+                    });
                 }
                 (staged, _) => {
                     this.add_staged(generation, staged, window, cx);
@@ -1896,6 +1914,7 @@ impl MentionInput {
         &mut self,
         text: String,
         mentions: Vec<CopiedMention>,
+        file_text: Option<String>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -1903,7 +1922,8 @@ impl MentionInput {
             return;
         }
         let current = self.input.read(cx).value().to_string();
-        if self.overflow_to_file && should_convert_paste_to_file(&current, &text) {
+        let gate_text = paste_file_text(&text, file_text.as_deref());
+        if self.overflow_to_file && should_convert_paste_to_file(&current, gate_text) {
             if MessagesStore::global(cx).read(cx).is_anonymous_mode() {
                 self.show_anonymous_convert_blocked(cx);
             } else {
@@ -1915,7 +1935,8 @@ impl MentionInput {
                         input.set_value("", window, cx);
                     });
                 }
-                self.convert_text_to_file(text, false, window, cx);
+                let to_write = file_text.filter(|plain| !plain.is_empty()).unwrap_or(text);
+                self.convert_text_to_file(to_write, false, window, cx);
                 return;
             }
         }
@@ -4875,8 +4896,8 @@ mod channel_suggest_tests {
 mod convert_tests {
     use super::{
         CONVERT_PREFIX_LEN, CONVERT_TO_FILE_THRESHOLD, PASTE_SAFETY_CAP_UTF16,
-        content_payload_utf8_len, exceeds_convert_threshold, should_convert_paste_to_file,
-        trim_paste_to_utf16_cap, write_text_as_pending_attachment,
+        content_payload_utf8_len, exceeds_convert_threshold, paste_file_text,
+        should_convert_paste_to_file, trim_paste_to_utf16_cap, write_text_as_pending_attachment,
     };
 
     #[test]
@@ -4960,6 +4981,26 @@ mod convert_tests {
             trim_paste_to_utf16_cap(current, pasted, PASTE_SAFETY_CAP_UTF16),
             pasted
         );
+    }
+
+    #[test]
+    fn rich_paste_overflow_gate_and_file_text_use_plain_text() {
+        let plain = "a".repeat(CONVERT_TO_FILE_THRESHOLD - CONVERT_PREFIX_LEN);
+        let markdown = format!("**{plain}** (https://mezon.vn/docs)");
+        assert!(should_convert_paste_to_file("", &markdown));
+        assert!(!should_convert_paste_to_file(
+            "",
+            paste_file_text(&markdown, Some(&plain))
+        ));
+        assert_eq!(paste_file_text(&markdown, Some(&plain)), plain);
+        assert_eq!(paste_file_text(&markdown, None), markdown);
+
+        let over_plain = format!("{plain}x");
+        assert!(should_convert_paste_to_file(
+            "",
+            paste_file_text(&markdown, Some(&over_plain))
+        ));
+        assert_eq!(paste_file_text(&markdown, Some(&over_plain)), over_plain);
     }
 }
 
