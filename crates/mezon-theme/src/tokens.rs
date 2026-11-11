@@ -1,7 +1,26 @@
 use gpui::Rgba;
 
+#[cfg(test)]
+mod icon_color_tests {
+    use super::*;
+
+    #[test]
+    fn colors_fall_back_to_dark_and_follow_each_theme() {
+        assert_eq!(
+            ThemeTokens::for_theme("unknown").icon_normal(),
+            ThemeTokens::for_theme("dark").icon_normal()
+        );
+        for (name, normal, selected) in crate::icon_colors::ICON_COLORS {
+            let theme = ThemeTokens::for_theme(name);
+            assert_eq!(theme.icon_normal(), gpui::rgb(*normal));
+            assert_eq!(theme.icon_selected(), gpui::rgb(*selected));
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy)]
 pub struct ThemeTokens {
+    theme_name: &'static str,
     pub bg_accent: Rgba,
     pub bg_active_button: Rgba,
     pub bg_active_friend_list: Rgba,
@@ -98,9 +117,26 @@ pub struct ThemeTokens {
 }
 
 impl ThemeTokens {
+    pub fn icon_normal(&self) -> Rgba {
+        gpui::rgb(self.icon_colors().0)
+    }
+
+    pub fn icon_selected(&self) -> Rgba {
+        gpui::rgb(self.icon_colors().1)
+    }
+
+    fn icon_colors(&self) -> (u32, u32) {
+        let (_, normal, selected) = crate::icon_colors::ICON_COLORS
+            .iter()
+            .find(|(name, _, _)| *name == self.theme_name)
+            .expect("every canonical theme has icon colors");
+        (*normal, *selected)
+    }
+
     pub fn for_theme(name: &str) -> Self {
         match name {
             "light" => Self {
+                theme_name: "light",
                 bg_accent: Rgba {
                     r: 0.60784,
                     g: 0.60784,
@@ -661,6 +697,7 @@ impl ThemeTokens {
                 },
             },
             "sunrise" => Self {
+                theme_name: "sunrise",
                 bg_accent: Rgba {
                     r: 0.59215,
                     g: 0.59215,
@@ -1221,6 +1258,7 @@ impl ThemeTokens {
                 },
             },
             "purple_haze" => Self {
+                theme_name: "purple_haze",
                 bg_accent: Rgba {
                     r: 0.32,
                     g: 0.2,
@@ -1781,6 +1819,7 @@ impl ThemeTokens {
                 },
             },
             "redDark" => Self {
+                theme_name: "redDark",
                 bg_accent: Rgba {
                     r: 0.375,
                     g: 0.125,
@@ -2341,6 +2380,7 @@ impl ThemeTokens {
                 },
             },
             "abyss_dark" => Self {
+                theme_name: "abyss_dark",
                 bg_accent: Rgba {
                     r: 0.15,
                     g: 0.15,
@@ -2901,6 +2941,7 @@ impl ThemeTokens {
                 },
             },
             "berrynade" => Self {
+                theme_name: "berrynade",
                 bg_accent: Rgba {
                     r: 0.375,
                     g: 0.125,
@@ -3461,6 +3502,7 @@ impl ThemeTokens {
                 },
             },
             "cisher" => Self {
+                theme_name: "cisher",
                 bg_accent: Rgba {
                     r: 0.59215,
                     g: 0.59215,
@@ -4021,6 +4063,7 @@ impl ThemeTokens {
                 },
             },
             "sunset" => Self {
+                theme_name: "sunset",
                 bg_accent: Rgba {
                     r: 0.375,
                     g: 0.125,
@@ -4581,6 +4624,7 @@ impl ThemeTokens {
                 },
             },
             _ => Self {
+                theme_name: "dark",
                 bg_accent: Rgba {
                     r: 0.29412,
                     g: 0.29412,

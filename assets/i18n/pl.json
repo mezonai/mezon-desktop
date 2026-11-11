@@ -2364,6 +2364,7 @@
   "contextMenu.member.shareContact": "Udostępnij ten kontakt",
   "contextMenu.member.unBanChat": "Odblokuj",
   "contextMenu.member.unblock": "Odblokuj",
+  "contextMenu.member.block": "Zablokuj",
   "contextMenu.member.unblockFailed": "Nie można odblokować użytkownika",
   "contextMenu.member.unblockSuccess": "Pomyślnie odblokowano użytkownika",
   "contextMenu.menu": "Opcje",
@@ -4909,5 +4910,21 @@
   "chat.activityStrip.messageFrom": "Wiadomość od {{name}}: {{message}}",
   "chat.activityStrip.hideAction": "Ukryj pasek przypięć i tematów",
   "chat.activityStrip.hideConfirm.title": "Ukryj pasek przypięć i tematów",
-  "chat.activityStrip.hideConfirm.description": "Ukryć pasek przypięć i tematów dla tego kanału? Pojawi się automatycznie ponownie po dodaniu nowego przypięcia lub tematu."
+  "chat.activityStrip.hideConfirm.description": "Ukryć pasek przypięć i tematów dla tego kanału? Pojawi się automatycznie ponownie po dodaniu nowego przypięcia lub tematu.",
+  "setting.profile.cover": "OKŁADKA PROFILU",
+  "setting.profile.changeCover": "Zmień okładkę",
+  "setting.profile.uploadingCover": "Przesyłanie okładki…",
+  "setting.profile.chooseCover": "Wybierz okładkę",
+  "setting.profile.coverUploadFailed": "Nie można przesłać okładki. Użyj JPEG, PNG, GIF lub WebP do 10 MB.",
+  "setting.profile.removeCover": "Usuń okładkę"
+,  "setting.account.qrProfile.centerLogo": "Logo na środku QR",
+  "setting.account.qrProfile.chooseFromDevice": "Wybierz z urządzenia",
+  "setting.account.qrProfile.resetDefaultLogo": "Zresetuj logo Mezon",
+  "setting.account.qrProfile.qrDownloaded": "Pobrano obraz kodu QR",
+  "setting.account.qrProfile.brandName": "MEZON",
+  "setting.account.qrProfile.verifiedByMezon": "VERIFIED BY MEZON",
+  "setting.account.qrProfile.errorExport": "Nie można wyeksportować kodu QR profilu",
+  "setting.account.qrProfile.errorImage": "Nie można wczytać obrazu",
+  "setting.appearance.iconAnimations": "Animacje ikon",
+  "setting.appearance.iconAnimationsDescription": "Animuj ikony po najechaniu wskaźnikiem na przyciski i wiersze."
 }

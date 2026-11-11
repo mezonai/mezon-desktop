@@ -1,3 +1,5 @@
+use mezon_widgets::{Icon, IconName};
+
 use std::collections::HashMap;
 use std::net::{IpAddr, Ipv4Addr};
 use std::sync::{Arc, Mutex, OnceLock};
@@ -11,7 +13,6 @@ use smallvec::smallvec;
 
 use mezon_store::AppConfig;
 use mezon_store::config::url_has_origin;
-use mezon_widgets::{Icon, IconName};
 
 pub const CANVAS_IMAGE_FALLBACK_HEIGHT: Pixels = px(200.);
 pub const CANVAS_IMAGE_BLOCK_PADDING: Pixels = px(16.);
@@ -497,7 +498,7 @@ fn canvas_image_fallback_inner(fallback_fg: gpui::Rgba, fallback_bg: gpui::Rgba)
         .rounded_md()
         .bg(fallback_bg)
         .child(
-            Icon::new(IconName::ImageThumbnail)
+            Icon::new(IconName::FileImage)
                 .size(px(32.))
                 .text_color(fallback_fg),
         )

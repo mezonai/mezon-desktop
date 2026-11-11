@@ -213,7 +213,7 @@ impl Render for ImageViewer {
                     .when(has_prev, |el| {
                         el.child(viewer_icon_button(
                             "viewer-prev",
-                            IconName::ArrowLeft,
+                            IconName::ChevronLeft,
                             theme.text_primary,
                             theme.bg_hover,
                             cx.listener(|this, _, _window, cx| this.go_prev(cx)),
@@ -238,7 +238,7 @@ impl Render for ImageViewer {
                     .when(has_next, |el| {
                         el.child(viewer_icon_button(
                             "viewer-next",
-                            IconName::RightIcon,
+                            IconName::ChevronRight,
                             theme.text_primary,
                             theme.bg_hover,
                             cx.listener(|this, _, _window, cx| this.go_next(cx)),

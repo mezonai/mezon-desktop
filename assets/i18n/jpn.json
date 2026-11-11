@@ -2365,6 +2365,7 @@
   "contextMenu.member.shareContact": "この連絡先を共有",
   "contextMenu.member.unBanChat": "ブロックを解除",
   "contextMenu.member.unblock": "ブロックを解除",
+  "contextMenu.member.block": "ブロック",
   "contextMenu.member.unblockFailed": "ユーザーのブロックを解除できません",
   "contextMenu.member.unblockSuccess": "ユーザーのブロックを解除しました",
   "contextMenu.menu": "オプション",
@@ -4912,5 +4913,21 @@
   "chat.activityStrip.messageFrom": "{{name}}からのメッセージ: {{message}}",
   "chat.activityStrip.hideAction": "ピンとトピックのバーを非表示",
   "chat.activityStrip.hideConfirm.title": "ピンとトピックのバーを非表示",
-  "chat.activityStrip.hideConfirm.description": "このチャンネルのピンとトピックのバーを非表示にしますか？新しいピンまたはトピックがあると自動的に再表示されます。"
+  "chat.activityStrip.hideConfirm.description": "このチャンネルのピンとトピックのバーを非表示にしますか？新しいピンまたはトピックがあると自動的に再表示されます。",
+  "setting.profile.cover": "プロフィールカバー",
+  "setting.profile.changeCover": "カバーを変更",
+  "setting.profile.uploadingCover": "アップロード中…",
+  "setting.profile.chooseCover": "カバー画像を選択",
+  "setting.profile.coverUploadFailed": "アップロードできませんでした。10 MB以下のJPEG、PNG、GIF、WebPを使用してください。",
+  "setting.profile.removeCover": "カバーを削除"
+,  "setting.account.qrProfile.centerLogo": "QR中央ロゴ",
+  "setting.account.qrProfile.chooseFromDevice": "端末から選択",
+  "setting.account.qrProfile.resetDefaultLogo": "Mezonロゴにリセット",
+  "setting.account.qrProfile.qrDownloaded": "QRコード画像をダウンロードしました",
+  "setting.account.qrProfile.brandName": "MEZON",
+  "setting.account.qrProfile.verifiedByMezon": "VERIFIED BY MEZON",
+  "setting.account.qrProfile.errorExport": "プロフィールのQRコードを出力できません",
+  "setting.account.qrProfile.errorImage": "画像を読み込めません",
+  "setting.appearance.iconAnimations": "アイコンのアニメーション",
+  "setting.appearance.iconAnimationsDescription": "ボタンや行にポインターを合わせたときにアイコンをアニメーション表示します。"
 }

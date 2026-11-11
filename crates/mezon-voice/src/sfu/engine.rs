@@ -39,7 +39,7 @@ use super::messages::{
     ServerMessage, SlotAssignment, SnapshotMember,
 };
 use super::mid::{self, MID_AUDIO, MID_CAMERA, MID_SCREEN, MidLayout, PoolLayout, RemoteKind};
-use super::network_quality::NetworkQuality;
+use super::network_quality::{CameraUplinkQuality, NetworkQuality};
 use super::screen_adaptation::{
     ScreenAdaptation, ScreenProfile, ScreenStats, TEXT_TIERS, VIDEO_TIERS,
 };
@@ -102,21 +102,31 @@ fn resolve_camera_tier(cameras: usize, current: usize) -> usize {
     }
 }
 
+fn camera_count_tier(membership: &Membership, local: &LocalTracks, current: usize) -> usize {
+    let cameras = membership.active_cameras() + usize::from(local.camera.is_some());
+    resolve_camera_tier(cameras, current)
+}
+
 fn schedule_camera_tier(
     membership: &Membership,
     local: &LocalTracks,
-    current: usize,
+    tiers: &mut PublishTiers,
     pending: Option<(usize, tokio::time::Instant)>,
 ) -> Option<(usize, tokio::time::Instant)> {
-    let cameras = membership.active_cameras() + usize::from(local.camera.is_some());
-    let next = resolve_camera_tier(cameras, current);
-    if next == current {
+    let count = camera_count_tier(membership, local, tiers.camera_count);
+    let next = if tiers.camera_lowered {
+        (count + 1).min(CAMERA_TIERS.len() - 1)
+    } else {
+        count
+    };
+    if next == tiers.camera {
+        tiers.camera_count = count;
         return None;
     }
     if matches!(pending, Some((tier, _)) if tier == next) {
         return pending;
     }
-    let delay = if next > current {
+    let delay = if next > tiers.camera {
         CAMERA_TIER_DOWNGRADE
     } else {
         CAMERA_TIER_UPGRADE
@@ -128,6 +138,8 @@ const SCREEN_SCALABILITY_MODE: &str = "L1T1";
 #[derive(Clone, Copy, Default)]
 struct PublishTiers {
     camera: usize,
+    camera_count: usize,
+    camera_lowered: bool,
     screen: usize,
 }
 
@@ -1396,6 +1408,7 @@ async fn session_loop(
     stats_timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let mut network_quality = NetworkQuality::default();
     let mut network_weak = false;
+    let mut camera_uplink = CameraUplinkQuality::default();
     let mut pending_offer: Option<(u64, String)> = None;
     let mut offer_reissue_deadline: Option<tokio::time::Instant> = None;
     let mut mute_sync = MuteSync::default();
@@ -1613,7 +1626,7 @@ async fn session_loop(
                             }
                         }
                         let _ = evt_tx.send(SfuEvent::Peers(membership.peers()));
-                        camera_tier_pending = schedule_camera_tier(&membership, local, tiers.camera, camera_tier_pending);
+                        camera_tier_pending = schedule_camera_tier(&membership, local, &mut tiers, camera_tier_pending);
                         if membership.fixed_pool && let Some(pc) = pc.as_ref() { sync_remote_media(pc, &mut membership, evt_tx, None); }
                         let _ = evt_tx.send(SfuEvent::RoomSnapshot);
                     }
@@ -1622,7 +1635,7 @@ async fn session_loop(
                             membership.apply(peer);
                             if membership.fixed_pool && let Some(pc) = pc.as_ref() { sync_remote_media(pc, &mut membership, evt_tx, None); }
                             let _ = evt_tx.send(SfuEvent::Peers(membership.peers()));
-                            camera_tier_pending = schedule_camera_tier(&membership, local, tiers.camera, camera_tier_pending);
+                            camera_tier_pending = schedule_camera_tier(&membership, local, &mut tiers, camera_tier_pending);
                         }
                     }
                     ServerMessage::PeerUpdated { peer } => {
@@ -1637,7 +1650,7 @@ async fn session_loop(
                             membership.apply(peer);
                             if membership.fixed_pool && let Some(pc) = pc.as_ref() { sync_remote_media(pc, &mut membership, evt_tx, None); }
                             let _ = evt_tx.send(SfuEvent::Peers(membership.peers()));
-                            camera_tier_pending = schedule_camera_tier(&membership, local, tiers.camera, camera_tier_pending);
+                            camera_tier_pending = schedule_camera_tier(&membership, local, &mut tiers, camera_tier_pending);
                         }
                     }
                     ServerMessage::SlotAssigned(assigned) => {
@@ -1648,7 +1661,7 @@ async fn session_loop(
                         if changed {
                             if let Some(pc) = pc.as_ref() { sync_remote_media(pc, &mut membership, evt_tx, None); }
                             let _ = evt_tx.send(SfuEvent::Peers(membership.peers()));
-                            camera_tier_pending = schedule_camera_tier(&membership, local, tiers.camera, camera_tier_pending);
+                            camera_tier_pending = schedule_camera_tier(&membership, local, &mut tiers, camera_tier_pending);
                         }
                     }
                     ServerMessage::SlotReleased { kind, slot, generation } => {
@@ -1659,7 +1672,7 @@ async fn session_loop(
                         if changed {
                             if let Some(pc) = pc.as_ref() { sync_remote_media(pc, &mut membership, evt_tx, None); }
                             let _ = evt_tx.send(SfuEvent::Peers(membership.peers()));
-                            camera_tier_pending = schedule_camera_tier(&membership, local, tiers.camera, camera_tier_pending);
+                            camera_tier_pending = schedule_camera_tier(&membership, local, &mut tiers, camera_tier_pending);
                         }
                     }
                     ServerMessage::PeerLeft { peer_id, mid_audio, mid_video, mid_screen, assignment_generation } => {
@@ -1677,7 +1690,7 @@ async fn session_loop(
                             membership.by_peer.remove(&peer_id);
                             if let Some(pc) = pc.as_ref() { sync_remote_media(pc, &mut membership, evt_tx, None); }
                             let _ = evt_tx.send(SfuEvent::Peers(membership.peers()));
-                            camera_tier_pending = schedule_camera_tier(&membership, local, tiers.camera, camera_tier_pending);
+                            camera_tier_pending = schedule_camera_tier(&membership, local, &mut tiers, camera_tier_pending);
                             continue;
                         }
                         let released = membership.remove_peer(peer_id, [mid_audio, mid_video, mid_screen]);
@@ -1691,7 +1704,7 @@ async fn session_loop(
                             }
                         }
                         let _ = evt_tx.send(SfuEvent::Peers(membership.peers()));
-                        camera_tier_pending = schedule_camera_tier(&membership, local, tiers.camera, camera_tier_pending);
+                        camera_tier_pending = schedule_camera_tier(&membership, local, &mut tiers, camera_tier_pending);
                     }
                     ServerMessage::PushToTalkChanged { active } => {
                         tracing::info!(active, "sfu push-to-talk grant changed");
@@ -1845,7 +1858,7 @@ async fn session_loop(
                     EngineCommand::SetLocalCamera(track) => {
                         local.camera = track;
                         attach_local_tracks(pc.as_ref(), local, config.role);
-                        camera_tier_pending = schedule_camera_tier(&membership, local, tiers.camera, camera_tier_pending);
+                        camera_tier_pending = schedule_camera_tier(&membership, local, &mut tiers, camera_tier_pending);
                         if let Some(peer_connection) = &*pc {
                             tune_uplinks(peer_connection, local, tiers);
                         }
@@ -2095,10 +2108,28 @@ async fn session_loop(
                             network_weak = weak;
                             let _ = evt_tx.send(SfuEvent::NetworkWeak(weak));
                         }
+                        let uplink_limited = camera_uplink
+                            .update(media_stats, camera_tier_at(tiers.camera).max_bitrate);
+                        let lowered = network_weak || uplink_limited;
+                        if lowered != tiers.camera_lowered {
+                            tracing::info!(
+                                network_weak,
+                                uplink_limited,
+                                tier = tiers.camera,
+                                "camera tier network step changed"
+                            );
+                            tiers.camera_lowered = lowered;
+                            camera_tier_pending = schedule_camera_tier(&membership, local, &mut tiers, camera_tier_pending);
+                        }
                     }
                     if let (Some(stats), Some(screen)) = (stats, local.screen.as_ref()) {
                         let profile = screen_profile(screen.mode);
-                        if let Some((next, sample)) = screen_adaptation.update(tiers.screen, profile, stats) {
+                        if let Some((next, sample)) = screen_adaptation.update_unless_idle(
+                            tiers.screen,
+                            profile,
+                            stats,
+                            screen.send_pace.fresh_frames(),
+                        ) {
                             tracing::info!(
                                 mode = ?screen.mode,
                                 target_kbps = sample.target_kbps,
@@ -2173,6 +2204,7 @@ async fn session_loop(
             }
             () = tokio::time::sleep_until(camera_tier_pending.map_or_else(tokio::time::Instant::now, |(_, at)| at)), if camera_tier_pending.is_some() => {
                 if let Some((next, _)) = camera_tier_pending.take() {
+                    tiers.camera_count = camera_count_tier(&membership, local, tiers.camera_count);
                     tiers.camera = next;
                     if let Some(peer_connection) = &*pc {
                         tune_uplinks(peer_connection, local, tiers);
@@ -2233,7 +2265,7 @@ async fn session_loop(
                             previous.close();
                         }
                         let _ = evt_tx.send(SfuEvent::Peers(membership.peers()));
-                        camera_tier_pending = schedule_camera_tier(&membership, local, tiers.camera, camera_tier_pending);
+                        camera_tier_pending = schedule_camera_tier(&membership, local, &mut tiers, camera_tier_pending);
                     }
                     Err(e) => {
                         return SessionOutcome::Dropped {

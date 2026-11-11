@@ -1,10 +1,11 @@
+use crate::components::primitives::{Icon, IconName};
+
 use gpui::{
     AnyElement, App, Context, Entity, EventEmitter, FontWeight, SharedString, Subscription,
     UniformListScrollHandle, Window, div, img, prelude::*, px, uniform_list,
 };
 use mezon_store::{Gif, GifStore};
 
-use crate::components::primitives::{Icon, IconName};
 use crate::image_cache::{LruImageCache, VIEWER_IMAGE_ENTRY_MAX_BYTES};
 use crate::theme::{ActiveTheme, Theme};
 
@@ -219,7 +220,7 @@ impl Render for GifPanel {
                 .pb_2()
                 .cursor_pointer()
                 .child(
-                    Icon::new(IconName::BackToCategoriesGif)
+                    Icon::new(IconName::ArrowLeft)
                         .size(px(20.))
                         .text_color(theme.tokens.text_theme_primary),
                 )
@@ -426,7 +427,7 @@ fn render_category_tile(theme: &Theme, cell: &CatCell, entity: &Entity<GifPanel>
         .gap_2();
     if matches!(cell, CatCell::Trending { .. }) {
         label_row = label_row.child(
-            Icon::new(IconName::TrendingGifs)
+            Icon::new(IconName::Trending)
                 .size(px(20.))
                 .text_color(gpui::white()),
         );

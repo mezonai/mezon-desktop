@@ -528,7 +528,7 @@ impl Render for SendTokenModal {
                     .on_click(|_: &ClickEvent, _window, cx| Self::close(cx))
                     .child(
                         Icon::new(IconName::Close)
-                            .size(px(18.))
+                            .size(px(20.))
                             .text_color(theme.tokens.text_theme_primary),
                     ),
             );

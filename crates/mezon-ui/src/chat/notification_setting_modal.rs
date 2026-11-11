@@ -157,7 +157,7 @@ pub(crate) fn checkbox(checked: bool, border: Hsla, fill: Hsla) -> impl IntoElem
         .when(checked, |d| {
             d.child(
                 Icon::new(IconName::Check)
-                    .size(px(12.))
+                    .size(px(16.))
                     .text_color(gpui::white()),
             )
         })
@@ -356,7 +356,7 @@ impl Render for NotificationSettingModal {
                             .hover(|s| s.bg(gpui::rgba(0xef_44_44_40)))
                             .child(
                                 Icon::new(IconName::Close)
-                                    .size(px(10.))
+                                    .size(px(16.))
                                     .text_color(gpui::rgb(0xef_44_44)),
                             )
                             .on_click(cx.listener(move |_, _, _, cx| {

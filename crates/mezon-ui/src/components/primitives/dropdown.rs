@@ -1,8 +1,8 @@
 use std::rc::Rc;
 
 use gpui::{
-    AnyElement, App, ElementId, Hsla, MouseButton, SharedString, Window, deferred, div, prelude::*,
-    px, uniform_list,
+    AnyElement, App, ElementId, Hsla, MouseButton, SharedString, Window, deferred, div, img,
+    prelude::*, px, uniform_list,
 };
 
 use super::icon::{Icon, IconName};
@@ -31,6 +31,7 @@ pub struct Dropdown {
     id: ElementId,
     items: Rc<Vec<SharedString>>,
     icons: Rc<Vec<Option<IconName>>>,
+    images: Rc<Vec<Option<SharedString>>>,
     selected: Option<usize>,
     trigger_icon: Option<IconName>,
     open: bool,
@@ -52,6 +53,7 @@ impl Dropdown {
             id: id.into(),
             items: Rc::new(Vec::new()),
             icons: Rc::new(Vec::new()),
+            images: Rc::new(Vec::new()),
             selected: None,
             trigger_icon: None,
             open: false,
@@ -90,6 +92,16 @@ impl Dropdown {
 
     pub fn shared_icons(mut self, icons: Rc<Vec<Option<IconName>>>) -> Self {
         self.icons = icons;
+        self
+    }
+
+    pub fn images(mut self, images: Vec<Option<SharedString>>) -> Self {
+        self.images = Rc::new(images);
+        self
+    }
+
+    pub fn shared_images(mut self, images: Rc<Vec<Option<SharedString>>>) -> Self {
+        self.images = images;
         self
     }
 
@@ -169,6 +181,12 @@ impl RenderOnce for Dropdown {
             self.selected
                 .and_then(|index| self.icons.get(index).copied().flatten())
         });
+        let selected_image = self.selected.and_then(|index| {
+            self.images
+                .get(index)
+                .and_then(|path| path.as_ref().cloned())
+        });
+        let trigger_has_image = selected_image.is_some();
         let popup_id = self.id.clone();
         let popup_background = self
             .popup_background
@@ -200,16 +218,21 @@ impl RenderOnce for Dropdown {
                     .min_w_0()
                     .flex_1()
                     .gap_2()
-                    .when_some(selected_icon, |el, icon| {
-                        el.child(Icon::new(icon).size_4().text_color(theme.text_secondary))
+                    .when_some(selected_image.clone(), |el, path| {
+                        el.child(img(path).size(px(20.)).flex_shrink_0())
+                    })
+                    .when(!trigger_has_image, |el| {
+                        el.when_some(selected_icon, |el, icon| {
+                            el.child(Icon::new(icon).size_4().text_color(theme.text_secondary))
+                        })
                     })
                     .child(div().min_w_0().flex_1().truncate().child(label)),
             )
             .child(
                 Icon::new(IconName::ArrowDown)
-                    .size_4()
+                    .size(px(16.))
                     .flex_shrink_0()
-                    .text_color(theme.text_muted),
+                    .selected(false),
             );
         match trigger_style {
             DropdownTriggerStyle::Default => {
@@ -277,6 +300,7 @@ impl RenderOnce for Dropdown {
                         let list_height = (item_count as f32 * 32.).min(200.);
                         let items = self.items.clone();
                         let icons = self.icons.clone();
+                        let images = self.images.clone();
                         el.child(
                             uniform_list(
                                 (popup_id, "items"),
@@ -285,6 +309,7 @@ impl RenderOnce for Dropdown {
                                     let theme = cx.theme();
                                     let items = items.clone();
                                     let icons = icons.clone();
+                                    let images = images.clone();
                                     let on_select = on_select.clone();
                                     range
                                         .map(|index| {
@@ -309,15 +334,39 @@ impl RenderOnce for Dropdown {
                                                         .flex_1()
                                                         .gap_2()
                                                         .when_some(
-                                                            icons.get(index).copied().flatten(),
-                                                            |el, icon| {
+                                                            images
+                                                                .get(index)
+                                                                .and_then(|p| p.as_ref().cloned()),
+                                                            |el, path| {
                                                                 el.child(
-                                                                    Icon::new(icon)
-                                                                        .size_4()
-                                                                        .flex_shrink_0()
-                                                                        .text_color(
-                                                                            theme.text_secondary,
-                                                                        ),
+                                                                    img(path)
+                                                                        .size(px(20.))
+                                                                        .flex_shrink_0(),
+                                                                )
+                                                            },
+                                                        )
+                                                        .when(
+                                                            images
+                                                                .get(index)
+                                                                .and_then(|p| p.as_ref())
+                                                                .is_none(),
+                                                            |el| {
+                                                                el.when_some(
+                                                                    icons
+                                                                        .get(index)
+                                                                        .copied()
+                                                                        .flatten(),
+                                                                    |el, icon| {
+                                                                        el.child(
+                                                                            Icon::new(icon)
+                                                                                .size_4()
+                                                                                .flex_shrink_0()
+                                                                                .text_color(
+                                                                                    theme
+                                                                                        .text_secondary,
+                                                                                ),
+                                                                        )
+                                                                    },
                                                                 )
                                                             },
                                                         )
@@ -332,7 +381,7 @@ impl RenderOnce for Dropdown {
                                                 .when(selected, |el| {
                                                     el.child(
                                                         Icon::new(IconName::Check)
-                                                            .size_4()
+                                                            .size(px(16.))
                                                             .flex_shrink_0()
                                                             .text_color(theme.brand),
                                                     )

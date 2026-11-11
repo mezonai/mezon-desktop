@@ -86,7 +86,8 @@ struct Collocations {
 }
 
 static COLLOCATIONS: LazyLock<Collocations> = LazyLock::new(|| {
-    let parsed: CollocationFile = serde_json::from_str(include_str!("../assets/collocations.json"))
+    let parsed: CollocationFile = crate::assets::load_asset_str(crate::assets::COLLOCATIONS_FILE)
+        .and_then(|json| serde_json::from_str(&json).ok())
         .unwrap_or(CollocationFile {
             trigram: Vec::new(),
             bigram: Vec::new(),
@@ -116,9 +117,33 @@ static COLLOCATIONS: LazyLock<Collocations> = LazyLock::new(|| {
         ("xong", "ngay", "xong", "ngay"),
         ("den", "ngay", "đến", "ngay"),
         ("ve", "ngay", "về", "ngay"),
+        ("mili", "giay", "mili", "giây"),
+        ("micro", "giay", "micro", "giây"),
+        ("nano", "giay", "nano", "giây"),
+        ("mili", "met", "mili", "mét"),
+        ("kilo", "met", "kilo", "mét"),
+        ("kilo", "gam", "kilo", "gam"),
+        ("tat", "chuong", "tắt", "chuông"),
+        ("do", "chuong", "đổ", "chuông"),
+        ("bat", "chuong", "bật", "chuông"),
+        ("rung", "chuong", "rung", "chuông"),
+        ("tieng", "chuong", "tiếng", "chuông"),
+        ("chuong", "reo", "chuông", "reo"),
+        ("chuong", "bao", "chuông", "báo"),
+        ("call", "toi", "call", "tới"),
+        ("call", "den", "call", "đến"),
+        ("nghe", "binh", "nghe", "bình"),
+        ("dau", "day", "đâu", "đấy"),
+        ("chu", "meo", "chú", "mèo"),
     ];
     for (u1, u2, w1, w2) in priority_bigrams {
         bigram.insert(pair_key(u1, u2, None), (w1.to_string(), w2.to_string()));
+    }
+    for &(u1, u2) in BAD_COLLOCATIONS.iter() {
+        bigram.remove(&pair_key(u1, u2, None));
+    }
+    for &(u1, u2, u3) in BAD_TRIGRAMS.iter() {
+        trigram.remove(&pair_key(u1, u2, Some(u3)));
     }
     let priority_trigrams = [
         ("di", "ngay", "nhe", "đi", "ngay", "nhé"),
@@ -127,6 +152,11 @@ static COLLOCATIONS: LazyLock<Collocations> = LazyLock::new(|| {
         ("em", "se", "lam", "em", "sẽ", "làm"),
         ("se", "lam", "ngay", "sẽ", "làm", "ngay"),
         ("nay", "to", "qua", "này", "to", "quá"),
+        ("di", "dau", "day", "đi", "đâu", "đấy"),
+        ("nghe", "binh", "thuong", "nghe", "bình", "thường"),
+        ("noi", "binh", "thuong", "nói", "bình", "thường"),
+        ("cuoc", "goi", "toi", "cuộc", "gọi", "tới"),
+        ("cuoc", "goi", "den", "cuộc", "gọi", "đến"),
     ];
     for (u1, u2, u3, w1, w2, w3) in priority_trigrams {
         trigram.insert(
@@ -136,6 +166,55 @@ static COLLOCATIONS: LazyLock<Collocations> = LazyLock::new(|| {
     }
     Collocations { trigram, bigram }
 });
+
+static BAD_COLLOCATIONS: LazyLock<HashSet<(&'static str, &'static str)>> = LazyLock::new(|| {
+    [
+        ("lon", "tao"),
+        ("viec", "bai"),
+        ("kem", "phan"),
+        ("san", "ban"),
+        ("da", "tay"),
+        ("thay", "da"),
+        ("vai", "kieu"),
+        ("dip", "duoc"),
+        ("neu", "tai"),
+        ("de", "dung"),
+        ("rat", "de"),
+        ("mot", "nhan"),
+        ("bom", "tu"),
+        ("sang", "hoc"),
+        ("trong", "thanh"),
+        ("nhat", "va"),
+        ("tai", "le"),
+        ("gay", "mui"),
+        ("sau", "tai"),
+        ("sam", "mau"),
+        ("may", "ban"),
+        ("thu", "bay"),
+        ("quyen", "cung"),
+        ("co", "tram"),
+        ("truong", "sitc"),
+        ("ban", "nghe"),
+        ("nhan", "dinh"),
+        ("dang", "tai"),
+        ("vai", "lan"),
+        ("vai", "nguoi"),
+        ("buoc", "tren"),
+        ("tren", "san"),
+        ("vao", "nam"),
+        ("chi", "nguyen"),
+        ("di", "thi"),
+        ("nhan", "hieu"),
+        ("dung", "day"),
+        ("vang", "toi"),
+        ("co", "khoi"),
+    ]
+    .into_iter()
+    .collect()
+});
+
+static BAD_TRIGRAMS: LazyLock<HashSet<(&'static str, &'static str, &'static str)>> =
+    LazyLock::new(|| [("gian", "vi", "co")].into_iter().collect());
 
 static RE_SENTENCE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"[.?!]\s+").unwrap());
 static RE_DELIMITER_ONLY: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^[.?!]\s+$").unwrap());
@@ -156,11 +235,519 @@ fn pair_key(first: &str, second: &str, third: Option<&str>) -> String {
     }
 }
 
-pub(crate) fn add_accents(text: &str, infer: &dyn Fn(&str) -> Option<Vec<f32>>) -> String {
-    if text.trim().is_empty() || is_predominantly_english_sentence(text) {
+const BASE_MODIFIERS: &[(&str, &str)] = &[
+    ("a^", "â"),
+    ("e^", "ê"),
+    ("o^", "ô"),
+    ("o+", "ơ"),
+    ("o*", "ơ"),
+    ("u+", "ư"),
+    ("u*", "ư"),
+    ("a+", "ă"),
+    ("a(", "ă"),
+    ("d-", "đ"),
+    ("d+", "đ"),
+];
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ToneMark {
+    Sac,
+    Huyen,
+    Hoi,
+    Nga,
+    Nang,
+}
+
+fn tone_mark_from_char(ch: char) -> Option<ToneMark> {
+    match ch {
+        '~' => Some(ToneMark::Nga),
+        '.' => Some(ToneMark::Nang),
+        '?' => Some(ToneMark::Hoi),
+        '\'' | '/' => Some(ToneMark::Sac),
+        '`' | '\\' => Some(ToneMark::Huyen),
+        _ => None,
+    }
+}
+
+fn is_teencode_base_vowel(ch: char) -> bool {
+    matches!(
+        ch,
+        'a' | 'ă'
+            | 'â'
+            | 'e'
+            | 'ê'
+            | 'i'
+            | 'o'
+            | 'ô'
+            | 'ơ'
+            | 'u'
+            | 'ư'
+            | 'y'
+            | 'A'
+            | 'Ă'
+            | 'Â'
+            | 'E'
+            | 'Ê'
+            | 'I'
+            | 'O'
+            | 'Ô'
+            | 'Ơ'
+            | 'U'
+            | 'Ư'
+            | 'Y'
+    )
+}
+
+fn apply_tone_to_vowel(vowel: char, tone: ToneMark) -> Option<char> {
+    let is_upper = vowel.is_uppercase();
+    let lower_char = vowel.to_lowercase().next().unwrap_or(vowel);
+    let accented = match lower_char {
+        'a' => match tone {
+            ToneMark::Sac => 'á',
+            ToneMark::Huyen => 'à',
+            ToneMark::Hoi => 'ả',
+            ToneMark::Nga => 'ã',
+            ToneMark::Nang => 'ạ',
+        },
+        'ă' => match tone {
+            ToneMark::Sac => 'ắ',
+            ToneMark::Huyen => 'ằ',
+            ToneMark::Hoi => 'ẳ',
+            ToneMark::Nga => 'ẵ',
+            ToneMark::Nang => 'ặ',
+        },
+        'â' => match tone {
+            ToneMark::Sac => 'ấ',
+            ToneMark::Huyen => 'ầ',
+            ToneMark::Hoi => 'ẩ',
+            ToneMark::Nga => 'ẫ',
+            ToneMark::Nang => 'ậ',
+        },
+        'e' => match tone {
+            ToneMark::Sac => 'é',
+            ToneMark::Huyen => 'è',
+            ToneMark::Hoi => 'ẻ',
+            ToneMark::Nga => 'ẽ',
+            ToneMark::Nang => 'ẹ',
+        },
+        'ê' => match tone {
+            ToneMark::Sac => 'ế',
+            ToneMark::Huyen => 'ề',
+            ToneMark::Hoi => 'ể',
+            ToneMark::Nga => 'ễ',
+            ToneMark::Nang => 'ệ',
+        },
+        'i' => match tone {
+            ToneMark::Sac => 'í',
+            ToneMark::Huyen => 'ì',
+            ToneMark::Hoi => 'ỉ',
+            ToneMark::Nga => 'ĩ',
+            ToneMark::Nang => 'ị',
+        },
+        'o' => match tone {
+            ToneMark::Sac => 'ó',
+            ToneMark::Huyen => 'ò',
+            ToneMark::Hoi => 'ỏ',
+            ToneMark::Nga => 'õ',
+            ToneMark::Nang => 'ọ',
+        },
+        'ô' => match tone {
+            ToneMark::Sac => 'ố',
+            ToneMark::Huyen => 'ồ',
+            ToneMark::Hoi => 'ổ',
+            ToneMark::Nga => 'ỗ',
+            ToneMark::Nang => 'ộ',
+        },
+        'ơ' => match tone {
+            ToneMark::Sac => 'ớ',
+            ToneMark::Huyen => 'ờ',
+            ToneMark::Hoi => 'ở',
+            ToneMark::Nga => 'ỡ',
+            ToneMark::Nang => 'ợ',
+        },
+        'u' => match tone {
+            ToneMark::Sac => 'ú',
+            ToneMark::Huyen => 'ù',
+            ToneMark::Hoi => 'ủ',
+            ToneMark::Nga => 'ũ',
+            ToneMark::Nang => 'ụ',
+        },
+        'ư' => match tone {
+            ToneMark::Sac => 'ứ',
+            ToneMark::Huyen => 'ừ',
+            ToneMark::Hoi => 'ử',
+            ToneMark::Nga => 'ữ',
+            ToneMark::Nang => 'ự',
+        },
+        'y' => match tone {
+            ToneMark::Sac => 'ý',
+            ToneMark::Huyen => 'ỳ',
+            ToneMark::Hoi => 'ỷ',
+            ToneMark::Nga => 'ỹ',
+            ToneMark::Nang => 'ỵ',
+        },
+        _ => return None,
+    };
+    if is_upper {
+        accented.to_uppercase().next()
+    } else {
+        Some(accented)
+    }
+}
+
+static TEENCODE_DIRECT: LazyLock<Vec<(String, String)>> = LazyLock::new(|| {
+    let mut table: HashMap<String, String> = HashMap::new();
+    for &(base_pair, mod_vowel) in BASE_MODIFIERS {
+        table.insert(base_pair.to_string(), mod_vowel.to_string());
+    }
+
+    let all_tones = [
+        ('~', ToneMark::Nga),
+        ('.', ToneMark::Nang),
+        ('?', ToneMark::Hoi),
+        ('\'', ToneMark::Sac),
+        ('/', ToneMark::Sac),
+        ('`', ToneMark::Huyen),
+        ('\\', ToneMark::Huyen),
+    ];
+
+    for &(base_pair, mod_vowel) in BASE_MODIFIERS {
+        let v_ch = mod_vowel.chars().next().unwrap();
+        if is_teencode_base_vowel(v_ch) {
+            for &(t_sym, t_mark) in &all_tones {
+                if let Some(acc) = apply_tone_to_vowel(v_ch, t_mark) {
+                    table.insert(format!("{base_pair}{t_sym}"), acc.to_string());
+                    let mut b_chars = base_pair.chars();
+                    if let (Some(b0), Some(b1)) = (b_chars.next(), b_chars.next()) {
+                        table.insert(format!("{b0}{t_sym}{b1}"), acc.to_string());
+                    }
+                }
+            }
+        }
+    }
+
+    let pre_accented_vowels = ['ă', 'â', 'ê', 'ô', 'ơ', 'ư'];
+    for &mod_vowel in &pre_accented_vowels {
+        for &(t_sym, t_mark) in &all_tones {
+            if let Some(acc) = apply_tone_to_vowel(mod_vowel, t_mark) {
+                table.insert(format!("{mod_vowel}{t_sym}"), acc.to_string());
+            }
+        }
+    }
+
+    let plain_vowels = ['a', 'e', 'i', 'o', 'u', 'y'];
+    let non_confusable_tones = [
+        ('~', ToneMark::Nga),
+        ('\'', ToneMark::Sac),
+        ('/', ToneMark::Sac),
+        ('`', ToneMark::Huyen),
+        ('\\', ToneMark::Huyen),
+    ];
+    for &v in &plain_vowels {
+        for &(t_sym, t_mark) in &non_confusable_tones {
+            if let Some(acc) = apply_tone_to_vowel(v, t_mark) {
+                table.insert(format!("{v}{t_sym}"), acc.to_string());
+            }
+        }
+    }
+
+    let mut upper: HashMap<String, String> = HashMap::new();
+    for (k, v) in table.iter() {
+        let mut k_chars = k.chars();
+        if let Some(first) = k_chars.next() {
+            let k_upper = format!("{}{}", first.to_uppercase(), k_chars.as_str());
+            let v_upper = v.to_uppercase();
+            upper.insert(k_upper, v_upper);
+        }
+    }
+    table.extend(upper);
+
+    let mut list: Vec<(String, String)> = table.into_iter().collect();
+    list.sort_by(|a, b| b.0.len().cmp(&a.0.len()).then_with(|| a.0.cmp(&b.0)));
+    list
+});
+
+const DIPHTHONG_SHIFTS: &[(&str, &str)] = &[
+    ("ơí", "ới"),
+    ("ơì", "ời"),
+    ("ơỉ", "ởi"),
+    ("ơĩ", "ỡi"),
+    ("ơị", "ợi"),
+    ("Ơí", "Ới"),
+    ("Ơì", "Ời"),
+    ("Ơỉ", "Ởi"),
+    ("Ơĩ", "Ỡi"),
+    ("Ơị", "Ợi"),
+    ("ôí", "ối"),
+    ("ôì", "ồ"),
+    ("ôỉ", "ổi"),
+    ("ôĩ", "ỗ"),
+    ("ôị", "ội"),
+    ("Ôí", "Ối"),
+    ("Ôì", "Ồi"),
+    ("Ôỉ", "Ổi"),
+    ("Ôĩ", "Ỗi"),
+    ("Ôị", "Ội"),
+    ("aí", "ái"),
+    ("aì", "ài"),
+    ("aỉ", "ải"),
+    ("aĩ", "ãi"),
+    ("aị", "ại"),
+    ("aú", "áu"),
+    ("aù", "àu"),
+    ("aủ", "ảu"),
+    ("aũ", "ãu"),
+    ("aụ", "ạu"),
+    ("aý", "áy"),
+    ("aỳ", "ày"),
+    ("aỷ", "ảy"),
+    ("aỹ", "ãy"),
+    ("aỵ", "ạy"),
+    ("âú", "ấu"),
+    ("âù", "ầu"),
+    ("âủ", "ẩu"),
+    ("âũ", "ẫ"),
+    ("âụ", "ậu"),
+    ("âý", "ấy"),
+    ("âỳ", "ầy"),
+    ("âỷ", "ẩy"),
+    ("âỹ", "ẫy"),
+    ("âỵ", "ậy"),
+    ("eó", "éo"),
+    ("eò", "èo"),
+    ("eỏ", "ẻo"),
+    ("eõ", "ẽo"),
+    ("eọ", "ẹo"),
+    ("eú", "éu"),
+    ("eù", "èu"),
+    ("eủ", "ẻu"),
+    ("eũ", "ẽu"),
+    ("eụ", "ệu"),
+    ("êú", "ếu"),
+    ("êù", "ều"),
+    ("êủ", "ểu"),
+    ("êũ", "ễu"),
+    ("êụ", "ệu"),
+    ("ưí", "ứi"),
+    ("ưì", "ừi"),
+    ("ưỉ", "ửi"),
+    ("ưĩ", "ữi"),
+    ("ưị", "ựi"),
+    ("ưú", "ứu"),
+    ("ưù", "ừu"),
+    ("ưủ", "ửu"),
+    ("ưũ", "ữu"),
+    ("ưụ", "ựu"),
+];
+
+fn apply_teencode_dot_and_q(text: &str) -> String {
+    let chars: Vec<char> = text.chars().collect();
+    let n = chars.len();
+    let mut out = String::with_capacity(text.len());
+    let mut i = 0;
+
+    while i < n {
+        if i + 1 < n
+            && (chars[i + 1] == '.' || chars[i + 1] == '?')
+            && is_teencode_base_vowel(chars[i])
+        {
+            let sym = chars[i + 1];
+            let tone = if sym == '.' {
+                ToneMark::Nang
+            } else {
+                ToneMark::Hoi
+            };
+            let mut matched = false;
+
+            if (i + 2 < n && chars[i + 2].is_alphabetic())
+                || ((i == 0 || chars[i - 1].is_whitespace())
+                    && (i + 2 == n || chars[i + 2].is_whitespace()))
+            {
+                matched = true;
+            } else {
+                let is_word_char_before = i == 0 || chars[i - 1].is_alphabetic();
+                if is_word_char_before {
+                    let mut k = i + 2;
+                    while k < n && chars[k].is_whitespace() {
+                        k += 1;
+                    }
+                    if k > i + 2 && k < n && chars[k].is_lowercase() && chars[k].is_alphabetic() {
+                        matched = true;
+                    }
+                }
+            }
+
+            if matched {
+                if let Some(acc) = apply_tone_to_vowel(chars[i], tone) {
+                    out.push(acc);
+                    i += 2;
+                    continue;
+                }
+            }
+        }
+        out.push(chars[i]);
+        i += 1;
+    }
+    out
+}
+
+fn apply_teencode_trailing_tones(text: &str) -> String {
+    let chars: Vec<char> = text.chars().collect();
+    let n = chars.len();
+    let mut out = String::with_capacity(text.len());
+    let mut i = 0;
+
+    while i < n {
+        if chars[i].is_alphabetic() {
+            let start = i;
+            while i < n && chars[i].is_alphabetic() {
+                i += 1;
+            }
+            let word_end = i;
+            if i < n && matches!(chars[i], '\'' | '/' | '`' | '\\' | '~') {
+                let tone_char = chars[i];
+                let next_is_alnum = i + 1 < n && chars[i + 1].is_alphanumeric();
+                if !next_is_alnum {
+                    let word_chars = &chars[start..word_end];
+                    let tone = tone_mark_from_char(tone_char).unwrap();
+
+                    let vowel_indices: Vec<usize> = word_chars
+                        .iter()
+                        .enumerate()
+                        .filter(|(_, c)| is_teencode_base_vowel(**c))
+                        .map(|(idx, _)| idx)
+                        .collect();
+
+                    if !vowel_indices.is_empty() {
+                        let target_idx = if vowel_indices.len() == 1 {
+                            vowel_indices[0]
+                        } else if vowel_indices.len() == 2 {
+                            let v1 = word_chars[vowel_indices[0]].to_lowercase().next().unwrap();
+                            let v2 = word_chars[vowel_indices[1]].to_lowercase().next().unwrap();
+                            let has_coda = vowel_indices[1] < word_chars.len() - 1;
+                            if matches!(v1, 'u' | 'ư' | 'i')
+                                && matches!(v2, 'ô' | 'ơ' | 'ê')
+                                && has_coda
+                            {
+                                vowel_indices[1]
+                            } else if matches!(v2, 'i' | 'y' | 'u' | 'o' | 'e') && !has_coda {
+                                vowel_indices[0]
+                            } else if matches!(v2, 'ơ' | 'ê' | 'ô') {
+                                vowel_indices[1]
+                            } else {
+                                vowel_indices[0]
+                            }
+                        } else {
+                            vowel_indices[1]
+                        };
+
+                        let target_char = word_chars[target_idx];
+                        if let Some(acc) = apply_tone_to_vowel(target_char, tone) {
+                            for (idx, &c) in word_chars.iter().enumerate() {
+                                if idx == target_idx {
+                                    out.push(acc);
+                                } else {
+                                    out.push(c);
+                                }
+                            }
+                            i += 1;
+                            continue;
+                        }
+                    }
+                }
+            }
+            for &c in &chars[start..word_end] {
+                out.push(c);
+            }
+        } else {
+            out.push(chars[i]);
+            i += 1;
+        }
+    }
+    out
+}
+
+fn clean_double_marks(text: &str) -> String {
+    let chars: Vec<char> = text.chars().collect();
+    let n = chars.len();
+    let mut out = String::with_capacity(text.len());
+    let mut i = 0;
+
+    while i < n {
+        let is_word_start = i == 0 || (!chars[i - 1].is_alphanumeric() && chars[i - 1] != '_');
+
+        if is_word_start
+            && (chars[i] == 'd' || chars[i] == 'D')
+            && i + 2 < n
+            && (chars[i + 1] == '-' || chars[i + 1] == '+')
+            && chars[i + 2].is_alphabetic()
+        {
+            let repl = if chars[i] == 'd' { 'đ' } else { 'Đ' };
+            out.push(repl);
+            out.push(chars[i + 2]);
+            i += 3;
+            continue;
+        }
+
+        if is_word_start
+            && (chars[i] == 'd' || chars[i] == 'D')
+            && i + 1 < n
+            && (chars[i + 1] == 'ổ' || chars[i + 1] == 'ỏ')
+        {
+            let repl = if chars[i] == 'd' { 'đ' } else { 'Đ' };
+            out.push(repl);
+            out.push(chars[i + 1]);
+            i += 2;
+            continue;
+        }
+
+        out.push(chars[i]);
+        i += 1;
+    }
+    out
+}
+
+pub fn decode_teencode_diacritics(text: &str) -> String {
+    if text.is_empty() {
+        return String::new();
+    }
+    if !text.chars().any(|c| {
+        matches!(
+            c,
+            '^' | '+' | '*' | '(' | '-' | '~' | '.' | '?' | '\'' | '/' | '`' | '\\' | 'ổ' | 'ỏ'
+        )
+    }) {
         return text.to_string();
     }
-    let precleaned = crate::rules::preclean_phonetics_and_units(text);
+
+    let mut res = text.to_string();
+    for (sym, repl) in TEENCODE_DIRECT.iter() {
+        if res.contains(sym) {
+            res = res.replace(sym, repl);
+        }
+    }
+
+    res = apply_teencode_dot_and_q(&res);
+    res = apply_teencode_trailing_tones(&res);
+
+    for &(k, v) in DIPHTHONG_SHIFTS {
+        if res.contains(k) {
+            res = res.replace(k, v);
+        }
+    }
+
+    clean_double_marks(&res)
+}
+
+pub(crate) fn add_accents(text: &str, infer: &dyn Fn(&str) -> Option<Vec<f32>>) -> String {
+    if text.trim().is_empty() {
+        return text.to_string();
+    }
+    let teencoded = decode_teencode_diacritics(text);
+    if is_predominantly_english_sentence(&teencoded) {
+        return teencoded;
+    }
+    let precleaned = crate::rules::preclean_phonetics_and_units(&teencoded);
     if RE_SENTENCE.is_match(&precleaned) {
         return split_keeping_delimiters(&precleaned)
             .into_iter()
@@ -182,30 +769,29 @@ pub fn restore_sentence(
     resolve_teencode: bool,
     infer: &dyn Fn(&str) -> Option<Vec<f32>>,
 ) -> String {
-    if text.trim().is_empty() || is_predominantly_english_sentence(text) {
+    if text.trim().is_empty() {
         return text.to_string();
     }
 
-    // 1. Punctuation spacing normalization
-    let (punc_norm, _) = crate::rules::normalize_punctuation_spacing(text);
+    let processed_teencode = decode_teencode_diacritics(text);
+    if is_predominantly_english_sentence(&processed_teencode) {
+        return processed_teencode;
+    }
+
+    let (punc_norm, _) = crate::rules::normalize_punctuation_spacing(&processed_teencode);
     let mut processed = punc_norm;
 
-    // 2. Pre-clean units & phonetics
     processed = crate::rules::preclean_phonetics_and_units(&processed);
 
-    // 3. Teencode expansion if requested
     if resolve_teencode {
         let (expanded, _) = crate::rules::normalize_teencode(&processed);
         processed = expanded;
     }
 
-    // 4. Multi-word phrase pre-pass
     processed = apply_confusable_prepass(&processed);
 
-    // 5. Neural accent restoration
     let restored = add_accents(&processed, infer);
 
-    // 6. Sentence-start capitalization recovery
     if capitalize {
         let (cap, _) = crate::rules::normalize_sentence_capitalization(&restored);
         cap
@@ -252,7 +838,9 @@ fn add_accents_chunk(text: &str, infer: &dyn Fn(&str) -> Option<Vec<f32>>) -> St
             let mut sub_res = Vec::new();
             let mut curr_buf = String::new();
             for sp in subparts {
-                if curr_buf.chars().count() + sp.chars().count() > ACCENT_MAX_CHARS && !curr_buf.is_empty() {
+                if curr_buf.chars().count() + sp.chars().count() > ACCENT_MAX_CHARS
+                    && !curr_buf.is_empty()
+                {
                     sub_res.push(add_accents_chunk(&curr_buf, infer));
                     curr_buf = sp.to_string();
                 } else {
@@ -283,10 +871,10 @@ fn add_accents_chunk(text: &str, infer: &dyn Fn(&str) -> Option<Vec<f32>>) -> St
                 chunks.push(curr_chunk.join(" "));
             }
             if chunks.len() > 1 {
-                let res_chunks: Vec<String> = chunks.iter().map(|c| add_accents_chunk(c, infer)).collect();
+                let res_chunks: Vec<String> =
+                    chunks.iter().map(|c| add_accents_chunk(c, infer)).collect();
                 return rescore_with_collocations(&res_chunks.join(" "), &text);
             } else {
-                // Single huge word with no spaces or clauses; chunk strictly by char length
                 let mut char_chunks = Vec::new();
                 for chunk in chars.chunks(ACCENT_MAX_CHARS) {
                     let s: String = chunk.iter().collect();
@@ -663,6 +1251,9 @@ fn is_valid_vietnamese_syllable(syllable: &str) -> bool {
     if syllable.is_empty() {
         return true;
     }
+    if crate::syllable::is_valid_vietnamese_syllable(&syllable) {
+        return true;
+    }
     if !RE_VN_SYLLABLE.is_match(&syllable) {
         return false;
     }
@@ -680,6 +1271,48 @@ fn is_valid_vietnamese_syllable(syllable: &str) -> bool {
         && !matches!(tone, 2 | 5)
     {
         return false;
+    }
+    let is_vowel = |c: char| CHAR_TO_TONE.contains_key(&c);
+    if let Some(last_vowel_idx) = syllable
+        .char_indices()
+        .filter(|(_, c)| is_vowel(*c))
+        .map(|(i, _)| i)
+        .next_back()
+    {
+        let after = &syllable[last_vowel_idx..];
+        let coda: String = after.chars().skip(1).collect();
+        if !coda.is_empty()
+            && !matches!(
+                coda.as_str(),
+                "c" | "ch" | "m" | "n" | "ng" | "nh" | "p" | "t"
+            )
+        {
+            return false;
+        }
+    }
+    let chars: Vec<char> = syllable.chars().collect();
+    for i in 0..chars.len().saturating_sub(1) {
+        if is_vowel(chars[i])
+            && matches!(
+                chars[i + 1],
+                'ì' | 'í'
+                    | 'ỉ'
+                    | 'ĩ'
+                    | 'ị'
+                    | 'ù'
+                    | 'ú'
+                    | 'ủ'
+                    | 'ũ'
+                    | 'ụ'
+                    | 'ò'
+                    | 'ó'
+                    | 'ỏ'
+                    | 'õ'
+                    | 'ọ'
+            )
+        {
+            return false;
+        }
     }
     true
 }
@@ -700,65 +1333,258 @@ fn extract_tone(word: &str) -> (String, u8) {
     (chars, tone)
 }
 
+fn has_punct_between(tokens: &[String], start_idx: usize, end_idx: usize) -> bool {
+    const PUNCT: &[char] = &[
+        ',', '.', '?', '!', ':', ';', '(', ')', '[', ']', '{', '}', '"', '\'', '-', '/', '\\', '–',
+        '—',
+    ];
+    for token in &tokens[start_idx + 1..end_idx] {
+        if token.chars().any(|c| PUNCT.contains(&c)) {
+            return true;
+        }
+    }
+    false
+}
+
 fn rescore_with_collocations(text: &str, original: &str) -> String {
     let mut tokens = tokenize(text);
     let original_tokens = tokenize(original);
-    let mut unaccented = vec![true; tokens.len()];
-    if original_tokens.len() == tokens.len() {
-        for index in 0..tokens.len() {
-            let source = &original_tokens[index];
-            unaccented[index] = source.to_lowercase() == strip_accents(source).to_lowercase();
-        }
-    }
-    let mut matched = HashSet::new();
-    let alpha: Vec<usize> = tokens
+    let alpha_indices: Vec<usize> = tokens
         .iter()
         .enumerate()
         .filter(|(_, token)| token.chars().any(|ch| ch.is_alphabetic()))
         .map(|(index, _)| index)
         .collect();
-    if alpha.len() >= 3 {
-        for index in 0..alpha.len() - 2 {
-            let (i0, i1, i2) = (alpha[index], alpha[index + 1], alpha[index + 2]);
-            let u0 = strip_accents(&tokens[i0]).to_lowercase();
-            let u1 = strip_accents(&tokens[i1]).to_lowercase();
-            let u2 = strip_accents(&tokens[i2]).to_lowercase();
-            if let Some((c0, c1, c2)) = COLLOCATIONS.trigram.get(&pair_key(&u0, &u1, Some(&u2))) {
-                if unaccented[i0] {
-                    tokens[i0] = match_case(&tokens[i0], c0);
+
+    if alpha_indices.is_empty() {
+        return text.to_string();
+    }
+
+    let mut unaccented_mask = vec![true; tokens.len()];
+    if original_tokens.len() == tokens.len() {
+        for index in 0..tokens.len() {
+            let source = &original_tokens[index];
+            unaccented_mask[index] = source.to_lowercase() == strip_accents(source).to_lowercase();
+        }
+    }
+
+    let k_len = alpha_indices.len();
+    let mut candidates_per_pos: Vec<Vec<String>> = Vec::with_capacity(k_len);
+
+    for k in 0..k_len {
+        let idx = alpha_indices[k];
+        let tok = &tokens[idx];
+        let u = strip_accents(tok).to_lowercase();
+        let mut cands = vec![tok.clone()];
+
+        if unaccented_mask[idx] {
+            if k > 0 && !has_punct_between(&tokens, alpha_indices[k - 1], idx) {
+                let u_prev = strip_accents(&tokens[alpha_indices[k - 1]]).to_lowercase();
+                if !BAD_COLLOCATIONS.contains(&(u_prev.as_str(), u.as_str())) {
+                    if let Some((_, c1)) = COLLOCATIONS.bigram.get(&pair_key(&u_prev, &u, None)) {
+                        cands.push(match_case(tok, c1));
+                    }
                 }
-                if unaccented[i1] {
-                    tokens[i1] = match_case(&tokens[i1], c1);
+            }
+
+            if k + 1 < k_len && !has_punct_between(&tokens, idx, alpha_indices[k + 1]) {
+                let u_next = strip_accents(&tokens[alpha_indices[k + 1]]).to_lowercase();
+                if !BAD_COLLOCATIONS.contains(&(u.as_str(), u_next.as_str())) {
+                    if let Some((c0, _)) = COLLOCATIONS.bigram.get(&pair_key(&u, &u_next, None)) {
+                        cands.push(match_case(tok, c0));
+                    }
                 }
-                if unaccented[i2] {
-                    tokens[i2] = match_case(&tokens[i2], c2);
+            }
+
+            if k >= 2 && !has_punct_between(&tokens, alpha_indices[k - 2], idx) {
+                let u_pp = strip_accents(&tokens[alpha_indices[k - 2]]).to_lowercase();
+                let u_p = strip_accents(&tokens[alpha_indices[k - 1]]).to_lowercase();
+                if let Some((_, _, c2)) = COLLOCATIONS.trigram.get(&pair_key(&u_pp, &u_p, Some(&u)))
+                {
+                    cands.push(match_case(tok, c2));
                 }
-                matched.insert(i0);
-                matched.insert(i1);
-                matched.insert(i2);
+            }
+
+            if k >= 1
+                && k + 1 < k_len
+                && !has_punct_between(&tokens, alpha_indices[k - 1], alpha_indices[k + 1])
+            {
+                let u_p = strip_accents(&tokens[alpha_indices[k - 1]]).to_lowercase();
+                let u_n = strip_accents(&tokens[alpha_indices[k + 1]]).to_lowercase();
+                if let Some((_, c1, _)) = COLLOCATIONS.trigram.get(&pair_key(&u_p, &u, Some(&u_n)))
+                {
+                    cands.push(match_case(tok, c1));
+                }
+            }
+
+            if k + 2 < k_len && !has_punct_between(&tokens, idx, alpha_indices[k + 2]) {
+                let u_n = strip_accents(&tokens[alpha_indices[k + 1]]).to_lowercase();
+                let u_nn = strip_accents(&tokens[alpha_indices[k + 2]]).to_lowercase();
+                if let Some((c0, _, _)) = COLLOCATIONS
+                    .trigram
+                    .get(&pair_key(&u_n, &u_nn, None))
+                    .or_else(|| COLLOCATIONS.trigram.get(&pair_key(&u, &u_n, Some(&u_nn))))
+                {
+                    cands.push(match_case(tok, c0));
+                }
+            }
+        }
+
+        let mut unique_cands = Vec::new();
+        let mut seen = HashSet::new();
+        for c in cands {
+            let cl = c.to_lowercase();
+            if seen.insert(cl) {
+                unique_cands.push(c);
+                if unique_cands.len() >= 6 {
+                    break;
+                }
+            }
+        }
+        candidates_per_pos.push(unique_cands);
+    }
+
+    let emission = |k: usize, c: &str| -> f32 {
+        let idx = alpha_indices[k];
+        let tok = &tokens[idx];
+        let mut score = 0.0f32;
+        if c == tok {
+            score += 2.5;
+        }
+        if !unaccented_mask[idx] {
+            score += if c == tok { 100.0 } else { -100.0 };
+        }
+        score
+    };
+
+    let trans2 = |k: usize, c_prev: &str, c_curr: &str| -> f32 {
+        let idx_prev = alpha_indices[k - 1];
+        let idx_curr = alpha_indices[k];
+        if has_punct_between(&tokens, idx_prev, idx_curr) {
+            return 0.0;
+        }
+        let u_prev = strip_accents(c_prev).to_lowercase();
+        let u_curr = strip_accents(c_curr).to_lowercase();
+        if BAD_COLLOCATIONS.contains(&(u_prev.as_str(), u_curr.as_str())) {
+            return -15.0;
+        }
+        if let Some((t_prev, t_curr)) = COLLOCATIONS.bigram.get(&pair_key(&u_prev, &u_curr, None)) {
+            if c_prev.eq_ignore_ascii_case(t_prev) && c_curr.eq_ignore_ascii_case(t_curr) {
+                return 6.0;
+            } else {
+                return -3.0;
+            }
+        }
+        0.0
+    };
+
+    let trans3 = |k: usize, c_pprev: &str, c_prev: &str, c_curr: &str| -> f32 {
+        let idx_pprev = alpha_indices[k - 2];
+        let idx_curr = alpha_indices[k];
+        if has_punct_between(&tokens, idx_pprev, idx_curr) {
+            return 0.0;
+        }
+        let u_pprev = strip_accents(c_pprev).to_lowercase();
+        let u_prev = strip_accents(c_prev).to_lowercase();
+        let u_curr = strip_accents(c_curr).to_lowercase();
+        if BAD_TRIGRAMS.contains(&(u_pprev.as_str(), u_prev.as_str(), u_curr.as_str())) {
+            return -15.0;
+        }
+        if let Some((t_pprev, t_prev, t_curr)) =
+            COLLOCATIONS
+                .trigram
+                .get(&pair_key(&u_pprev, &u_prev, Some(&u_curr)))
+        {
+            if c_pprev.eq_ignore_ascii_case(t_pprev)
+                && c_prev.eq_ignore_ascii_case(t_prev)
+                && c_curr.eq_ignore_ascii_case(t_curr)
+            {
+                return 10.0;
+            } else {
+                return -4.0;
+            }
+        }
+        0.0
+    };
+
+    if k_len == 1 {
+        let mut best_c = &candidates_per_pos[0][0];
+        let mut best_score = -f32::INFINITY;
+        for c in &candidates_per_pos[0] {
+            let sc = emission(0, c);
+            if sc > best_score {
+                best_score = sc;
+                best_c = c;
+            }
+        }
+        tokens[alpha_indices[0]] = best_c.clone();
+        let rescored = apply_confusable_prepass(&tokens.concat());
+        return crate::rules::preclean_phonetics_and_units(&rescored);
+    }
+
+    let mut v: Vec<HashMap<(usize, usize), f32>> = vec![HashMap::new(); k_len];
+    let mut bp: Vec<HashMap<(usize, usize), usize>> = vec![HashMap::new(); k_len];
+
+    for (c_idx, c) in candidates_per_pos[0].iter().enumerate() {
+        v[0].insert((0, c_idx), emission(0, c));
+    }
+
+    for (p_idx, p) in candidates_per_pos[0].iter().enumerate() {
+        let prev_v = v[0].get(&(0, p_idx)).copied().unwrap_or(0.0);
+        for (c_idx, c) in candidates_per_pos[1].iter().enumerate() {
+            let score = prev_v + trans2(1, p, c) + emission(1, c);
+            v[1].insert((p_idx, c_idx), score);
+        }
+    }
+
+    for k in 2..k_len {
+        for (p_idx, p) in candidates_per_pos[k - 1].iter().enumerate() {
+            for (c_idx, c) in candidates_per_pos[k].iter().enumerate() {
+                let mut best_score = -f32::INFINITY;
+                let mut best_pp = None;
+                let t2 = trans2(k, p, c);
+                let em = emission(k, c);
+
+                for (pp_idx, pp) in candidates_per_pos[k - 2].iter().enumerate() {
+                    if let Some(&prev_sc) = v[k - 1].get(&(pp_idx, p_idx)) {
+                        let sc = prev_sc + t2 + trans3(k, pp, p, c) + em;
+                        if sc > best_score {
+                            best_score = sc;
+                            best_pp = Some(pp_idx);
+                        }
+                    }
+                }
+                if let Some(pp_idx) = best_pp {
+                    v[k].insert((p_idx, c_idx), best_score);
+                    bp[k].insert((p_idx, c_idx), pp_idx);
+                }
             }
         }
     }
-    if alpha.len() >= 2 {
-        for index in 0..alpha.len() - 1 {
-            let (i0, i1) = (alpha[index], alpha[index + 1]);
-            if matched.contains(&i0) && matched.contains(&i1) {
-                continue;
-            }
-            let u0 = strip_accents(&tokens[i0]).to_lowercase();
-            let u1 = strip_accents(&tokens[i1]).to_lowercase();
-            if let Some((c0, c1)) = COLLOCATIONS.bigram.get(&pair_key(&u0, &u1, None)) {
-                if !matched.contains(&i0) && unaccented[i0] {
-                    tokens[i0] = match_case(&tokens[i0], c0);
-                    matched.insert(i0);
-                }
-                if !matched.contains(&i1) && unaccented[i1] {
-                    tokens[i1] = match_case(&tokens[i1], c1);
-                    matched.insert(i1);
-                }
-            }
+
+    let mut best_pair = (0, 0);
+    let mut max_total_score = -f32::INFINITY;
+    for (&(p_idx, c_idx), &score) in &v[k_len - 1] {
+        if score > max_total_score {
+            max_total_score = score;
+            best_pair = (p_idx, c_idx);
         }
     }
+
+    let mut result_indices = vec![0usize; k_len];
+    result_indices[k_len - 1] = best_pair.1;
+    result_indices[k_len - 2] = best_pair.0;
+
+    for k in (2..k_len).rev() {
+        let pair = (result_indices[k - 1], result_indices[k]);
+        let pp_idx = bp[k].get(&pair).copied().unwrap_or(0);
+        result_indices[k - 2] = pp_idx;
+    }
+
+    for k in 0..k_len {
+        tokens[alpha_indices[k]] = candidates_per_pos[k][result_indices[k]].clone();
+    }
+
     let rescored = apply_confusable_prepass(&tokens.concat());
     crate::rules::preclean_phonetics_and_units(&rescored)
 }

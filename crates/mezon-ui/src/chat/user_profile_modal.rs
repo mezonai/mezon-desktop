@@ -9,14 +9,15 @@ use crate::components::primitives::{Avatar, Icon, IconName};
 use crate::image_cache::LruImageCache;
 use crate::router::{Route, navigate};
 use crate::theme::{ActiveTheme, Theme};
-use crate::util::avatar_color::spawn_banner_color_task;
+use crate::util::avatar_color::spawn_banner_color_task_with_fallback;
 use gpui::{
     AnyElement, App, ClickEvent, Context, Entity, FocusHandle, Focusable, FontWeight, MouseButton,
-    MouseDownEvent, Render, Rgba, Subscription, Task, Window, deferred, div, prelude::*, px,
+    MouseDownEvent, Render, Rgba, Subscription, Task, Window, deferred, div, img, prelude::*, px,
 };
 use mezon_store::{
     AccountStore, BadgeService, ChannelId, ClanId, ClanMembersStore, DirectChannel,
     DirectMessageStore, FriendState, FriendStore, PresenceStore, ProfileContext, Settings, UserId,
+    UsersByUserStore,
 };
 use ui::Tooltip;
 
@@ -27,8 +28,10 @@ pub struct UserProfileModal {
     direct_id: Option<ChannelId>,
     settings: Entity<Settings>,
     avatar_image_cache: Entity<LruImageCache>,
+    cover_image_cache: Entity<LruImageCache>,
     banner_color: Option<Rgba>,
-    banner_source: String,
+    banner_source: (String, String),
+    banner_url: Option<String>,
     is_self: bool,
     edit_options_open: bool,
     friend_menu_open: bool,
@@ -40,6 +43,8 @@ pub struct UserProfileModal {
     _presence_sub: Subscription,
     _friend_sub: Subscription,
     _account_sub: Subscription,
+    _users_sub: Subscription,
+    _direct_sub: Option<Subscription>,
 }
 
 impl UserProfileModal {
@@ -119,11 +124,24 @@ impl UserProfileModal {
         let account_sub = cx.observe(&AccountStore::global(cx), |this, _, cx| {
             let identity_changed = this.sync_identity(cx);
             let status_changed = this.sync_account_status(cx);
+            this.refresh_banner_source(cx);
             if identity_changed || status_changed {
                 cx.notify();
             }
         });
-        let source_avatar = Self::banner_source_for(user_id, clan_id, cx);
+        let users = UsersByUserStore::global(cx);
+        users.update(cx, |store, cx| store.ensure_cover_profile(user_id, cx));
+        let users_sub = cx.observe(&users, |this, _, cx| {
+            this.refresh_banner_source(cx);
+        });
+        let direct_sub = direct_id
+            .and_then(|_| DirectMessageStore::try_global(cx))
+            .map(|store| {
+                cx.observe(&store, |this, _, cx| {
+                    this.refresh_banner_source(cx);
+                    cx.notify();
+                })
+            });
 
         let mut modal = Self {
             focus_handle: cx.focus_handle(),
@@ -132,8 +150,10 @@ impl UserProfileModal {
             direct_id,
             settings,
             avatar_image_cache,
+            cover_image_cache: crate::image_cache::profile_cover_cache(cx),
             banner_color: None,
-            banner_source: source_avatar.clone(),
+            banner_source: (String::new(), String::new()),
+            banner_url: None,
             is_self,
             edit_options_open: false,
             friend_menu_open: false,
@@ -145,8 +165,10 @@ impl UserProfileModal {
             _presence_sub: presence_sub,
             _friend_sub: friend_sub,
             _account_sub: account_sub,
+            _users_sub: users_sub,
+            _direct_sub: direct_sub,
         };
-        modal.load_banner_color(source_avatar, cx);
+        modal.refresh_banner_source(cx);
         modal
     }
 
@@ -222,25 +244,26 @@ impl UserProfileModal {
         true
     }
 
-    fn banner_source_for(user_id: UserId, clan_id: ClanId, cx: &App) -> String {
-        // Must match what the rendered Avatar resolves to, otherwise the banner
-        // polls a resource the cache was never asked to load.
-        let raw = ClanMembersStore::global(cx)
-            .read(cx)
-            .member(clan_id, user_id)
-            .map(|member| member.avatar().to_string())
-            .unwrap_or_default();
-        crate::util::imgproxy::avatar_url(cx, &raw)
-    }
-
     fn refresh_banner_source(&mut self, cx: &mut Context<Self>) {
-        let source = Self::banner_source_for(self.user_id, self.clan_id, cx);
-        if source == self.banner_source {
+        let raw = self.identity(cx).2;
+        let source = (crate::util::imgproxy::avatar_url(cx, &raw), raw);
+        let cover = mezon_store::resolve_profile_banner(self.user_id, cx)
+            .map(|url| {
+                (!url.is_empty()).then(|| crate::util::imgproxy::profile_cover_url(cx, &url))
+            })
+            .unwrap_or_else(|| self.banner_url.clone());
+        let avatar_changed = source != self.banner_source;
+        if !avatar_changed && cover == self.banner_url {
             return;
         }
-        self.banner_source = source.clone();
-        self.banner_color = None;
-        self.load_banner_color(source, cx);
+        self.banner_url = cover;
+        if avatar_changed {
+            self.banner_source = source;
+            self.banner_color = None;
+            self._banner_task = None;
+            self.load_banner_color(cx);
+        }
+        cx.notify();
     }
 
     fn sync_account_status(&mut self, cx: &App) -> bool {
@@ -282,13 +305,11 @@ impl UserProfileModal {
         changed
     }
 
-    fn load_banner_color(&mut self, avatar_url: String, cx: &mut Context<Self>) {
-        if avatar_url.is_empty() {
-            return;
-        }
-        self._banner_task = spawn_banner_color_task(
+    fn load_banner_color(&mut self, cx: &mut Context<Self>) {
+        self._banner_task = spawn_banner_color_task_with_fallback(
             self.avatar_image_cache.clone(),
-            avatar_url,
+            self.banner_source.0.clone(),
+            self.banner_source.1.clone(),
             cx,
             |this, color, cx| {
                 this.banner_color = Some(color);
@@ -383,9 +404,22 @@ impl Render for UserProfileModal {
                             .relative()
                             .w_full()
                             .h(px(180.))
+                            .flex_shrink_0()
+                            .overflow_hidden()
                             .rounded_tl_lg()
                             .rounded_tr_lg()
                             .bg(banner_color)
+                            .when_some(self.banner_url.clone(), |header, url| {
+                                header.child(
+                                    img(url)
+                                        .image_cache(&self.cover_image_cache)
+                                        .absolute()
+                                        .inset_0()
+                                        .size_full()
+                                        .rounded_t_lg()
+                                        .object_fit(gpui::ObjectFit::Cover),
+                                )
+                            })
                             .child(render_profile_actions(
                                 is_self,
                                 friend_state,
@@ -559,11 +593,7 @@ impl Render for UserProfileModal {
                                 .rounded(px(4.))
                                 .cursor_pointer()
                                 .hover(|style| style.bg(theme.bg_hover))
-                                .child(
-                                    Icon::new(IconName::PenEdit)
-                                        .size(px(16.))
-                                        .text_color(theme.text_secondary),
-                                )
+                                .child(Icon::new(IconName::Edit).size(px(16.)).selected(false))
                                 .child(
                                     div()
                                         .text_sm()
@@ -675,7 +705,7 @@ fn render_profile_actions(
         .gap_2()
         .child(profile_action_button(
             "full-profile-transfer",
-            Icon::new(IconName::Transaction)
+            Icon::new(IconName::SendMoney)
                 .size(px(16.))
                 .text_color(gpui::white())
                 .into_any_element(),
@@ -718,7 +748,7 @@ fn render_profile_actions(
             ))
             .child(profile_action_button(
                 "full-profile-ignore-friend",
-                Icon::new(IconName::IConIgnoreFriend)
+                Icon::new(IconName::Close)
                     .size(px(16.))
                     .text_color(gpui::white())
                     .into_any_element(),
@@ -742,7 +772,7 @@ fn render_profile_actions(
 
     let friend_icon = match friend_state {
         Some(FriendState::Friend) => friend_icon(icon_cache.clone()),
-        Some(FriendState::InviteSent) => Icon::new(IconName::PendingFriend)
+        Some(FriendState::InviteSent) => Icon::new(IconName::UserPending)
             .size(px(16.))
             .text_color(gpui::hsla(0., 0., 0.92, 1.))
             .into_any_element(),

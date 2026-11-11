@@ -3414,13 +3414,13 @@ fn render_bubble_menu(
                         .items_center()
                         .gap_1()
                         .child(
-                            Icon::new(IconName::ParagraphIcon)
-                                .size(px(14.))
+                            Icon::new(IconName::Paragraph)
+                                .size(px(16.))
                                 .text_color(icon_color),
                         )
                         .child(
                             Icon::new(IconName::ArrowDown)
-                                .size(px(12.))
+                                .size(px(16.))
                                 .text_color(icon_color),
                         ),
                 )
@@ -3512,7 +3512,7 @@ fn render_bubble_menu(
                     .tooltip(TooltipView::text(remove_link_tooltip))
                     .child(
                         Icon::new(IconName::Close)
-                            .size(px(12.))
+                            .size(px(16.))
                             .text_color(icon_color),
                     )
                     .on_mouse_down(MouseButton::Left, {
@@ -3601,30 +3601,42 @@ fn block_menu_items(
         (
             BlockKind::Paragraph,
             "canvas.blocks.paragraph",
-            IconName::ParagraphIcon,
+            IconName::Paragraph,
         ),
-        (BlockKind::Heading(1), "canvas.blocks.h1", IconName::H1Icon),
-        (BlockKind::Heading(2), "canvas.blocks.h2", IconName::H2Icon),
-        (BlockKind::Heading(3), "canvas.blocks.h3", IconName::H3Icon),
+        (
+            BlockKind::Heading(1),
+            "canvas.blocks.h1",
+            IconName::Heading1,
+        ),
+        (
+            BlockKind::Heading(2),
+            "canvas.blocks.h2",
+            IconName::Heading2,
+        ),
+        (
+            BlockKind::Heading(3),
+            "canvas.blocks.h3",
+            IconName::Heading3,
+        ),
         (
             BlockKind::TaskItem { checked: false },
             "canvas.blocks.checkedList",
-            IconName::CheckListIcon,
+            IconName::ListCheck,
         ),
         (
             BlockKind::OrderedItem,
             "canvas.blocks.orderedList",
-            IconName::OrderedListIcon,
+            IconName::ListNumber,
         ),
         (
             BlockKind::BulletItem,
             "canvas.blocks.bulletedList",
-            IconName::BulletListIcon,
+            IconName::ListBullet,
         ),
         (
             BlockKind::Blockquote,
             "canvas.blocks.blockquote",
-            IconName::BlockquoteIcon,
+            IconName::Quote,
         ),
     ];
     let divider_ix = 4;

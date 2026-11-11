@@ -2,7 +2,7 @@ use gpui::{
     AnyWindowHandle, App, AppContext, Bounds, DisplayId, Entity, Global, Window, WindowBounds,
     WindowHandle, WindowKind, px, size,
 };
-use mezon_store::Settings;
+use mezon_store::{AutoUpdateStore, Settings};
 
 pub const BASE_REM_SIZE: f32 = 16.0;
 const MIN_ZOOM_FACTOR: f32 = 0.8;
@@ -31,6 +31,24 @@ pub fn register_main_window(handle: AnyWindowHandle, cx: &mut App) {
         tracing::warn!("register_main_window called more than once");
     }
     cx.set_global(MainWindowHandle(handle));
+    #[cfg(any(target_os = "linux", target_os = "freebsd"))]
+    register_portal_parent_window(handle, cx);
+}
+
+#[cfg(any(target_os = "linux", target_os = "freebsd"))]
+fn register_portal_parent_window(handle: AnyWindowHandle, cx: &mut App) {
+    use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+
+    let xid = cx.update_window(handle, |_, window, _| -> Option<u32> {
+        match HasWindowHandle::window_handle(&*window).ok()?.as_raw() {
+            RawWindowHandle::Xcb(xcb) => Some(xcb.window.get()),
+            RawWindowHandle::Xlib(xlib) => u32::try_from(xlib.window).ok(),
+            _ => None,
+        }
+    });
+    if let Ok(Some(xid)) = xid {
+        mezon_voice::set_portal_parent_window(xid);
+    }
 }
 
 pub fn handle(cx: &App) -> Option<AnyWindowHandle> {
@@ -78,6 +96,9 @@ pub fn activate_main_window(cx: &mut App) {
     };
     cx.activate(true);
     let _ = cx.update_window(handle, |_, window, _| window.activate_window());
+    if let Some(store) = AutoUpdateStore::try_global(cx) {
+        store.update(cx, |s, cx| s.set_main_window_hidden(false, cx));
+    }
 }
 
 /// Wayland has no client-side positioning, so an overlay can only be tied to the main window by

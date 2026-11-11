@@ -270,7 +270,7 @@ pub fn build_clan_menu(
         let modal_locale = locale_owned.clone();
         menu = menu.item_icon(
             t("clanMenu.modalPanel.createCategory"),
-            IconName::CreateCategoryIcon,
+            IconName::FolderAdd,
             move |window, cx| {
                 let modal = cx.new(|cx| {
                     CreateCategoryModal::new(
@@ -295,7 +295,7 @@ pub fn build_clan_menu(
     let invite_locale = locale_owned.clone();
     menu = menu.item_icon(
         invite_label.clone(),
-        IconName::AddPerson,
+        IconName::UserPlus,
         move |window, cx| {
             open_invite_people_modal(
                 clan_id,
@@ -310,28 +310,24 @@ pub fn build_clan_menu(
 
     let settings_label = t("clanMenu.modalPanel.clanSettings");
     let settings_clan_id = clan_id;
-    menu = menu.item_icon(
-        settings_label,
-        IconName::SettingProfile,
-        move |_window, cx| {
-            PermissionStore::global(cx).update(cx, |store, cx| {
-                store.load_clan_permissions(settings_clan_id, cx);
-            });
-            let page = {
-                let perms = PermissionStore::global(cx)
-                    .read(cx)
-                    .clan_settings_permissions(settings_clan_id, cx);
-                crate::clan::settings::ClanSettingsPage::default_for_permissions(perms)
-            };
-            crate::router::navigate(
-                cx,
-                crate::router::Route::ClanSettings {
-                    clan_id: settings_clan_id,
-                    page,
-                },
-            );
-        },
-    );
+    menu = menu.item_icon(settings_label, IconName::Settings, move |_window, cx| {
+        PermissionStore::global(cx).update(cx, |store, cx| {
+            store.load_clan_permissions(settings_clan_id, cx);
+        });
+        let page = {
+            let perms = PermissionStore::global(cx)
+                .read(cx)
+                .clan_settings_permissions(settings_clan_id, cx);
+            crate::clan::settings::ClanSettingsPage::default_for_permissions(perms)
+        };
+        crate::router::navigate(
+            cx,
+            crate::router::Route::ClanSettings {
+                clan_id: settings_clan_id,
+                page,
+            },
+        );
+    });
 
     let notification_label = t("clanMenu.modalPanel.notificationSettings");
     let notif_clan_name = clan_name_for_noti;
@@ -369,7 +365,7 @@ pub fn build_clan_menu(
     if can_leave {
         menu = menu.danger_item_icon(
             t("clanMenu.modalPanel.leaveClan"),
-            IconName::LeaveClanIcon,
+            IconName::Leave,
             move |window, cx| {
                 let locale = locale_owned.clone();
                 Shell::global(cx).update(cx, |shell, cx| {

@@ -27,7 +27,7 @@ impl VoiceActivityBadge {
     pub fn icon(self) -> IconName {
         match self {
             Self::InVoice => IconName::Speaker,
-            Self::SharingScreen => IconName::VoiceScreenShareIcon,
+            Self::SharingScreen => IconName::ScreenShare,
         }
     }
 
@@ -116,7 +116,7 @@ pub fn presence_badge_element(
                 .items_end()
                 .justify_end()
                 .child(
-                    Icon::new(IconName::DarkModeIcon)
+                    Icon::new(IconName::Moon)
                         .size(PRESENCE_IDLE_ICON_SIZE)
                         .with_transformation(gpui::Transformation::rotate(gpui::radians(
                             -std::f32::consts::FRAC_PI_2,
@@ -133,10 +133,10 @@ pub fn presence_badge_element(
 
 pub fn status_icon(presence: UserPresence) -> IconName {
     match presence {
-        UserPresence::Online => IconName::OnlineStatus,
-        UserPresence::Idle => IconName::DarkModeIcon,
-        UserPresence::Dnd => IconName::MinusCircleIcon,
-        UserPresence::Invisible => IconName::OfflineStatus,
+        UserPresence::Online => IconName::StatusOnline,
+        UserPresence::Idle => IconName::Moon,
+        UserPresence::Dnd => IconName::MinusCircle,
+        UserPresence::Invisible => IconName::StatusOffline,
     }
 }
 
@@ -308,7 +308,7 @@ mod tests {
         );
         assert_eq!(
             VoiceActivityBadge::SharingScreen.icon(),
-            IconName::VoiceScreenShareIcon
+            IconName::ScreenShare
         );
         assert_eq!(
             VoiceActivityBadge::SharingScreen.member_label_key(),

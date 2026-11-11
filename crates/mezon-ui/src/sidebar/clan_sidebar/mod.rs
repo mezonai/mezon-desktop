@@ -700,7 +700,7 @@ fn nav_arrow(
     };
     let bg_hover = theme.bg_hover;
 
-    let mut icon = Icon::new(IconName::LongArrowRight)
+    let mut icon = Icon::new(IconName::ArrowRight)
         .size(px(window_controls::NAV_ARROW_ICON_SIZE))
         .text_color(icon_color);
     if is_back {
@@ -795,7 +795,7 @@ fn render_clan_footer(
                     }
                 })
                 .child(
-                    Icon::new(IconName::CompassIcon)
+                    Icon::new(IconName::Discover)
                         .size(px(20.))
                         .text_color(theme.tokens.text_theme_primary),
                 ),

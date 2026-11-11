@@ -2770,7 +2770,12 @@ impl ChannelMessages {
         self.selection_autoscroll_scheduled = false;
         let (initial_content, initial_spans) = self
             .find_local_message(message_id, cx)
-            .map(|m| (composer_edit_source(&m.content, &m.spans), m.spans))
+            .map(|m| {
+                (
+                    composer_edit_source(&m.content, &m.spans, m.raw_content.as_deref()),
+                    m.spans,
+                )
+            })
             .unwrap_or_default();
         let settings = self.settings.clone();
         let input = cx.new(|cx| {
@@ -2835,10 +2840,9 @@ impl ChannelMessages {
             return;
         };
 
-        if local
-            .as_ref()
-            .is_some_and(|m| composer_edit_source(&m.content, &m.spans) == text)
-        {
+        if local.as_ref().is_some_and(|m| {
+            composer_edit_source(&m.content, &m.spans, m.raw_content.as_deref()) == text
+        }) {
             store.update(cx, |store, cx| store.cancel_edit(cx));
             cx.emit(ChannelMessagesEvent::EditClosed);
             cx.notify();
@@ -4410,7 +4414,7 @@ impl ChannelMessages {
             })
             .child(
                 Icon::new(IconName::ArrowDown)
-                    .size(px(18.))
+                    .size(px(20.))
                     .text_color(theme.text_primary),
             )
     }

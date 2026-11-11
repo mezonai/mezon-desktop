@@ -608,16 +608,16 @@ fn category_logo(
 
 fn category_rail_icon(name: &str) -> Option<IconName> {
     Some(match name {
-        "Recent" => IconName::EmojiCatStar,
-        "Frequently" => IconName::ClockIcon,
-        "People" => IconName::Smile,
-        "Nature" => IconName::EmojiCatLeaf,
-        "Food" => IconName::EmojiCatBowl,
-        "Activities" => IconName::EmojiCatGame,
-        "Travel" => IconName::EmojiCatBicycle,
-        "Objects" => IconName::EmojiCatObject,
-        "Symbols" => IconName::EmojiCatHeart,
-        "Flags" => IconName::EmojiCatRibbon,
+        "Recent" => IconName::Star,
+        "Frequently" => IconName::Clock,
+        "People" => IconName::Emoji,
+        "Nature" => IconName::Leaf,
+        "Food" => IconName::Food,
+        "Activities" => IconName::Gamepad,
+        "Travel" => IconName::Bicycle,
+        "Objects" => IconName::Lamp,
+        "Symbols" => IconName::Heart,
+        "Flags" => IconName::Flag,
         _ => return None,
     })
 }

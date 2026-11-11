@@ -1,8 +1,8 @@
-use gpui::{
-    AnyElement, Entity, Hsla, ObjectFit, Pixels, Rgba, SharedString, div, img, prelude::*, px,
-};
-
 use crate::components::primitives::{Icon, IconName};
+use gpui::px;
+
+use gpui::{AnyElement, Entity, Hsla, ObjectFit, Pixels, Rgba, SharedString, div, img, prelude::*};
+
 use crate::image_cache::LruImageCache;
 
 pub fn render_media_image(
@@ -73,8 +73,8 @@ fn image_placeholder_fill(bg: Rgba, muted: Rgba) -> AnyElement {
         .justify_center()
         .bg(bg)
         .child(
-            Icon::new(IconName::ImageThumbnail)
-                .size(px(28.))
+            Icon::new(IconName::FileImage)
+                .size(px(32.))
                 .text_color(muted),
         )
         .into_any()
@@ -89,8 +89,8 @@ pub fn image_placeholder(bg: Rgba, muted: Rgba, width: Pixels, height: Pixels) -
         .h(height)
         .bg(bg)
         .child(
-            Icon::new(IconName::ImageThumbnail)
-                .size(px(28.))
+            Icon::new(IconName::FileImage)
+                .size(px(32.))
                 .text_color(muted),
         )
         .into_any()
@@ -112,8 +112,8 @@ fn image_placeholder_rounded_top(
         .rounded_t(radius)
         .bg(bg)
         .child(
-            Icon::new(IconName::ImageThumbnail)
-                .size(px(28.))
+            Icon::new(IconName::FileImage)
+                .size(px(32.))
                 .text_color(muted),
         )
         .into_any()

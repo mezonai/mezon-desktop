@@ -43,7 +43,7 @@ fn modal_title(locale: &str, theme: &crate::theme::Theme) -> gpui::Div {
         .items_center()
         .gap_2()
         .child(
-            Icon::new(IconName::VoiceBreakoutIcon)
+            Icon::new(IconName::Breakout)
                 .size(px(20.))
                 .text_color(theme.tokens.text_theme_primary),
         )
@@ -1588,9 +1588,9 @@ impl BreakoutRoomsModal {
         let count = self.room_members.get(idx).map_or(0, Vec::len);
         let is_hovered = self.hovered_room == Some(idx);
         let chevron = if !room.collapsed && count > 0 {
-            IconName::CaretDown
+            IconName::ChevronDown
         } else {
-            IconName::CaretRight
+            IconName::ChevronRight
         };
         let can_delete = self.rooms.len() > 1 && idx + 1 == self.rooms.len();
         let can_assign = self.rule != BreakoutRule::SelfSelect;
@@ -1661,7 +1661,7 @@ impl BreakoutRoomsModal {
                                 .hover(move |s| s.bg(colors.bg_hover))
                                 .child(
                                     Icon::new(IconName::Close)
-                                        .size(px(12.))
+                                        .size(px(16.))
                                         .text_color(colors.danger),
                                 )
                                 .child(
@@ -1772,8 +1772,8 @@ impl BreakoutRoomsModal {
                                     .bg(colors.bg_secondary)
                                     .cursor_pointer()
                                     .child(
-                                        Icon::new(IconName::ArrowRight)
-                                            .size(px(12.))
+                                        Icon::new(IconName::ChevronRight)
+                                            .size(px(16.))
                                             .text_color(colors.text_secondary),
                                     )
                                     .child(
@@ -1799,8 +1799,8 @@ impl BreakoutRoomsModal {
                                     .bg(colors.bg_secondary)
                                     .cursor_pointer()
                                     .child(
-                                        Icon::new(IconName::ConvertAccount)
-                                            .size(px(12.))
+                                        Icon::new(IconName::Swap)
+                                            .size(px(16.))
                                             .text_color(colors.text_secondary),
                                     )
                                     .child(
@@ -1949,8 +1949,8 @@ impl BreakoutRoomsModal {
                                 .gap_2()
                                 .min_w_0()
                                 .child(
-                                    Icon::new(IconName::VoiceBreakoutIcon)
-                                        .size(px(14.))
+                                    Icon::new(IconName::Breakout)
+                                        .size(px(16.))
                                         .text_color(colors.text_secondary),
                                 )
                                 .child(
@@ -2138,8 +2138,8 @@ impl Render for BreakoutRoomsModal {
                             .items_center()
                             .gap_2()
                             .child(
-                                Icon::new(IconName::VoiceBreakoutIcon)
-                                    .size(px(18.))
+                                Icon::new(IconName::Breakout)
+                                    .size(px(20.))
                                     .text_color(accent_color),
                             )
                             .child(
@@ -2165,7 +2165,7 @@ impl Render for BreakoutRoomsModal {
                             .hover(move |s| s.bg(bg_hover))
                             .child(
                                 Icon::new(IconName::Close)
-                                    .size(px(14.))
+                                    .size(px(16.))
                                     .text_color(text_secondary),
                             )
                             .on_click(|_, _, cx| close(cx)),
@@ -2324,8 +2324,8 @@ impl Render for BreakoutInviteModal {
                         .border_color(border_color)
                         .bg(bg_secondary)
                         .child(
-                            Icon::new(IconName::VoiceBreakoutIcon)
-                                .size(px(15.))
+                            Icon::new(IconName::Breakout)
+                                .size(px(16.))
                                 .text_color(accent),
                         )
                         .child(

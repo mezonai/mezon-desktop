@@ -491,7 +491,8 @@ impl AppConfig {
         if !self.is_own_media_origin(source_image_url.as_ref()) {
             return source_image_url.to_string();
         }
-        let path = format!("/{processing_options}/mb:2097152/plain/{source_image_url}@webp");
+        let source = mezon_client::cdn_signature::escape_imgproxy_source(&source_image_url);
+        let path = format!("/{processing_options}/mb:2097152/plain/{source}@webp");
         let base = self.imgproxy_base_url.trim_end_matches('/');
         format!("{}/{}{}", base, self.imgproxy_key, path)
     }
@@ -1080,6 +1081,31 @@ mod tests {
         assert!(out.starts_with("https://imgproxy.example/sig/rs:fit:100:100:1/mb:2097152/plain/"));
         assert!(out.ends_with("@webp"));
         assert!(out.contains(src));
+    }
+
+    #[test]
+    fn imgproxy_url_escapes_a_source_that_carries_its_signature() {
+        let cfg = AppConfig {
+            imgproxy_base_url: "https://imgproxy.example".into(),
+            imgproxy_key: "sig".into(),
+            ..AppConfig::dev_defaults()
+        };
+        let file = format!(
+            "{}/1cfe6f3d95401000/2120028030431662080_bot.png",
+            cfg.base_img_url
+        );
+        let signed = format!("{file}?1791000000-botsig%2Babc%3D");
+        let out = cfg.imgproxy_url(&signed, 800, 600, "fit");
+        assert_eq!(
+            out,
+            format!(
+                "https://imgproxy.example/sig/rs:fit:800:600:1/mb:2097152/plain/{file}%3F1791000000-botsig%252Babc%253D@webp"
+            )
+        );
+        assert!(
+            cfg.imgproxy_url(&file, 800, 600, "fit")
+                .contains(&format!("/plain/{file}@webp"))
+        );
     }
 
     #[test]

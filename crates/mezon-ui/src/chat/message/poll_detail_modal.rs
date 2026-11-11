@@ -1,3 +1,5 @@
+use crate::components::primitives::{Icon, IconName};
+
 use std::sync::Arc;
 
 use gpui::{
@@ -7,7 +9,6 @@ use gpui::{
 use mezon_store::{MessageId, MessagesStore, PollAnswerView, PollVoter};
 
 use crate::app::shell::Shell;
-use crate::components::primitives::{Icon, IconName};
 use crate::image_cache::LruImageCache;
 use crate::theme::ActiveTheme;
 

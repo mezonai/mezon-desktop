@@ -3,13 +3,15 @@ use std::rc::Rc;
 use std::time::{Duration, Instant};
 
 use gpui::{
-    AnyElement, Context, Entity, ObjectFit, Subscription, Task, Window, div, prelude::*, rgb,
+    AnyElement, App, Context, Entity, ImageSource, ObjectFit, SharedString, Subscription, Task,
+    Window, div, img, prelude::*, rgb,
 };
-use mezon_store::StreamStore;
+use mezon_store::{ChannelList, StreamPhase, StreamStore};
 use mezon_video::VideoFrame;
 
 use crate::components::primitives::{Sizable, Size, Spinner};
 use crate::image_cache::LruImageCache;
+use crate::util::{assets::STREAM_THUMBNAIL, imgproxy::stream_cover_url};
 
 const FRAME_POLL: Duration = Duration::from_millis(8);
 const HIDDEN_POLL: Duration = Duration::from_millis(250);
@@ -24,8 +26,44 @@ struct SharedPlayback {
     frame: Option<VideoFrame>,
     pending: Option<(u64, VideoFrame)>,
     pending_since: Option<Instant>,
+    progress: PlaybackProgress,
     #[cfg(not(target_os = "macos"))]
     stream_image_id: Option<gpui::ImageId>,
+}
+
+#[derive(Default)]
+struct PlaybackProgress {
+    generation: u64,
+    first_time: Option<f64>,
+    advancing: bool,
+}
+
+impl PlaybackProgress {
+    fn advancing(&self, generation: u64) -> bool {
+        self.generation == generation && self.advancing
+    }
+
+    fn observe(&mut self, generation: u64, current_time: f64) -> bool {
+        if self.generation != generation {
+            *self = Self {
+                generation,
+                ..Self::default()
+            };
+        }
+        if self.advancing {
+            return false;
+        }
+        match self.first_time {
+            None => {
+                self.first_time = Some(current_time);
+                false
+            }
+            Some(first) => {
+                self.advancing = current_time > first;
+                self.advancing
+            }
+        }
+    }
 }
 
 pub struct StreamVideoView {
@@ -103,8 +141,40 @@ impl StreamVideoView {
             shared.pending = Some((generation, frame));
             drop(shared);
             cx.notify();
+        } else if self.note_progress(generation, &player) {
+            cx.notify();
         }
         FRAME_POLL
+    }
+
+    fn note_progress(&self, generation: u64, player: &mezon_video::VideoPlayer) -> bool {
+        let mut shared = self.shared.borrow_mut();
+        !shared.progress.advancing(generation)
+            && shared.progress.observe(generation, player.current_time())
+    }
+
+    fn poster(&self, cx: &App) -> ImageSource {
+        let thumbnail = match self.stream.read(cx).phase() {
+            StreamPhase::Joining {
+                channel_id,
+                clan_id,
+            }
+            | StreamPhase::Joined {
+                channel_id,
+                clan_id,
+            } => ChannelList::try_global(cx).and_then(|channels| {
+                channels
+                    .read(cx)
+                    .channel(*clan_id, *channel_id)
+                    .map(|channel| channel.avatar_url.clone())
+                    .filter(|url| !url.trim().is_empty() && url != "0")
+            }),
+            StreamPhase::Idle | StreamPhase::Error(_) => None,
+        };
+        match thumbnail {
+            Some(url) => SharedString::from(stream_cover_url(cx, &url)).into(),
+            None => SharedString::new_static(STREAM_THUMBNAIL).into(),
+        }
     }
 
     fn take_frame(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
@@ -263,6 +333,11 @@ impl Render for StreamVideoView {
         self.shared.borrow_mut().pending_since = None;
         let has_player = self.take_frame(window, cx);
         let has_frame = self.has_frame();
+        let advancing = self
+            .shared
+            .borrow()
+            .progress
+            .advancing(self.stream.read(cx).player_generation());
         let root = div()
             .image_cache(self.image_cache.clone())
             .id("stream-video-surface")
@@ -278,6 +353,14 @@ impl Render for StreamVideoView {
         root.children(self.frame_child())
             .when(!has_frame, |el| {
                 el.child(
+                    img(self.poster(cx))
+                        .id("stream-video-poster")
+                        .size_full()
+                        .object_fit(ObjectFit::Contain),
+                )
+            })
+            .when(!has_frame && !advancing, |el| {
+                el.child(
                     div()
                         .absolute()
                         .top_0()
@@ -290,5 +373,35 @@ impl Render for StreamVideoView {
                 )
             })
             .into_any_element()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::PlaybackProgress;
+
+    #[test]
+    fn playback_counts_as_advancing_only_after_time_moves_past_the_first_reading() {
+        let mut progress = PlaybackProgress::default();
+        assert!(!progress.observe(1, 0.0));
+        assert!(!progress.observe(1, 0.0));
+        assert!(!progress.advancing(1));
+        assert!(progress.observe(1, 0.5));
+        assert!(progress.advancing(1));
+        assert!(!progress.observe(1, 1.0));
+        assert!(progress.advancing(1));
+    }
+
+    #[test]
+    fn a_new_player_generation_starts_over_until_its_own_time_moves() {
+        let mut progress = PlaybackProgress::default();
+        progress.observe(1, 3.0);
+        progress.observe(1, 4.0);
+        assert!(progress.advancing(1));
+        assert!(!progress.advancing(2));
+        assert!(!progress.observe(2, 9.0));
+        assert!(!progress.advancing(2));
+        assert!(progress.observe(2, 9.2));
+        assert!(progress.advancing(2));
     }
 }

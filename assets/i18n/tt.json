@@ -2373,6 +2373,7 @@
   "contextMenu.member.shareContact": "Контакт белән уртаклашу",
   "contextMenu.member.unBanChat": "Баннан алу",
   "contextMenu.member.unblock": "Блоктан алу",
+  "contextMenu.member.block": "Блоклау",
   "contextMenu.member.unblockFailed": "Кулланучыны блоктан алып булмады",
   "contextMenu.member.unblockSuccess": "Кулланучы блоктан алынды",
   "contextMenu.menu": "Меню",
@@ -4922,5 +4923,21 @@
   "chat.activityStrip.messageFrom": "{{name}} кулланучысыннан хәбәр: {{message}}",
   "chat.activityStrip.hideAction": "Беркетмәләр һәм темалар панелен яшерү",
   "chat.activityStrip.hideConfirm.title": "Беркетмәләр һәм темалар панелен яшерү",
-  "chat.activityStrip.hideConfirm.description": "Бу канал өчен беркетмәләр һәм темалар панелен яшерергәме? Яңа беркетмә яки тема булганда ул автоматик рәвештә яңадан күренәчәк."
+  "chat.activityStrip.hideConfirm.description": "Бу канал өчен беркетмәләр һәм темалар панелен яшерергәме? Яңа беркетмә яки тема булганда ул автоматик рәвештә яңадан күренәчәк.",
+  "setting.profile.cover": "ПРОФИЛЬ ТЫШЛЫГЫ",
+  "setting.profile.changeCover": "Тышлыкны үзгәртү",
+  "setting.profile.uploadingCover": "Тышлык йөкләнә…",
+  "setting.profile.chooseCover": "Тышлык рәсемен сайлау",
+  "setting.profile.coverUploadFailed": "Тышлыкны йөкләп булмады. 10 МБ кадәр JPEG, PNG, GIF яки WebP кулланыгыз.",
+  "setting.profile.removeCover": "Тышлыкны бетерү"
+,  "setting.account.qrProfile.centerLogo": "QR уртасындагы логотип",
+  "setting.account.qrProfile.chooseFromDevice": "Җайланмадан сайлау",
+  "setting.account.qrProfile.resetDefaultLogo": "Mezon логотибын кайтару",
+  "setting.account.qrProfile.qrDownloaded": "QR рәсеме йөкләнде",
+  "setting.account.qrProfile.brandName": "MEZON",
+  "setting.account.qrProfile.verifiedByMezon": "VERIFIED BY MEZON",
+  "setting.account.qrProfile.errorExport": "Профиль QR-кодын экспортлап булмый",
+  "setting.account.qrProfile.errorImage": "Рәсемне йөкләп булмый",
+  "setting.appearance.iconAnimations": "Билгеләр анимациясе",
+  "setting.appearance.iconAnimationsDescription": "Тычкан күрсәткечен төймәләргә һәм юлларга китергәндә билгеләрне җанландыру."
 }

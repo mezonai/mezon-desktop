@@ -203,6 +203,31 @@ fn ogp_preview_cache(
     cx.new(|cx| LruImageCache::ogp_thumbnail(label, capacity, bytes, OGP_ENTRY_MAX_BYTES, cx))
 }
 
+const PROFILE_COVER_CACHE_CAPACITY: usize = 8;
+const PROFILE_COVER_CACHE_BYTES: u64 = 24 * 1024 * 1024;
+const PROFILE_COVER_ENTRY_MAX_BYTES: u64 = 16 * 1024 * 1024;
+
+struct SharedProfileCoverCache(Entity<LruImageCache>);
+impl Global for SharedProfileCoverCache {}
+
+pub fn profile_cover_cache(cx: &mut App) -> Entity<LruImageCache> {
+    if let Some(cache) = cx.try_global::<SharedProfileCoverCache>() {
+        return cache.0.clone();
+    }
+    let cache = cx.new(|cx| {
+        LruImageCache::with_loader(
+            "profile-cover",
+            LoaderKind::ProfileCover,
+            PROFILE_COVER_CACHE_CAPACITY,
+            PROFILE_COVER_CACHE_BYTES,
+            PROFILE_COVER_ENTRY_MAX_BYTES,
+            cx,
+        )
+    });
+    cx.set_global(SharedProfileCoverCache(cache.clone()));
+    cache
+}
+
 pub fn social_thumb_cache(label: &'static str, cx: &mut App) -> Entity<LruImageCache> {
     cx.new(|cx| {
         LruImageCache::social_thumbnail(
@@ -674,6 +699,7 @@ enum LoaderKind {
     /// an in-decode byte budget so a pathological file cannot spike RAM while
     /// decoding.
     Full,
+    ProfileCover,
     /// Decodes only the first frame and downscales to avatar size, so even an
     /// animated full-resolution source costs ~100 KB of RAM. Used for avatars.
     AvatarThumbnail,
@@ -1327,6 +1353,9 @@ impl LruImageCache {
         let loader = match self.loader {
             LoaderKind::Full => {
                 AssetLogger::<SharedImageLoader>::load(resource.clone(), cx).boxed()
+            }
+            LoaderKind::ProfileCover => {
+                AssetLogger::<ProfileCoverLoader>::load(resource.clone(), cx).boxed()
             }
             LoaderKind::AvatarThumbnail => {
                 AssetLogger::<AvatarImageLoader>::load(resource.clone(), cx).boxed()
@@ -2533,6 +2562,48 @@ fn load_bounded_inner(
     }
 }
 
+pub enum ProfileCoverLoader {}
+
+impl Asset for ProfileCoverLoader {
+    type Source = Resource;
+    type Output = Result<Arc<RenderImage>, ImageCacheError>;
+
+    fn load(
+        source: Self::Source,
+        cx: &mut App,
+    ) -> impl Future<Output = Self::Output> + Send + 'static {
+        let fallback = match &source {
+            Resource::Uri(uri) => mezon_store::AppConfig::try_global(cx)
+                .filter(|config| {
+                    uri.starts_with(&format!(
+                        "{}/",
+                        config.imgproxy_base_url.trim_end_matches('/')
+                    ))
+                })
+                .and_then(|_| uri.split_once("/plain/")?.1.strip_suffix("@webp"))
+                .filter(|raw| raw.starts_with("https://") || raw.starts_with("http://"))
+                .map(|raw| Resource::Uri(raw.to_owned().into())),
+            _ => None,
+        };
+        let primary: futures::future::BoxFuture<'static, Self::Output> =
+            SharedImageLoader::load(source, cx).boxed();
+        let fallback = fallback.map(|source| {
+            let load: futures::future::BoxFuture<'static, Self::Output> =
+                SharedImageLoader::load(source, cx).boxed();
+            load
+        });
+        async move {
+            match primary.await {
+                Ok(image) => Ok(image),
+                Err(error) => match fallback {
+                    Some(fallback) => fallback.await,
+                    None => Err(error),
+                },
+            }
+        }
+    }
+}
+
 /// Bounded loader for the app-wide fallback cache (`LoaderKind::Full`).
 /// Replaces GPUI's stock `ImageAssetLoader`, which decodes at full resolution
 /// and keeps every animation frame: statics are capped at
@@ -2678,6 +2749,93 @@ impl Asset for ViewerImageLoader {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[gpui::test]
+    fn profile_cover_proxy_failure_uses_bounded_original_and_propagates_failure(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        use image::ImageEncoder as _;
+        let mut bytes = Vec::new();
+        let image = image::RgbaImage::from_pixel(240, 60, image::Rgba([0, 0, 0, 255]));
+        image::codecs::png::PngEncoder::new(&mut bytes)
+            .write_image(image.as_raw(), 240, 60, image::ExtendedColorType::Rgba8)
+            .unwrap();
+        let raw = "https://cdn.mezon.ai/cover.png";
+        let primary = cx.update(|cx| {
+            mezon_store::AppConfig::init_global(
+                Arc::new(mezon_store::AppConfig::dev_defaults()),
+                cx,
+            );
+            cx.http_client()
+                .as_fake()
+                .replace_handler(move |_, request| {
+                    let body = bytes.clone();
+                    async move {
+                        Ok(gpui::http_client::Response::builder()
+                            .status(if *request.uri() == raw { 200 } else { 404 })
+                            .body(body.into())
+                            .unwrap())
+                    }
+                });
+            crate::util::imgproxy::profile_cover_url(cx, raw)
+        });
+        let result = cx
+            .update(|cx| {
+                futures::executor::block_on(ProfileCoverLoader::load(
+                    Resource::Uri(primary.into()),
+                    cx,
+                ))
+            })
+            .unwrap();
+        assert_eq!(result.size(0).width.0, 240);
+        assert_eq!(result.size(0).height.0, 60);
+        let failed = cx.update(|cx| {
+            let primary =
+                crate::util::imgproxy::profile_cover_url(cx, "https://cdn.mezon.ai/missing.png");
+            futures::executor::block_on(ProfileCoverLoader::load(Resource::Uri(primary.into()), cx))
+        });
+        assert!(failed.is_err());
+    }
+
+    #[gpui::test]
+    fn profile_cover_loader_keeps_landscape_aspect_and_animation(cx: &mut gpui::TestAppContext) {
+        let cache = cx.update(profile_cover_cache);
+        cx.update(|cx| {
+            assert_eq!(cache.entity_id(), profile_cover_cache(cx).entity_id());
+            let cache = cache.read(cx);
+            assert!(matches!(cache.loader, LoaderKind::ProfileCover));
+            assert_eq!(cache.max_bytes, PROFILE_COVER_CACHE_BYTES);
+        });
+        let mut bytes = Vec::new();
+        {
+            let mut encoder = image::codecs::gif::GifEncoder::new(&mut bytes);
+            for shade in [0, 100, 200] {
+                encoder
+                    .encode_frame(image::Frame::from_parts(
+                        image::RgbaImage::from_pixel(800, 200, image::Rgba([shade, 0, 0, 255])),
+                        0,
+                        0,
+                        image::Delay::from_numer_denom_ms(100, 1),
+                    ))
+                    .unwrap();
+            }
+        }
+        let path =
+            std::env::temp_dir().join(format!("mezon-profile-cover-{}.gif", std::process::id()));
+        std::fs::write(&path, bytes).unwrap();
+        let resource = Resource::Path(Arc::from(path.as_path()));
+        let decoded = cx
+            .update(|cx| futures::executor::block_on(ProfileCoverLoader::load(resource, cx)))
+            .unwrap();
+        std::fs::remove_file(path).unwrap();
+        assert!(decoded.frame_count() > 1);
+        assert!(image_bytes(&decoded) <= PROFILE_COVER_ENTRY_MAX_BYTES);
+        for index in 0..decoded.frame_count() {
+            let size = decoded.size(index);
+            assert_eq!(size.width.0, size.height.0 * 4);
+            assert!(size.width.0 <= SHARED_ANIMATION_MAX_PX as i32);
+        }
+    }
 
     #[test]
     fn image_cache_budgets_bound_the_visible_working_set() {

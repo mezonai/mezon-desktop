@@ -554,7 +554,7 @@ impl PdfViewer {
                     .items_center()
                     .gap_2()
                     .child(
-                        tool_button("pdf-prev", IconName::ArrowLeft, theme)
+                        tool_button("pdf-prev", IconName::ChevronLeft, theme)
                             .when(at_first, |el| el.opacity(0.5))
                             .on_mouse_down(
                                 MouseButton::Left,
@@ -587,13 +587,12 @@ impl PdfViewer {
                     .items_center()
                     .gap_2()
                     .child(
-                        tool_button("pdf-zoom-out", IconName::MinusCircleIcon, theme)
-                            .on_mouse_down(
-                                MouseButton::Left,
-                                cx.listener(|this, _: &MouseDownEvent, window, cx| {
-                                    this.set_zoom(this.zoom - ZOOM_STEP, window, cx)
-                                }),
-                            ),
+                        tool_button("pdf-zoom-out", IconName::MinusCircle, theme).on_mouse_down(
+                            MouseButton::Left,
+                            cx.listener(|this, _: &MouseDownEvent, window, cx| {
+                                this.set_zoom(this.zoom - ZOOM_STEP, window, cx)
+                            }),
+                        ),
                     )
                     .child(
                         div()
@@ -633,7 +632,7 @@ impl PdfViewer {
                 .justify_center()
                 .gap_3()
                 .child(
-                    Icon::new(IconName::TriangleAlert)
+                    Icon::new(IconName::Warning)
                         .size(px(32.))
                         .text_color(theme.danger_text),
                 )

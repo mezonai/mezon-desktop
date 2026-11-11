@@ -778,6 +778,10 @@ impl ChannelSidebar {
             })
             .unwrap_or_default();
 
+        if self.app_list_open {
+            self.app_list_apps = app_channels.clone();
+        }
+
         items.push(SidebarItem::BannerAndEvents {
             banner_url: clans.active_clan_banner().map(|s| s.to_string()),
             app_channels,
@@ -1547,9 +1551,9 @@ impl Render for ChannelSidebar {
                                         .child(clan_name.clone()),
                                 )
                                 .child(
-                                    Icon::new(IconName::ChevronDownIcon)
+                                    Icon::new(IconName::ChevronDown)
                                         .size(px(20.))
-                                        .text_color(theme.text_secondary),
+                                        .selected(false),
                                 ),
                         )
                     })
@@ -2016,9 +2020,9 @@ fn onboarding_get_started(
                                 .child(total.to_string()),
                         )
                         .child(
-                            Icon::new(IconName::ArrowRight)
-                                .size(px(12.))
-                                .text_color(theme.text_secondary),
+                            Icon::new(IconName::ChevronRight)
+                                .size(px(16.))
+                                .selected(false),
                         ),
                 ),
         )
@@ -2051,6 +2055,7 @@ fn nav_row(
 ) -> gpui::Div {
     let label = label.into();
     div()
+        .group("clan-navigation-row")
         .flex()
         .flex_row()
         .items_center()
@@ -2061,17 +2066,20 @@ fn nav_row(
         .rounded(px(4.))
         .cursor_pointer()
         .when(active, |element| element.bg(theme.bg_hover))
-        .hover(|style| style.bg(theme.bg_hover))
+        .hover(|style| style.bg(theme.bg_hover).text_color(theme.text_primary))
         .text_color(if active {
             theme.text_primary
         } else {
             theme.text_secondary
         })
-        .child(Icon::new(icon).size(px(20.)).text_color(if active {
-            theme.text_primary
-        } else {
-            theme.text_secondary
-        }))
+        .child(
+            Icon::new(icon)
+                .size(px(20.))
+                .selected(active)
+                .group_hover("clan-navigation-row", |style| {
+                    style.text_color(theme.tokens.icon_selected())
+                }),
+        )
         .child(
             div()
                 .text_base()
@@ -2318,46 +2326,19 @@ fn render_banner_and_events(
             .clan(clan_id)
             .is_some_and(|clan| clan.is_onboarding)
     });
-    let guide_row = div()
-        .group("clan-guide-nav")
-        .flex()
-        .flex_row()
-        .items_center()
-        .w_full()
-        .px_2()
-        .h(px(34.))
-        .gap_2()
-        .rounded(px(4.))
-        .cursor_pointer()
-        .when(guide_active, |element| element.bg(theme.bg_hover))
-        .hover(|style| style.bg(theme.bg_hover))
-        .text_color(if guide_active {
-            theme.text_primary
-        } else {
-            theme.text_secondary
-        })
-        .child(
-            gpui::img(IconName::GuideIcon.path())
-                .size(px(20.))
-                .flex_none()
-                .when(!guide_active, |icon| {
-                    icon.opacity(0.65)
-                        .group_hover("clan-guide-nav", |style| style.opacity(1.))
-                }),
-        )
-        .child(
-            div()
-                .text_base()
-                .font_weight(gpui::FontWeight::MEDIUM)
-                .child(mezon_i18n::t(locale, "channelList.navigation.clanGuide")),
-        )
-        .id("clan-guide-nav")
-        .on_click(move |_, _, cx| {
-            if let Some(clan_id) = members_clan_id {
-                crate::router::navigate(cx, crate::router::Route::ClanGuide { clan_id });
-            }
-        });
-    let members_row = nav_row(IconName::MemberList, "Members", theme, members_active)
+    let guide_row = nav_row(
+        IconName::Guide,
+        mezon_i18n::t(locale, "channelList.navigation.clanGuide"),
+        theme,
+        guide_active,
+    )
+    .id("clan-guide-nav")
+    .on_click(move |_, _, cx| {
+        if let Some(clan_id) = members_clan_id {
+            crate::router::navigate(cx, crate::router::Route::ClanGuide { clan_id });
+        }
+    });
+    let members_row = nav_row(IconName::Members, "Members", theme, members_active)
         .id("clan-members-nav")
         .relative()
         .children(crate::tour::probe(crate::tour::TourAnchor::ClanMembersRow))
@@ -2383,7 +2364,7 @@ fn render_banner_and_events(
         mezon_i18n::t(locale, "eventCreator.actions.event_other")
             .replace("{{count}}", &event_count.to_string())
     };
-    let events_row = nav_row(IconName::IconEvents, event_label, theme, false)
+    let events_row = nav_row(IconName::Event, event_label, theme, false)
         .id("clan-events-nav")
         .child(div().flex_1())
         .when(event_count > 0, |row| {
@@ -2416,7 +2397,7 @@ fn render_banner_and_events(
             .check_permission(clan_id, PERMISSION_ADMINISTRATOR, cx)
     });
     let channels_row = nav_row(
-        IconName::ChannelBrowser,
+        IconName::ChannelBrowse,
         mezon_i18n::t(locale, "channelList.navigation.channels"),
         theme,
         channels_active,
@@ -2441,10 +2422,14 @@ fn render_banner_and_events(
         .p_2()
         .gap_1()
         .children(onboarding_card)
-        .when(clan_has_onboarding, |element| element.child(guide_row))
-        .child(events_row)
-        .child(members_row)
-        .when(can_view_channels, |element| element.child(channels_row));
+        .when(clan_has_onboarding, |element| {
+            element.child(Icon::motion_scope(guide_row, true))
+        })
+        .child(Icon::motion_scope(events_row, true))
+        .child(Icon::motion_scope(members_row, true))
+        .when(can_view_channels, |element| {
+            element.child(Icon::motion_scope(channels_row, true))
+        });
 
     col = col.child(nav_col);
 
@@ -2488,10 +2473,8 @@ fn render_banner_and_events(
                     )
                     .into_any_element()
             } else {
-                gpui::svg()
-                    .path("icons/channel-app-fallback.svg")
-                    .w(px(24.))
-                    .h(px(24.))
+                Icon::new(IconName::ChannelApp)
+                    .size(px(24.))
                     .text_color(theme.text_primary)
                     .into_any_element()
             };
@@ -2545,7 +2528,7 @@ fn render_banner_and_events(
                         });
                     })
                     .child(
-                        Icon::new(IconName::RightIcon)
+                        Icon::new(IconName::ChevronRight)
                             .size(px(24.))
                             .text_color(theme.text_primary),
                     ),
@@ -2629,9 +2612,9 @@ fn render_sidebar_item(
                 .font_weight(gpui::FontWeight::MEDIUM);
 
             let icon = if *collapsed {
-                IconName::CaretRight
+                IconName::ChevronRight
             } else {
-                IconName::CaretDown
+                IconName::ChevronDown
             };
             header = header
                 .child(
@@ -2691,11 +2674,7 @@ fn render_sidebar_item(
                                 Shell::global(cx)
                                     .update(cx, |shell, cx| shell.show_modal(modal.into(), cx));
                             })
-                            .child(
-                                Icon::new(IconName::Plus)
-                                    .size(px(18.))
-                                    .text_color(theme.text_muted),
-                            ),
+                            .child(Icon::new(IconName::Plus).size(px(20.)).selected(false)),
                     )
                 })
                 .on_click({
@@ -2900,7 +2879,7 @@ fn render_sidebar_item(
                 if show_settings_gear {
                     let gear_hover: gpui::Hsla = theme.tokens.bg_icon_theme_active.into();
                     element = element.trailing_action(Some(ChannelRowTrailingAction {
-                        icon: IconName::SettingProfile,
+                        icon: IconName::Settings,
                         hover_color: gear_hover,
                         on_click: Rc::new(move |window, cx| {
                             menu::open_channel_settings(settings_clan_id, settings_channel_id)(
@@ -2927,7 +2906,7 @@ fn render_sidebar_item(
                 };
                 let hoverable = !*selected && !suppress_hover;
                 let show_thread_badge = crate::SHOW_UNREAD_BADGE_COUNT && *badge_count > 0;
-                ChannelRowElement::new(row_elem_id.clone(), IconName::Hashtag, name.clone().into())
+                ChannelRowElement::new(row_elem_id.clone(), IconName::Channel, name.clone().into())
                     .name_style(name_base, name_hover, weight)
                     .selected_bg(if *selected {
                         Some(theme.tokens.bg_active_member_channel.into())
@@ -3191,7 +3170,7 @@ fn render_sidebar_item(
                     )
                     .when(member.sharing_screen, |el| {
                         el.child(
-                            Icon::new(IconName::VoiceScreenShareIcon)
+                            Icon::new(IconName::ScreenShare)
                                 .size(px(16.))
                                 .text_color(crate::util::user_status::in_voice_icon_color(theme)),
                         )
@@ -3226,11 +3205,7 @@ fn viewer_count_badge(viewer_count: u32, theme: &Theme) -> gpui::Div {
         .gap_1()
         .text_xs()
         .text_color(theme.text_muted)
-        .child(
-            Icon::new(IconName::EyeOpen)
-                .size(px(14.))
-                .text_color(theme.text_muted),
-        )
+        .child(Icon::new(IconName::Eye).size(px(16.)).selected(false))
         .child(viewer_count.to_string())
 }
 

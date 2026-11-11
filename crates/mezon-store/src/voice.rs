@@ -599,6 +599,14 @@ fn breakout_invitees(
         .collect()
 }
 
+fn agent_request_channel_id(channel_key: &str, external_meeting: bool) -> Option<i64> {
+    if external_meeting {
+        Some(0)
+    } else {
+        channel_key.parse::<i64>().ok()
+    }
+}
+
 fn participant_rosters_differ(old: &[VoiceParticipant], new: &[VoiceParticipant]) -> bool {
     old.len() != new.len()
         || old.iter().zip(new).any(|(before, after)| {
@@ -4287,7 +4295,9 @@ impl VoiceStore {
         let Some((channel_key, _clan_id)) = self.connection.connected_channel() else {
             return;
         };
-        let Ok(channel_id) = channel_key.parse::<i64>() else {
+        let Some(channel_id) =
+            agent_request_channel_id(channel_key, self.external_meeting.is_some())
+        else {
             return;
         };
         if self.room_name.is_empty() {
@@ -6400,8 +6410,8 @@ mod tests {
     use super::{
         BREAKOUT_AUTO_CLOSE_RETRY_SECS, BREAKOUT_EMPTY_CLOSE_DELAY_SECS,
         BREAKOUT_INVITE_RESPONSE_SECS, BreakoutInvite, BreakoutSignal, HostedBreakout,
-        HostedBreakoutPlan, HostedRoomsObservation, breakout_invitees, breakout_signal_from_event,
-        plan_hosted_breakout, retain_hosted_breakouts_for_user,
+        HostedBreakoutPlan, HostedRoomsObservation, agent_request_channel_id, breakout_invitees,
+        breakout_signal_from_event, plan_hosted_breakout, retain_hosted_breakouts_for_user,
     };
     use super::{
         FLOWER_DEDUP_WINDOW, INTERACTIVE_LAUNCH_DEDUP_TTL, MAX_SOUND_BYTES,
@@ -6691,6 +6701,13 @@ mod tests {
             vec![2, 3]
         );
         assert_eq!(breakout_invitees(&[], &participants, Some(1)), vec![2, 3]);
+    }
+
+    #[test]
+    fn agent_request_channel_id_uses_zero_for_external_meetings() {
+        assert_eq!(agent_request_channel_id("123", false), Some(123));
+        assert_eq!(agent_request_channel_id("meeting-room-key", false), None);
+        assert_eq!(agent_request_channel_id("anything", true), Some(0));
     }
 
     #[test]
