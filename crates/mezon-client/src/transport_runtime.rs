@@ -529,6 +529,14 @@ async fn stream_to_file(
     };
     let status = response.status();
     if !status.is_success() {
+        if matches!(
+            status,
+            http::StatusCode::FORBIDDEN | http::StatusCode::NOT_FOUND
+        ) && crate::video_source::may_have_hls_stream(url)
+        {
+            drop(response);
+            return save_hls_copy(url, dest, on_progress, status).await;
+        }
         anyhow::bail!("HTTP GET failed with status {status}");
     }
     let total = response
@@ -569,6 +577,52 @@ async fn stream_to_file(
     }
     file.flush().await?;
     on_progress(written, total.or(Some(written)));
+    Ok(())
+}
+
+const HLS_PARTS_IN_FLIGHT: usize = 4;
+
+async fn save_hls_copy(
+    url: &str,
+    dest: &std::path::Path,
+    on_progress: impl Fn(u64, Option<u64>),
+    status: http::StatusCode,
+) -> Result<()> {
+    let Some(parts) = crate::video_source::finished_hls_parts(url).await else {
+        anyhow::bail!("HTTP GET failed with status {status}");
+    };
+    write_hls_parts(parts, dest, on_progress).await
+}
+
+async fn write_hls_parts(
+    parts: Vec<String>,
+    dest: &std::path::Path,
+    on_progress: impl Fn(u64, Option<u64>),
+) -> Result<()> {
+    use futures::StreamExt as _;
+    use tokio::io::AsyncSeekExt as _;
+    let mut file = tokio::fs::File::create(dest).await?;
+    let mut index = crate::fmp4_index::Fmp4Index::default();
+    let total = parts.len() as u64;
+    let mut done: u64 = 0;
+    on_progress(0, Some(total));
+    let mut fetches = futures::stream::iter(parts)
+        .map(|part| async move { fetch_bytes(&part).await })
+        .buffered(HLS_PARTS_IN_FLIGHT);
+    while let Some(result) = fetches.next().await {
+        let (bytes, _) = result?;
+        file.write_all(&bytes).await?;
+        index.push(&bytes);
+        done += 1;
+        on_progress(done, Some(total));
+    }
+    if let Some(fin) = index.finish() {
+        file.seek(std::io::SeekFrom::Start(fin.head_offset)).await?;
+        file.write_all(&fin.head).await?;
+        file.seek(std::io::SeekFrom::End(0)).await?;
+        file.write_all(&fin.tail).await?;
+    }
+    file.flush().await?;
     Ok(())
 }
 
@@ -3649,6 +3703,7 @@ impl TransportClient {
         about_me: Option<&str>,
         logo: Option<&str>,
         dob_seconds: Option<u32>,
+        banner: Option<&str>,
     ) -> Result<()> {
         tracing::debug!("TransportClient::update_account() called");
 
@@ -3657,6 +3712,7 @@ impl TransportClient {
         let avatar_url = avatar_url.map(str::to_string);
         let about_me = about_me.map(str::to_string);
         let logo = logo.map(str::to_string);
+        let banner = banner.map(str::to_string);
 
         runtime()
             .spawn(async move {
@@ -3667,6 +3723,7 @@ impl TransportClient {
                         about_me.as_deref(),
                         logo.as_deref(),
                         dob_seconds,
+                        banner.as_deref(),
                     )
                     .await
             })
@@ -4337,5 +4394,227 @@ mod tests {
     #[test]
     fn garbage_bytes_do_not_panic() {
         assert!(shrink_icon_to_png(b"not an image at all").is_err());
+    }
+
+    async fn fake_binary_server(objects: Vec<(&'static str, Vec<u8>)>) -> String {
+        use std::collections::HashMap;
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let origin = format!("http://127.0.0.1:{}", listener.local_addr().unwrap().port());
+        let objects: Arc<HashMap<&'static str, Vec<u8>>> = Arc::new(objects.into_iter().collect());
+        tokio::spawn(async move {
+            loop {
+                let Ok((mut stream, _)) = listener.accept().await else {
+                    return;
+                };
+                let objects = objects.clone();
+                tokio::spawn(async move {
+                    let mut buf = vec![0u8; 4096];
+                    let Ok(n) = stream.read(&mut buf).await else {
+                        return;
+                    };
+                    let head = String::from_utf8_lossy(&buf[..n]);
+                    let target = head.split_whitespace().nth(1).unwrap_or("");
+                    let key = target.split('?').next().unwrap_or("");
+                    if let Some(body) = objects.get(key) {
+                        let header = format!(
+                            "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                            body.len()
+                        );
+                        let _ = stream.write_all(header.as_bytes()).await;
+                        let _ = stream.write_all(body).await;
+                    } else {
+                        let body = b"not found";
+                        let header = format!(
+                            "HTTP/1.1 404 Not Found\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                            body.len()
+                        );
+                        let _ = stream.write_all(header.as_bytes()).await;
+                        let _ = stream.write_all(body).await;
+                    }
+                });
+            }
+        });
+        origin
+    }
+
+    fn mp4_box(kind: &[u8; 4], body: &[u8]) -> Vec<u8> {
+        let mut out = Vec::with_capacity(8 + body.len());
+        out.extend_from_slice(&((8 + body.len()) as u32).to_be_bytes());
+        out.extend_from_slice(kind);
+        out.extend_from_slice(body);
+        out
+    }
+
+    fn full_box(kind: &[u8; 4], version: u8, flags: u32, payload: &[u8]) -> Vec<u8> {
+        let vf = (u32::from(version) << 24) | (flags & 0x00ff_ffff);
+        let mut body = Vec::with_capacity(4 + payload.len());
+        body.extend_from_slice(&vf.to_be_bytes());
+        body.extend_from_slice(payload);
+        mp4_box(kind, &body)
+    }
+
+    fn synthetic_hls_init_and_segments() -> (Vec<u8>, Vec<u8>, Vec<u8>) {
+        let mut ftyp_body = Vec::new();
+        ftyp_body.extend_from_slice(b"iso5");
+        ftyp_body.extend_from_slice(&512u32.to_be_bytes());
+        ftyp_body.extend_from_slice(b"iso5iso6mp41");
+        let ftyp = mp4_box(b"ftyp", &ftyp_body);
+
+        let mut mvhd_payload = Vec::new();
+        mvhd_payload.extend_from_slice(&0u32.to_be_bytes());
+        mvhd_payload.extend_from_slice(&0u32.to_be_bytes());
+        mvhd_payload.extend_from_slice(&1000u32.to_be_bytes());
+        mvhd_payload.extend_from_slice(&0u32.to_be_bytes());
+        mvhd_payload.extend_from_slice(&[0u8; 80]);
+        let mvhd = full_box(b"mvhd", 0, 0, &mvhd_payload);
+
+        let mut tkhd_payload = Vec::new();
+        tkhd_payload.extend_from_slice(&0u32.to_be_bytes());
+        tkhd_payload.extend_from_slice(&0u32.to_be_bytes());
+        tkhd_payload.extend_from_slice(&1u32.to_be_bytes());
+        tkhd_payload.extend_from_slice(&0u32.to_be_bytes());
+        tkhd_payload.extend_from_slice(&0u32.to_be_bytes());
+        tkhd_payload.extend_from_slice(&[0u8; 60]);
+        let tkhd = full_box(b"tkhd", 0, 3, &tkhd_payload);
+
+        let mut mdhd_payload = Vec::new();
+        mdhd_payload.extend_from_slice(&0u32.to_be_bytes());
+        mdhd_payload.extend_from_slice(&0u32.to_be_bytes());
+        mdhd_payload.extend_from_slice(&1000u32.to_be_bytes());
+        mdhd_payload.extend_from_slice(&0u32.to_be_bytes());
+        mdhd_payload.extend_from_slice(&0u32.to_be_bytes());
+        let mdhd = full_box(b"mdhd", 0, 0, &mdhd_payload);
+
+        let stbl = mp4_box(b"stbl", &[]);
+        let minf = mp4_box(b"minf", &stbl);
+        let mut mdia_body = Vec::new();
+        mdia_body.extend_from_slice(&mdhd);
+        mdia_body.extend_from_slice(&minf);
+        let mdia = mp4_box(b"mdia", &mdia_body);
+
+        let mut trak_body = Vec::new();
+        trak_body.extend_from_slice(&tkhd);
+        trak_body.extend_from_slice(&mdia);
+        let trak = mp4_box(b"trak", &trak_body);
+
+        let mut trex_payload = Vec::new();
+        trex_payload.extend_from_slice(&1u32.to_be_bytes());
+        trex_payload.extend_from_slice(&1u32.to_be_bytes());
+        trex_payload.extend_from_slice(&0u32.to_be_bytes());
+        trex_payload.extend_from_slice(&0u32.to_be_bytes());
+        trex_payload.extend_from_slice(&0u32.to_be_bytes());
+        let trex = full_box(b"trex", 0, 0, &trex_payload);
+        let mvex = mp4_box(b"mvex", &trex);
+
+        let mut moov_body = Vec::new();
+        moov_body.extend_from_slice(&mvhd);
+        moov_body.extend_from_slice(&trak);
+        moov_body.extend_from_slice(&mvex);
+        let moov = mp4_box(b"moov", &moov_body);
+
+        let mut init = ftyp;
+        init.extend_from_slice(&moov);
+
+        let build_seg = |seq: u32, base: u64, dur: u32| -> Vec<u8> {
+            let mfhd = full_box(b"mfhd", 0, 0, &seq.to_be_bytes());
+            let tfhd = full_box(b"tfhd", 0, 0x020000, &1u32.to_be_bytes());
+            let tfdt = full_box(b"tfdt", 1, 0, &base.to_be_bytes());
+            let mut trun_payload = Vec::new();
+            trun_payload.extend_from_slice(&1u32.to_be_bytes());
+            trun_payload.extend_from_slice(&0u32.to_be_bytes());
+            trun_payload.extend_from_slice(&dur.to_be_bytes());
+            trun_payload.extend_from_slice(&4u32.to_be_bytes());
+            trun_payload.extend_from_slice(&0x0101_0000u32.to_be_bytes());
+            let trun = full_box(b"trun", 0, 0x000701, &trun_payload);
+            let mut traf_body = Vec::new();
+            traf_body.extend_from_slice(&tfhd);
+            traf_body.extend_from_slice(&tfdt);
+            traf_body.extend_from_slice(&trun);
+            let traf = mp4_box(b"traf", &traf_body);
+            let mut moof_body = Vec::new();
+            moof_body.extend_from_slice(&mfhd);
+            moof_body.extend_from_slice(&traf);
+            let moof = mp4_box(b"moof", &moof_body);
+            let mdat = mp4_box(b"mdat", &[seq as u8; 4]);
+            let mut seg = moof;
+            seg.extend_from_slice(&mdat);
+            seg
+        };
+
+        (init, build_seg(1, 0, 2000), build_seg(2, 2000, 1500))
+    }
+
+    #[tokio::test]
+    async fn write_hls_parts_concatenates_segments_patches_mvhd_and_appends_mfra() {
+        let (init, seg0, seg1) = synthetic_hls_init_and_segments();
+        let origin = fake_binary_server(vec![
+            ("/init.mp4", init.clone()),
+            ("/seg0.m4s", seg0.clone()),
+            ("/seg1.m4s", seg1.clone()),
+        ])
+        .await;
+
+        let dest = std::env::temp_dir().join(format!(
+            "mezon-hls-dl-ok-{}-{}.mp4",
+            std::process::id(),
+            rand::random::<u64>()
+        ));
+        let progress = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let progress_clone = progress.clone();
+        let parts = vec![
+            format!("{origin}/init.mp4"),
+            format!("{origin}/seg0.m4s"),
+            format!("{origin}/seg1.m4s"),
+        ];
+
+        write_hls_parts(parts, &dest, move |done, total| {
+            progress_clone.lock().unwrap().push((done, total));
+        })
+        .await
+        .expect("write_hls_parts");
+
+        let written = tokio::fs::read(&dest).await.expect("read output");
+        let _ = tokio::fs::remove_file(&dest).await;
+
+        let recorded = progress.lock().unwrap().clone();
+        assert_eq!(recorded.first().copied(), Some((0, Some(3))));
+        assert_eq!(recorded.last().copied(), Some((3, Some(3))));
+
+        let mut expected_index = crate::fmp4_index::Fmp4Index::default();
+        expected_index.push(&init);
+        expected_index.push(&seg0);
+        expected_index.push(&seg1);
+        let fin = expected_index.finish().expect("expected finalization");
+
+        let mut expected = Vec::new();
+        expected.extend_from_slice(&init[..fin.head_offset as usize]);
+        expected.extend_from_slice(&fin.head);
+        expected.extend_from_slice(&seg0);
+        expected.extend_from_slice(&seg1);
+        expected.extend_from_slice(&fin.tail);
+        assert_eq!(written, expected);
+        assert_eq!(&written[written.len() - 12..written.len() - 8], b"mfro");
+    }
+
+    #[tokio::test]
+    async fn write_hls_parts_fails_when_any_segment_returns_404() {
+        let (init, seg0, _) = synthetic_hls_init_and_segments();
+        let origin = fake_binary_server(vec![("/init.mp4", init), ("/seg0.m4s", seg0)]).await;
+        let dest = std::env::temp_dir().join(format!(
+            "mezon-hls-dl-err-{}-{}.mp4",
+            std::process::id(),
+            rand::random::<u64>()
+        ));
+        let parts = vec![
+            format!("{origin}/init.mp4"),
+            format!("{origin}/seg0.m4s"),
+            format!("{origin}/seg1.m4s"),
+        ];
+
+        let result = write_hls_parts(parts, &dest, |_, _| {}).await;
+        let _ = tokio::fs::remove_file(&dest).await;
+        assert!(result.is_err());
     }
 }

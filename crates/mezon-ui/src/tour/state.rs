@@ -789,28 +789,28 @@ fn caret_for(
 
     let (path, left, top, width, height) = match side {
         Side::Below => (
-            "icons/tour-caret-up.svg",
+            "icons/caret-up.svg",
             horizontal,
             origin.y - CARET / 2.,
             CARET,
             CARET / 2.,
         ),
         Side::Above => (
-            "icons/tour-caret-down.svg",
+            "icons/caret-down.svg",
             horizontal,
             origin.y + BUBBLE_HEIGHT,
             CARET,
             CARET / 2.,
         ),
         Side::Right => (
-            "icons/tour-caret-left.svg",
+            "icons/caret-left.svg",
             origin.x - CARET / 2.,
             vertical,
             CARET / 2.,
             CARET,
         ),
         Side::Left => (
-            "icons/tour-caret-right.svg",
+            "icons/caret-right.svg",
             origin.x + BUBBLE_WIDTH,
             vertical,
             CARET / 2.,

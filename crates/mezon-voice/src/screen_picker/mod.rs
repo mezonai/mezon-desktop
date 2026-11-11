@@ -31,6 +31,21 @@ pub(crate) fn pick_uses_portal(pick: &PickedScreen) -> bool {
     }
 }
 
+pub(crate) fn portal_parent_window_for_pick(pick: &PickedScreen) -> Option<String> {
+    #[cfg(target_os = "linux")]
+    {
+        match pick {
+            PickedScreen::LinuxPortal => crate::linux_session::portal_parent_window(),
+            PickedScreen::Target(_) => None,
+        }
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = pick;
+        None
+    }
+}
+
 pub(crate) fn pick_is_window(pick: &PickedScreen) -> bool {
     matches!(pick, PickedScreen::Target(Target::Window(_)))
 }

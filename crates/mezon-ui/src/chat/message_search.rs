@@ -637,7 +637,7 @@ fn render_pagination_nav_button(
     } else {
         theme.tokens.text_theme_primary
     };
-    let mut icon = Icon::new(IconName::ArrowRight)
+    let mut icon = Icon::new(IconName::ChevronRight)
         .size(px(20.))
         .text_color(icon_color);
     if previous {
@@ -1156,6 +1156,17 @@ fn render_search_spans(
                         .max_w_full()
                         .min_w_0()
                         .font_weight(FontWeight::BOLD)
+                        .child(text.to_string()),
+                );
+            }
+            MessageSpan::Styled { text, style } => {
+                row = row.child(
+                    div()
+                        .max_w_full()
+                        .min_w_0()
+                        .when(style.bold, |d| d.font_weight(FontWeight::BOLD))
+                        .when(style.italic, |d| d.italic())
+                        .when(style.strike, |d| d.line_through())
                         .child(text.to_string()),
                 );
             }

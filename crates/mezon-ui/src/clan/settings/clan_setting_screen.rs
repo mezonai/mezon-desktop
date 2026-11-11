@@ -968,8 +968,8 @@ impl Render for ClanSettingScreen {
                                             .bg(theme.bg_secondary)
                                             .child(
                                                 Icon::new(IconName::Close)
-                                                    .size(px(18.0))
-                                                    .text_color(theme.text_secondary),
+                                                    .size(px(20.))
+                                                    .selected(false),
                                             ),
                                     )
                                     .child(

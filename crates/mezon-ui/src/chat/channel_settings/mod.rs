@@ -7,7 +7,7 @@ pub mod permission_overrides;
 pub mod permissions_tab;
 pub mod quick_actions_tab;
 mod remote_members;
-pub mod stream_thumbnail_tab;
+pub mod streaming_tab;
 
 use gpui::{
     App, Context, Entity, FocusHandle, Focusable, FontWeight, ScrollHandle, SharedString,
@@ -29,7 +29,7 @@ use integrations_tab::{IntegrationsTab, render_channel_integrations_save_bar};
 use overview_tab::{OverviewTab, render_channel_overview_save_bar};
 use permissions_tab::PermissionsTab;
 use quick_actions_tab::QuickActionsTab;
-use stream_thumbnail_tab::StreamThumbnailTab;
+use streaming_tab::StreamingTab;
 use ui::{ScrollAxes, Scrollbars, WithScrollbar};
 
 const SIDEBAR_WIDTH: f32 = 224.0;
@@ -46,7 +46,7 @@ pub enum ChannelSettingsTab {
     Integrations,
     Category,
     QuickMenu,
-    StreamThumbnail,
+    Streaming,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -78,7 +78,7 @@ pub const SIDEBAR_TABS: &[ChannelSettingsTab] = &[
     ChannelSettingsTab::Permissions,
     ChannelSettingsTab::Integrations,
     ChannelSettingsTab::QuickMenu,
-    ChannelSettingsTab::StreamThumbnail,
+    ChannelSettingsTab::Streaming,
 ];
 
 impl ChannelSettingsTab {
@@ -90,7 +90,7 @@ impl ChannelSettingsTab {
             "integrations" => Self::Integrations,
             "category" => Self::Category,
             "quick-actions" => Self::QuickMenu,
-            "stream-thumbnail" => Self::StreamThumbnail,
+            "streaming" | "stream-thumbnail" => Self::Streaming,
             _ => return None,
         })
     }
@@ -103,7 +103,7 @@ impl ChannelSettingsTab {
             Self::Integrations => "integrations",
             Self::Category => "category",
             Self::QuickMenu => "quick-actions",
-            Self::StreamThumbnail => "stream-thumbnail",
+            Self::Streaming => "streaming",
         }
     }
 
@@ -115,7 +115,7 @@ impl ChannelSettingsTab {
             Self::Integrations => "channelSetting.tabs.integrations",
             Self::Category => "channelSetting.tabs.category",
             Self::QuickMenu => "channelSetting.tabs.quickMenu",
-            Self::StreamThumbnail => "channelSetting.tabs.streamThumbnail",
+            Self::Streaming => "setting.appSettings.streaming",
         }
     }
 
@@ -132,7 +132,7 @@ impl ChannelSettingsTab {
             Self::Permissions => !ctx.is_thread && !is_stream && !is_app && ctx.has_manage_channel,
             Self::Integrations => ctx.has_manage_channel && !is_stream && !is_voice,
             Self::QuickMenu => ctx.has_manage_channel && !is_voice && !is_stream && !is_app,
-            Self::StreamThumbnail => ctx.has_manage_channel && is_stream,
+            Self::Streaming => ctx.has_manage_channel && is_stream,
             Self::Invites => false,
         }
     }
@@ -164,7 +164,7 @@ pub struct ChannelSettingScreen {
     integrations_sub: Option<Subscription>,
     quick_actions_tab: Option<Entity<QuickActionsTab>>,
     quick_actions_sub: Option<Subscription>,
-    stream_thumbnail_tab: Option<Entity<StreamThumbnailTab>>,
+    streaming_tab: Option<Entity<StreamingTab>>,
     content_scroll: ScrollHandle,
     nav_scroll: ScrollHandle,
     focus_handle: FocusHandle,
@@ -196,7 +196,7 @@ impl ChannelSettingScreen {
             integrations_sub: None,
             quick_actions_tab: None,
             quick_actions_sub: None,
-            stream_thumbnail_tab: None,
+            streaming_tab: None,
             content_scroll: ScrollHandle::new(),
             nav_scroll: ScrollHandle::new(),
             focus_handle: cx.focus_handle(),
@@ -205,7 +205,7 @@ impl ChannelSettingScreen {
     }
 
     pub fn release_active_tab(&mut self, cx: &mut Context<Self>) {
-        self.stream_thumbnail_tab = None;
+        self.streaming_tab = None;
         let had_permissions_tab = self.permissions_tab.take().is_some();
         let had_overview_tab = self.overview_tab.take().is_some();
         let had_category_tab = self.category_tab.take().is_some();
@@ -272,7 +272,7 @@ impl ChannelSettingScreen {
             return;
         }
         if target_changed {
-            self.stream_thumbnail_tab = None;
+            self.streaming_tab = None;
             self.permissions_tab = None;
             self.permissions_sub = None;
             self.overview_tab = None;
@@ -385,12 +385,12 @@ impl ChannelSettingScreen {
                 self.quick_actions_sub = Some(cx.observe(&tab, |_, _, cx| cx.notify()));
                 self.quick_actions_tab = Some(tab);
             }
-            ChannelSettingsTab::StreamThumbnail if self.stream_thumbnail_tab.is_none() => {
+            ChannelSettingsTab::Streaming if self.streaming_tab.is_none() => {
                 let clan_id = self.clan_id;
                 let channel_id = self.channel_id;
                 let settings = self.settings.clone();
-                self.stream_thumbnail_tab =
-                    Some(cx.new(|cx| StreamThumbnailTab::new(clan_id, channel_id, settings, cx)));
+                self.streaming_tab =
+                    Some(cx.new(|cx| StreamingTab::new(clan_id, channel_id, settings, cx)));
             }
             _ => {}
         }
@@ -591,7 +591,7 @@ impl ChannelSettingScreen {
                             .cursor_pointer()
                             .hover(|style| style.bg(theme.bg_hover))
                             .child(
-                                Icon::new(IconName::CloseButton)
+                                Icon::new(IconName::Close)
                                     .size(px(16.0))
                                     .text_color(theme.tokens.text_theme_primary),
                             )
@@ -619,7 +619,7 @@ fn channel_tab_icon(ctx: ChannelTabContext) -> ChannelIcon {
             channel_icon(ctx.channel_type, ctx.private, ctx.age_restricted)
         }
         _ => ChannelIcon {
-            base: IconName::Hashtag,
+            base: IconName::Channel,
             lock: None,
         },
     }
@@ -690,8 +690,8 @@ impl Render for ChannelSettingScreen {
                 .quick_actions_tab
                 .as_ref()
                 .map(|tab| tab.clone().into_any_element()),
-            ChannelSettingsTab::StreamThumbnail => self
-                .stream_thumbnail_tab
+            ChannelSettingsTab::Streaming => self
+                .streaming_tab
                 .as_ref()
                 .map(|tab| tab.clone().into_any_element()),
             _ => None,
@@ -915,7 +915,7 @@ mod tests {
         };
         assert_eq!(
             channel_tab_icon(restricted).base.path(),
-            IconName::HashtagWarning.path()
+            IconName::ChannelWarning.path()
         );
         let voice = ChannelTabContext {
             channel_type: ChannelType::Voice,
@@ -931,7 +931,7 @@ mod tests {
         };
         assert_eq!(
             channel_tab_icon(thread).base.path(),
-            IconName::ThreadIcon.path()
+            IconName::Thread.path()
         );
         let forum = ChannelTabContext {
             channel_type: ChannelType::Forum,
@@ -939,7 +939,7 @@ mod tests {
         };
         assert_eq!(
             channel_tab_icon(forum).base.path(),
-            IconName::Hashtag.path()
+            IconName::Channel.path()
         );
     }
 
@@ -950,14 +950,14 @@ mod tests {
             ..ctx(channel_type, is_thread, false, true)
         };
         let voice = channel_tab_icon(private(ChannelType::Voice, false));
-        assert_eq!(voice.base, IconName::SpeakerLocked);
+        assert_eq!(voice.base, IconName::SpeakerLock);
         assert_eq!(voice.lock, None);
         let text = channel_tab_icon(private(ChannelType::Text, false));
-        assert_eq!(text.base, IconName::Hashtag);
-        assert_eq!(text.lock, Some(IconName::HashtagLock));
+        assert_eq!(text.base, IconName::Channel);
+        assert_eq!(text.lock, Some(IconName::Lock));
         let thread = channel_tab_icon(private(ChannelType::Thread, true));
-        assert_eq!(thread.base, IconName::ThreadIcon);
-        assert_eq!(thread.lock, Some(IconName::ThreadLock));
+        assert_eq!(thread.base, IconName::Thread);
+        assert_eq!(thread.lock, Some(IconName::Lock));
         let public_voice = channel_tab_icon(ctx(ChannelType::Voice, false, false, true));
         assert_eq!(public_voice.base, IconName::Speaker);
         assert_eq!(public_voice.lock, None);
@@ -1104,14 +1104,14 @@ mod tests {
     }
 
     #[test]
-    fn stream_thumbnail_only_for_stream_with_manage() {
-        assert!(ChannelSettingsTab::StreamThumbnail.visible_in_sidebar(ctx(
+    fn streaming_tab_only_for_stream_with_manage() {
+        assert!(ChannelSettingsTab::Streaming.visible_in_sidebar(ctx(
             ChannelType::Stream,
             false,
             false,
             true
         )));
-        assert!(!ChannelSettingsTab::StreamThumbnail.visible_in_sidebar(ctx(
+        assert!(!ChannelSettingsTab::Streaming.visible_in_sidebar(ctx(
             ChannelType::Text,
             false,
             false,
@@ -1142,10 +1142,14 @@ mod tests {
             ChannelSettingsTab::Integrations,
             ChannelSettingsTab::Category,
             ChannelSettingsTab::QuickMenu,
-            ChannelSettingsTab::StreamThumbnail,
+            ChannelSettingsTab::Streaming,
         ] {
             assert_eq!(ChannelSettingsTab::from_slug(tab.slug()), Some(tab));
         }
+        assert_eq!(
+            ChannelSettingsTab::from_slug("stream-thumbnail"),
+            Some(ChannelSettingsTab::Streaming)
+        );
     }
 
     fn sample_channel(channel_type: ChannelType, parent_id: Option<ChannelId>) -> Channel {
@@ -1186,7 +1190,7 @@ mod tests {
         assert!(!ChannelSettingsTab::Permissions.visible_in_sidebar(thread));
         assert!(ChannelSettingsTab::Integrations.visible_in_sidebar(thread));
         assert!(ChannelSettingsTab::QuickMenu.visible_in_sidebar(thread));
-        assert!(!ChannelSettingsTab::StreamThumbnail.visible_in_sidebar(thread));
+        assert!(!ChannelSettingsTab::Streaming.visible_in_sidebar(thread));
 
         let thread_no_manage = ctx(ChannelType::Thread, true, false, false);
         assert!(!ChannelSettingsTab::Integrations.visible_in_sidebar(thread_no_manage));
@@ -1200,7 +1204,7 @@ mod tests {
         let detected = ctx(channel.channel_type, channel.is_thread(), false, true);
         assert!(!ChannelSettingsTab::Category.visible_in_sidebar(detected));
         assert!(!ChannelSettingsTab::Permissions.visible_in_sidebar(detected));
-        assert_eq!(channel_tab_icon(detected).base, IconName::ThreadIcon);
+        assert_eq!(channel_tab_icon(detected).base, IconName::Thread);
     }
 
     #[test]

@@ -56,3 +56,7 @@ scripts/*
 !scripts/load-env.sh
 
 perf-report*.json
+
+# ONNX models and grammar assets (downloaded from CDN)
+*.onnx
+crates/mezon-grammar/assets/

@@ -1,13 +1,12 @@
+use crate::assets::{
+    ACCENT_MODEL_FILE, ACCENT_VOCAB_FILE, MODEL_FILE, load_asset_bytes, load_asset_str,
+};
 use crate::tokenizer::VietnameseTokenizer;
 use ort::session::Session;
 use ort::value::Tensor;
 use serde::Deserialize;
 use std::collections::HashMap;
 use std::sync::{LazyLock, Mutex, OnceLock};
-
-const INTENT_MODEL_BYTES: &[u8] = include_bytes!("../assets/model.onnx");
-const ACCENT_MODEL_BYTES: &[u8] = include_bytes!("../assets/accent_model.onnx");
-const ACCENT_VOCAB_JSON: &str = include_str!("../assets/accent_vocab.json");
 
 pub const INTENT_MIN_CONFIDENCE: f32 = 0.90;
 pub const ACCENT_MAX_CHARS: usize = 128;
@@ -70,8 +69,9 @@ pub struct DualPrediction {
 }
 
 static ACCENT_CHAR_TO_ID: LazyLock<HashMap<String, i64>> = LazyLock::new(|| {
-    let parsed: AccentVocabFile =
-        serde_json::from_str(ACCENT_VOCAB_JSON).unwrap_or_else(|_| AccentVocabFile {
+    let parsed: AccentVocabFile = load_asset_str(ACCENT_VOCAB_FILE)
+        .and_then(|json| serde_json::from_str(&json).ok())
+        .unwrap_or_else(|| AccentVocabFile {
             char_to_id: HashMap::new(),
         });
     parsed.char_to_id
@@ -114,12 +114,20 @@ fn ensure_intent_session() -> Option<()> {
         SessionSlot::Failed => return None,
         SessionSlot::Pending => {}
     }
-    match load_session(INTENT_MODEL_BYTES) {
+    let bytes = match load_asset_bytes(MODEL_FILE) {
+        Some(b) => b,
+        None => {
+            tracing::warn!("Intent ONNX model asset not available");
+            return None;
+        }
+    };
+    match load_session(&bytes) {
         Ok(session) => {
             *guard = SessionSlot::Ready(session);
             Some(())
         }
-        Err(_) => {
+        Err(err) => {
+            tracing::warn!("Failed to load intent ONNX session: {err}");
             *guard = SessionSlot::Failed;
             None
         }
@@ -133,12 +141,20 @@ fn ensure_accent_session() -> Option<()> {
         SessionSlot::Failed => return None,
         SessionSlot::Pending => {}
     }
-    match load_session(ACCENT_MODEL_BYTES) {
+    let bytes = match load_asset_bytes(ACCENT_MODEL_FILE) {
+        Some(b) => b,
+        None => {
+            tracing::warn!("Accent ONNX model asset not available");
+            return None;
+        }
+    };
+    match load_session(&bytes) {
         Ok(session) => {
             *guard = SessionSlot::Ready(session);
             Some(())
         }
-        Err(_) => {
+        Err(err) => {
+            tracing::warn!("Failed to load accent ONNX session: {err}");
             *guard = SessionSlot::Failed;
             None
         }
@@ -281,7 +297,6 @@ pub fn quick_replies_with_intent(
         return Vec::new();
     };
 
-    // 100% correct suggestion rule: only show suggestions if intent confidence rounds to 100%
     let conf_100 = (d.intent.confidence * 100.0).round() >= (INTENT_MIN_CONFIDENCE * 100.0).round();
     if !conf_100
         || matches!(

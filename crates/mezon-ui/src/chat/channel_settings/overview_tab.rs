@@ -713,10 +713,10 @@ impl OverviewTab {
                             .child(value),
                     )
                     .child(
-                        Icon::new(IconName::ArrowDownFill)
+                        Icon::new(IconName::CaretDown)
                             .size(px(16.0))
                             .flex_shrink_0()
-                            .text_color(theme.text_muted),
+                            .selected(false),
                     ),
             )
             .child(

@@ -912,8 +912,8 @@ fn render_header(theme: &Theme, locale: &str) -> impl IntoElement {
         .border_color(tokens.border_primary)
         .bg(tokens.theme_setting_nav)
         .child(
-            Icon::new(IconName::PinRight)
-                .size_4()
+            Icon::new(IconName::Pin)
+                .size(px(16.))
                 .text_color(tokens.bg_icon_theme),
         )
         .child(
@@ -1461,6 +1461,7 @@ fn pin_spans_canonical_text(spans: &[MessageSpan]) -> SharedString {
         match span {
             MessageSpan::Text(value)
             | MessageSpan::Bold(value)
+            | MessageSpan::Styled { text: value, .. }
             | MessageSpan::Code(value)
             | MessageSpan::CodeBlock { text: value, .. }
             | MessageSpan::Link { text: value, .. }
@@ -1858,6 +1859,23 @@ fn render_pin_spans(
                 );
                 base = end;
             }
+            MessageSpan::Styled { text, style } => {
+                has_inline = true;
+                let end = base + text.len();
+                let styled = pin_selectable_segment(text, base, selected.as_ref());
+                push_pin_text_segment(&mut segments, &styled, base..end);
+                row = row.child(
+                    div()
+                        .text_sm()
+                        .line_height(rems(1.25))
+                        .when(style.bold, |d| d.font_weight(FontWeight::BOLD))
+                        .when(style.italic, |d| d.italic())
+                        .when(style.strike, |d| d.line_through())
+                        .text_color(body_color)
+                        .child(styled),
+                );
+                base = end;
+            }
             MessageSpan::Code(text) => {
                 has_inline = true;
                 let end = base + text.len();
@@ -2224,7 +2242,13 @@ fn render_pin_file_attachment(
                 .justify_center()
                 .w(px(32.))
                 .h(px(40.))
-                .child(img(icon.path()).w(px(32.)).h(px(40.)).flex_none()),
+                .child(
+                    Icon::new(icon)
+                        .text_color(theme.tokens.text_secondary)
+                        .w(px(32.))
+                        .h(px(40.))
+                        .flex_none(),
+                ),
         )
         .child(
             div()
@@ -2309,9 +2333,10 @@ fn render_pin_embeds(
                 .description_spans
                 .iter()
                 .filter_map(|span| match span {
-                    MessageSpan::Text(text) | MessageSpan::Bold(text) | MessageSpan::Code(text) => {
-                        Some(text.as_ref())
-                    }
+                    MessageSpan::Text(text)
+                    | MessageSpan::Bold(text)
+                    | MessageSpan::Styled { text, .. }
+                    | MessageSpan::Code(text) => Some(text.as_ref()),
                     MessageSpan::Link { text, .. }
                     | MessageSpan::Mention { display: text, .. }
                     | MessageSpan::Hashtag { display: text, .. } => Some(text.as_ref()),

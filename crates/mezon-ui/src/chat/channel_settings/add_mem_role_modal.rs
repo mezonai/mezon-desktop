@@ -553,17 +553,17 @@ impl AddMemRoleModal {
             .read(cx)
             .channel(self.clan_id, self.channel_id)
         else {
-            return IconName::Hashtag;
+            return IconName::Channel;
         };
         if channel.channel_type == ChannelType::Text && channel.is_age_restricted() {
-            return IconName::HashtagWarning;
+            return IconName::ChannelWarning;
         }
         match (channel.private, channel.channel_type) {
-            (true, ChannelType::Voice) => IconName::SpeakerLocked,
-            (true, _) => IconName::HashtagLocked,
+            (true, ChannelType::Voice) => IconName::SpeakerLock,
+            (true, _) => IconName::ChannelPrivate,
             (false, ChannelType::Voice) => IconName::Speaker,
-            (false, ChannelType::Stream) => IconName::Stream,
-            (false, _) => IconName::Hashtag,
+            (false, ChannelType::Stream) => IconName::Live,
+            (false, _) => IconName::Channel,
         }
     }
 

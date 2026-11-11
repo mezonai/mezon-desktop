@@ -242,7 +242,8 @@ impl RenderOnce for Button {
         let interactive = self.on_click.is_some() && !self.disabled && !self.loading;
         let size = self.size;
 
-        self.base
+        let button = self
+            .base
             .id(self.id)
             .flex()
             .flex_row()
@@ -267,6 +268,7 @@ impl RenderOnce for Button {
             })
             .when(self.loading, |el| el.child(Spinner::new().with_size(size)))
             .when_some(self.icon, |el, icon| el.child(icon))
-            .when_some(self.label, |el, label| el.child(label))
+            .when_some(self.label, |el, label| el.child(label));
+        crate::IconMotionScope::new(button, interactive)
     }
 }

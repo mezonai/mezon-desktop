@@ -2,7 +2,8 @@ use std::time::Duration;
 
 use gpui::{
     App, ClickEvent, ClipboardItem, Context, DismissEvent, Entity, EventEmitter, FocusHandle,
-    Focusable, FontWeight, SharedString, Subscription, Task, Window, deferred, div, prelude::*, px,
+    Focusable, FontWeight, SharedString, Subscription, Task, Window, deferred, div, img,
+    prelude::*, px,
 };
 use mezon_store::{
     AccountStore, BadgeService, DirectMessageBody, DirectMessageStore, Settings, UserId,
@@ -15,11 +16,13 @@ use crate::chat::friends_page::{
 use crate::chat::message::{CustomStatusModal, SendTokenModal, TransactionHistoryModal};
 use crate::components::compositions::CustomStatusBubble;
 use crate::components::primitives::{Avatar, Icon, IconName, Input, InputEvent, InputState};
+use crate::image_cache::LruImageCache;
 use crate::router::Router;
 use crate::theme::ActiveTheme;
 use crate::util::user_status::{status_color, status_glyph, status_label_key};
 
 use mezon_store::TOKEN_DECIMAL_FACTOR as DECIMAL_FACTOR;
+const BANNER_HEIGHT: f32 = 105.;
 const CURRENCY_SYMBOL: &str = "đồng";
 const COPY_USER_ID_RESET_MS: u64 = 1000;
 
@@ -67,6 +70,12 @@ pub struct FooterProfilePopup {
     username: SharedString,
     avatar: SharedString,
     avatar_raw: SharedString,
+    banner_url: Option<SharedString>,
+    banner_color: Option<gpui::Rgba>,
+    banner_avatar: (String, String),
+    banner_task: Option<Task<()>>,
+    avatar_image_cache: Entity<LruImageCache>,
+    cover_image_cache: Entity<LruImageCache>,
     balance: SharedString,
     status: UserPresence,
     user_status: String,
@@ -134,6 +143,7 @@ impl FooterProfilePopup {
                 this.sync_identity(cx);
                 this.sync_status(cx);
                 this.sync_avatar(cx);
+                this.sync_profile_banner(cx);
             })
         });
         let message_ph = mezon_i18n::t(&locale, "userProfile.placeholders.messageUser")
@@ -152,7 +162,14 @@ impl FooterProfilePopup {
             },
         );
 
-        Self {
+        let avatar_image_cache = crate::image_cache::shared_avatar_cache(cx);
+        let mut this = Self {
+            avatar_image_cache,
+            cover_image_cache: crate::image_cache::profile_cover_cache(cx),
+            banner_url: None,
+            banner_color: None,
+            banner_avatar: (String::new(), String::new()),
+            banner_task: None,
             focus_handle: cx.focus_handle(),
             locale,
             user_id,
@@ -172,7 +189,47 @@ impl FooterProfilePopup {
             _copy_user_id_reset: None,
             _account_sub: account_sub,
             _input_sub: input_sub,
+        };
+        this.sync_profile_banner(cx);
+        this
+    }
+
+    fn sync_profile_banner(&mut self, cx: &mut Context<Self>) {
+        let cover = AccountStore::try_global(cx).and_then(|store| {
+            store
+                .read(cx)
+                .account
+                .as_ref()
+                .and_then(|account| account.banner.clone())
+        });
+        let cover = cover
+            .filter(|url| !url.is_empty())
+            .map(|url| SharedString::from(crate::util::imgproxy::profile_cover_url(cx, &url)));
+        let source = (self.avatar.to_string(), self.avatar_raw.to_string());
+        let avatar_changed = source != self.banner_avatar;
+        if !avatar_changed && self.banner_url == cover {
+            return;
         }
+        self.banner_url = cover;
+        if avatar_changed {
+            self.banner_color = None;
+            self.banner_task = None;
+            self.banner_avatar = source;
+        }
+        if self.banner_color.is_none() && self.banner_task.is_none() {
+            self.banner_task = crate::util::avatar_color::spawn_banner_color_task_with_fallback(
+                self.avatar_image_cache.clone(),
+                self.banner_avatar.0.clone(),
+                self.banner_avatar.1.clone(),
+                cx,
+                |this, color, cx| {
+                    this.banner_color = Some(color);
+                    this.banner_task = None;
+                    cx.notify();
+                },
+            );
+        }
+        cx.notify();
     }
 
     fn sync_identity(&mut self, cx: &mut Context<Self>) {
@@ -369,7 +426,6 @@ impl Render for FooterProfilePopup {
         let locale = self.locale.clone();
         let tk = |key: &'static str| mezon_i18n::t(&locale, key).to_string();
         let (
-            bg_banner,
             bg_card,
             bg_card_surface,
             bg_box,
@@ -382,7 +438,6 @@ impl Render for FooterProfilePopup {
         ) = {
             let theme = cx.theme();
             (
-                theme.tokens.bg_button_primary,
                 theme.tokens.bg_outside_footer,
                 theme.surfaces.outside_footer.ramp(),
                 theme.tokens.theme_setting_primary,
@@ -396,7 +451,27 @@ impl Render for FooterProfilePopup {
         };
         let current_status_color = status_color(self.status, cx.theme());
 
-        let banner = div().w_full().h(px(105.)).rounded_t(px(8.)).bg(bg_banner);
+        let bg_banner = self
+            .banner_color
+            .map(gpui::Hsla::from)
+            .unwrap_or_else(|| cx.theme().tokens.bg_secondary.into());
+        let banner = div()
+            .relative()
+            .w_full()
+            .h(px(BANNER_HEIGHT))
+            .flex_shrink_0()
+            .rounded_t_lg()
+            .overflow_hidden()
+            .bg(bg_banner)
+            .children(self.banner_url.clone().map(|url| {
+                img(url)
+                    .image_cache(&self.cover_image_cache)
+                    .absolute()
+                    .inset_0()
+                    .size_full()
+                    .rounded_t_lg()
+                    .object_fit(gpui::ObjectFit::Cover)
+            }));
 
         let custom_status = self.user_status.clone();
         let has_custom = !custom_status.is_empty();
@@ -421,7 +496,9 @@ impl Render for FooterProfilePopup {
                 .rounded_full()
                 .bg(bg_card_surface)
                 .child({
-                    let mut avatar = Avatar::new().size_px(px(78.));
+                    let mut avatar = Avatar::new()
+                        .size_px(px(78.))
+                        .image_cache(self.avatar_image_cache.clone());
                     if !self.avatar.is_empty() {
                         avatar = avatar.src(self.avatar.clone());
                         if !self.avatar_raw.is_empty() && self.avatar_raw != self.avatar {
@@ -519,8 +596,8 @@ impl Render for FooterProfilePopup {
                                         CustomStatusModal::open(locale, window, cx);
                                     }))
                                     .child(
-                                        Icon::new(IconName::PenEdit)
-                                            .size(px(14.))
+                                        Icon::new(IconName::Edit)
+                                            .size(px(16.))
                                             .text_color(text_secondary),
                                     ),
                             )
@@ -543,8 +620,8 @@ impl Render for FooterProfilePopup {
                                         cx.notify();
                                     }))
                                     .child(
-                                        Icon::new(IconName::DeleteMessageRightClick)
-                                            .size(px(14.))
+                                        Icon::new(IconName::Trash)
+                                            .size(px(16.))
                                             .text_color(gpui::rgb(0xdc2626)),
                                     ),
                             ),
@@ -579,7 +656,7 @@ impl Render for FooterProfilePopup {
             .px_2()
             .py(px(6.))
             .child(
-                Icon::new(IconName::Check)
+                Icon::new(IconName::Wallet)
                     .size(px(16.))
                     .text_color(text_secondary),
             )
@@ -630,8 +707,8 @@ impl Render for FooterProfilePopup {
                         ),
                 )
                 .child(
-                    Icon::new(IconName::RightIcon)
-                        .size(px(14.))
+                    Icon::new(IconName::ChevronRight)
+                        .size(px(16.))
                         .text_color(text_secondary),
                 ),
         );
@@ -692,8 +769,8 @@ impl Render for FooterProfilePopup {
                     );
                 if has_duration {
                     row = row.child(
-                        Icon::new(IconName::RightIcon)
-                            .size(px(12.))
+                        Icon::new(IconName::ChevronRight)
+                            .size(px(16.))
                             .text_color(text_primary)
                             .group_hover(
                                 SharedString::from(format!("footer-status-{option_id}")),
@@ -760,7 +837,7 @@ impl Render for FooterProfilePopup {
             ))
             .child(Self::action_row(
                 "footer-action-custom-status",
-                IconName::SmilingFace,
+                IconName::Emoji,
                 tk(custom_status_key),
                 |this, window, cx| {
                     let locale = this.locale.clone();
@@ -790,9 +867,9 @@ impl Render for FooterProfilePopup {
                     }))
                     .child(
                         Icon::new(if user_id_copied {
-                            IconName::Tick
+                            IconName::Check
                         } else {
-                            IconName::CopyIcon
+                            IconName::Copy
                         })
                         .size(px(16.))
                         .text_color(text_secondary),

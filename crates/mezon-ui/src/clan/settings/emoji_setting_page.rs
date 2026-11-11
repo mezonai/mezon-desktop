@@ -47,11 +47,7 @@ fn emoji_thumb_fallback(
             .flex()
             .items_center()
             .justify_center()
-            .child(
-                Icon::new(IconName::ImageThumbnail)
-                    .size(size)
-                    .text_color(color),
-            )
+            .child(Icon::new(IconName::FileImage).size(size).text_color(color))
             .into_any_element()
     }
 }
@@ -292,7 +288,7 @@ impl EmojiSettingPage {
             .border_color(theme.border)
             .bg(theme.tokens.theme_setting_nav)
             .child(
-                Icon::new(IconName::Smile)
+                Icon::new(IconName::Emoji)
                     .size(px(40.0))
                     .text_color(theme.tokens.text_theme_primary)
                     .mb(px(8.0)),
@@ -440,7 +436,7 @@ fn render_emoji_row(
                     .gap_2()
                     .when(row.is_for_sale, |actions| {
                         actions.child(
-                            Icon::new(IconName::MarketIcons)
+                            Icon::new(IconName::Shop)
                                 .size(px(16.0))
                                 .text_color(gpui::rgb(0xfacc15)),
                         )
@@ -464,7 +460,7 @@ fn render_emoji_row(
                                     .cursor_pointer()
                                     .child(
                                         Icon::new(IconName::Close)
-                                            .size(px(14.0))
+                                            .size(px(16.0))
                                             .text_color(theme.danger_text),
                                     )
                                     .on_click(move |_, window, cx| {

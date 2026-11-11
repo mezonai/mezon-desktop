@@ -1201,16 +1201,11 @@ impl CreateEventModal {
                     .flex()
                     .items_center()
                     .gap_3()
-                    .child(if icon == IconName::Location {
-                        img(IconName::Location.path())
-                            .size(px(23.))
-                            .into_any_element()
-                    } else {
+                    .child(
                         Icon::new(icon)
                             .size(px(23.))
-                            .text_color(theme.text_secondary)
-                            .into_any_element()
-                    })
+                            .text_color(theme.tokens.text_secondary),
+                    )
                     .child(
                         div()
                             .child(
@@ -1238,6 +1233,7 @@ impl CreateEventModal {
                     })
                     .when(selected, |d| d.bg(theme.brand)),
             )
+            .map(|element| Icon::motion_scope(element, enabled))
             .into_any_element()
     }
     fn required_label(&self, key: &'static str, cx: &Context<Self>) -> AnyElement {
@@ -1485,8 +1481,8 @@ impl CreateEventModal {
                                         .min_w_0()
                                         .max_w_full()
                                         .child(
-                                            Icon::new(IconName::SpeakerLocked)
-                                                .size(px(14.))
+                                            Icon::new(IconName::SpeakerLock)
+                                                .size(px(16.))
                                                 .text_color(theme.brand),
                                         )
                                         .child(
@@ -1745,11 +1741,7 @@ impl CreateEventModal {
                                     .flex()
                                     .items_center()
                                     .gap_2()
-                                    .child(
-                                        Icon::new(IconName::IconEvents)
-                                            .size(px(24.))
-                                            .text_color(theme.text_secondary),
-                                    )
+                                    .child(Icon::new(IconName::Event).size(px(24.)).selected(false))
                                     .child(div().font_weight(FontWeight::SEMIBOLD).child(start))
                                     .child(
                                         div()
@@ -1800,13 +1792,14 @@ impl CreateEventModal {
                             .items_center()
                             .gap_2()
                             .child(if self.location_kind == Some(LocationKind::Somewhere) {
-                                img(IconName::Location.path())
-                                    .size(px(21.))
+                                Icon::new(IconName::Location)
+                                    .size(px(20.))
+                                    .selected(false)
                                     .into_any_element()
                             } else {
                                 Icon::new(IconName::Speaker)
-                                    .size(px(21.))
-                                    .text_color(theme.text_secondary)
+                                    .size(px(20.))
+                                    .selected(false)
                                     .into_any_element()
                             })
                             .child(div().font_weight(FontWeight::SEMIBOLD).child(location)),

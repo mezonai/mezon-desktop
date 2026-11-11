@@ -276,7 +276,7 @@ impl Render for TopicPanel {
                     .items_center()
                     .gap_2()
                     .child(
-                        Icon::new(IconName::TopicIcon)
+                        Icon::new(IconName::Topic)
                             .size(px(20.))
                             .text_color(tokens.text_theme_primary),
                     )
@@ -295,7 +295,7 @@ impl Render for TopicPanel {
                     .child(
                         Icon::new(IconName::Close)
                             .size(px(20.))
-                            .text_color(tokens.text_theme_primary_hover),
+                            .text_color(tokens.text_theme_primary),
                     )
                     .on_click(cx.listener(|_this, _: &ClickEvent, _window, cx| {
                         TopicsStore::global(cx).update(cx, |store, cx| store.close_panel(cx));

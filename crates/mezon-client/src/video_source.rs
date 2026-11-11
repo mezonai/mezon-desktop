@@ -77,6 +77,17 @@ pub async fn ingest_hls_playlist(url: &str) -> Option<String> {
     ingest_playlist_on(url, &hls_origins(), ingest_probe_window()).await
 }
 
+pub(crate) async fn finished_hls_parts(url: &str) -> Option<Vec<String>> {
+    let playlist = index_playlist_candidate(url, &hls_origins())?;
+    let text = crate::transport_runtime::fetch_text_unsigned(
+        &format!("{playlist}?probe={}", ingest_probe_window()),
+        PLAYLIST_MAX_BYTES,
+        HLS_PROBE_TIMEOUT,
+    )
+    .await?;
+    download_parts(&playlist, &text)
+}
+
 pub async fn playable_hls_stream(url: &str, ingest: bool) -> Option<String> {
     let playlist = if ingest {
         ingest_hls_playlist(url).await
@@ -207,6 +218,41 @@ fn snapshot_playlist(playlist: &str, text: &str) -> Option<(String, f64)> {
     }
     out.push(HLS_END_TAG.to_string());
     Some((out.join("\n") + "\n", duration))
+}
+
+fn download_parts(playlist: &str, text: &str) -> Option<Vec<String>> {
+    if !text.starts_with("#EXTM3U") || !text.contains(HLS_END_TAG) || text.contains(HLS_VARIANT_TAG)
+    {
+        return None;
+    }
+    let dir = playlist.split(['?', '#']).next()?.rsplit_once('/')?.0;
+    let absolute = |uri: &str| {
+        if uri.contains("://") {
+            uri.to_string()
+        } else {
+            format!("{dir}/{uri}")
+        }
+    };
+    let mut init: Option<String> = None;
+    let mut parts = vec![String::new()];
+    for line in text.lines().map(str::trim) {
+        if line.is_empty() {
+            continue;
+        }
+        if let Some(rest) = line.strip_prefix("#EXT-X-MAP:URI=\"") {
+            let (uri, _) = rest.split_once('"')?;
+            if uri.is_empty() || init.replace(absolute(uri)).is_some() {
+                return None;
+            }
+        } else if !line.starts_with('#') {
+            parts.push(absolute(line));
+        }
+    }
+    if parts.len() < 2 {
+        return None;
+    }
+    parts[0] = init?;
+    Some(parts)
 }
 
 fn stable_hash(text: &str) -> u64 {
@@ -366,10 +412,10 @@ mod tests {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
     use super::{
-        CDN_MEZON_MINIO, HLS_TRANSCODE_MIN_SIZE, TRANSCODING_ORIGINS, has_turned_video_track,
-        hls_playlist_candidate, hls_playlist_on, index_playlist_candidate, ingest_playlist_on,
-        may_be_transcoded, safe_resume_point, segment_starts, sibling_url, snapshot_playlist,
-        wants_hls_transcode,
+        CDN_MEZON_MINIO, HLS_TRANSCODE_MIN_SIZE, TRANSCODING_ORIGINS, download_parts,
+        has_turned_video_track, hls_playlist_candidate, hls_playlist_on, index_playlist_candidate,
+        ingest_playlist_on, may_be_transcoded, safe_resume_point, segment_starts, sibling_url,
+        snapshot_playlist, wants_hls_transcode,
     };
 
     const VIDEO: &str = "1cf93b197d401000/2080000000000000001_clip.mp4";
@@ -696,5 +742,65 @@ mod tests {
         assert_eq!(safe_resume_point(5.5, &starts), 5.5);
         assert_eq!(safe_resume_point(0.0, &starts), 0.0);
         assert_eq!(safe_resume_point(11.5, &starts), 11.5);
+    }
+
+    #[test]
+    fn download_parts_resolves_init_and_segments_from_finished_ingest_playlist() {
+        let playlist = "https://cdn.mezon.ai/hls/1cf9/208_clip.mp4/index.m3u8?probe=123";
+        let finished = "#EXTM3U\n#EXT-X-VERSION:7\n#EXT-X-TARGETDURATION:4\n#EXT-X-MEDIA-SEQUENCE:0\n#EXT-X-PLAYLIST-TYPE:EVENT\n#EXT-X-MAP:URI=\"init.mp4\"\n\n#EXTINF:4.000,\nseg00000.m4s\n#EXTINF:4.000,\nseg00001.m4s\n#EXTINF:2.500,\nseg00002.m4s\n#EXT-X-ENDLIST\n";
+        assert_eq!(
+            download_parts(playlist, finished),
+            Some(vec![
+                "https://cdn.mezon.ai/hls/1cf9/208_clip.mp4/init.mp4".to_string(),
+                "https://cdn.mezon.ai/hls/1cf9/208_clip.mp4/seg00000.m4s".to_string(),
+                "https://cdn.mezon.ai/hls/1cf9/208_clip.mp4/seg00001.m4s".to_string(),
+                "https://cdn.mezon.ai/hls/1cf9/208_clip.mp4/seg00002.m4s".to_string(),
+            ])
+        );
+    }
+
+    #[test]
+    fn download_parts_rejects_unfinished_master_or_mapless_playlists_and_keeps_absolute_uris() {
+        let playlist = "https://cdn.mezon.ai/hls/1cf9/208_clip.mp4/index.m3u8";
+        assert_eq!(download_parts(playlist, INDEX), None);
+        assert_eq!(download_parts(playlist, MASTER), None);
+        assert_eq!(
+            download_parts(
+                playlist,
+                "#EXTM3U\n#EXT-X-MAP:URI=\"init.mp4\"\n#EXT-X-STREAM-INF:BANDWIDTH=1000\nseg0.m4s\n#EXT-X-ENDLIST\n"
+            ),
+            None
+        );
+        assert_eq!(
+            download_parts(
+                playlist,
+                "#EXTM3U\n#EXTINF:4.0,\nseg00000.m4s\n#EXT-X-ENDLIST\n"
+            ),
+            None
+        );
+        assert_eq!(
+            download_parts(
+                playlist,
+                "#EXTM3U\n#EXT-X-MAP:URI=\"init.mp4\"\n#EXT-X-MAP:URI=\"init2.mp4\"\n#EXTINF:4.0,\nseg0.m4s\n#EXT-X-ENDLIST\n"
+            ),
+            None
+        );
+        assert_eq!(
+            download_parts(
+                playlist,
+                "#EXTM3U\n#EXT-X-MAP:URI=\"init.mp4\"\n#EXT-X-ENDLIST\n"
+            ),
+            None
+        );
+        assert_eq!(
+            download_parts(
+                playlist,
+                "#EXTM3U\n#EXT-X-MAP:URI=\"init.mp4\"\n#EXTINF:4.0,\nhttps://other.cdn.example/seg00000.m4s\n#EXT-X-ENDLIST\n"
+            ),
+            Some(vec![
+                "https://cdn.mezon.ai/hls/1cf9/208_clip.mp4/init.mp4".to_string(),
+                "https://other.cdn.example/seg00000.m4s".to_string(),
+            ])
+        );
     }
 }

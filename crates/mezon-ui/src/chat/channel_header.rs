@@ -263,19 +263,19 @@ impl ChannelHeader {
         let icon_color = theme.tokens.bg_icon_theme;
         let icon_active = theme.text_primary;
         let bell_icon = if self.muted {
-            IconName::MuteBell
+            IconName::BellOff
         } else {
             IconName::Bell
         };
         let channel_only_actions = [
-            ("hdr-canvas", IconName::CanvasIcon),
+            ("hdr-canvas", IconName::Canvas),
             ("hdr-timeline", IconName::History),
-            ("hdr-thread", IconName::ThreadIcon),
-            ("hdr-members", IconName::MemberList),
-            ("hdr-pin", IconName::PinRight),
+            ("hdr-thread", IconName::Thread),
+            ("hdr-members", IconName::Members),
+            ("hdr-pin", IconName::Pin),
             ("hdr-bell", bell_icon),
-            ("hdr-gallery", IconName::ImageThumbnail),
-            ("hdr-files", IconName::FileIcon),
+            ("hdr-gallery", IconName::FileImage),
+            ("hdr-files", IconName::File),
         ];
         let actions: &[(&str, IconName)] = if self.dm {
             dm_header_actions(DmHeaderState::from_info(self.dm_header.as_ref()))
@@ -613,7 +613,7 @@ impl ChannelHeader {
             .tooltip(Tooltip::text(tooltip))
             .occlude()
             .child(
-                Icon::new(IconName::IconAddFriendDM)
+                Icon::new(IconName::UserPlus)
                     .size(px(20.))
                     .text_color(icon_color),
             )
@@ -1002,11 +1002,7 @@ impl ChannelHeader {
                 .rounded_md()
                 .cursor_pointer()
                 .hover(|s| s.bg(theme.bg_hover))
-                .child(
-                    Icon::new(IconName::Inbox)
-                        .size(px(20.))
-                        .text_color(theme.text_muted),
-                )
+                .child(Icon::new(IconName::Inbox).size(px(20.)).selected(false))
                 .into_any_element();
         };
 
@@ -1071,36 +1067,36 @@ impl DmHeaderState {
 fn dm_header_actions(state: DmHeaderState) -> &'static [(&'static str, IconName)] {
     match state {
         DmHeaderState::Unresolved => &[
-            ("hdr-add-members", IconName::IconAddFriendDM),
-            ("hdr-members", IconName::MemberList),
-            ("hdr-pin", IconName::PinRight),
+            ("hdr-add-members", IconName::UserPlus),
+            ("hdr-members", IconName::Members),
+            ("hdr-pin", IconName::Pin),
         ],
         DmHeaderState::OneToOne => &[
-            ("hdr-call", IconName::IconPhoneDM),
-            ("hdr-video-call", IconName::IconMeetDM),
-            ("hdr-pin", IconName::PinRight),
-            ("hdr-add-members", IconName::IconAddFriendDM),
-            ("hdr-members", IconName::IconUserProfileDM),
-            ("hdr-gallery", IconName::ImageThumbnail),
-            ("hdr-files", IconName::FileIcon),
+            ("hdr-call", IconName::Call),
+            ("hdr-video-call", IconName::Video),
+            ("hdr-pin", IconName::Pin),
+            ("hdr-add-members", IconName::UserPlus),
+            ("hdr-members", IconName::UserCircle),
+            ("hdr-gallery", IconName::FileImage),
+            ("hdr-files", IconName::File),
         ],
         DmHeaderState::OneToOneBlocked => &[
-            ("hdr-pin", IconName::PinRight),
-            ("hdr-gallery", IconName::ImageThumbnail),
-            ("hdr-files", IconName::FileIcon),
+            ("hdr-pin", IconName::Pin),
+            ("hdr-gallery", IconName::FileImage),
+            ("hdr-files", IconName::File),
         ],
         DmHeaderState::SelfChat => &[
-            ("hdr-pin", IconName::PinRight),
-            ("hdr-members", IconName::IconUserProfileDM),
-            ("hdr-gallery", IconName::ImageThumbnail),
-            ("hdr-files", IconName::FileIcon),
+            ("hdr-pin", IconName::Pin),
+            ("hdr-members", IconName::UserCircle),
+            ("hdr-gallery", IconName::FileImage),
+            ("hdr-files", IconName::File),
         ],
         DmHeaderState::Group => &[
-            ("hdr-add-members", IconName::IconAddFriendDM),
-            ("hdr-members", IconName::MemberList),
-            ("hdr-pin", IconName::PinRight),
-            ("hdr-gallery", IconName::ImageThumbnail),
-            ("hdr-files", IconName::FileIcon),
+            ("hdr-add-members", IconName::UserPlus),
+            ("hdr-members", IconName::Members),
+            ("hdr-pin", IconName::Pin),
+            ("hdr-gallery", IconName::FileImage),
+            ("hdr-files", IconName::File),
         ],
     }
 }
@@ -1305,7 +1301,7 @@ impl ChatHeader {
         let blocked_by_me = dm.peer_user_id.is_some_and(|peer| {
             !is_group
                 && FriendStore::try_global(cx)
-                    .is_some_and(|store| store.read(cx).is_user_blocked_by_me(peer, cx))
+                    .is_some_and(|store| store.read(cx).is_blocked_with(peer))
         });
         let presence = dm_peer_presence(dm, cx);
         let avatar_src = if dm.avatar.is_empty() {
@@ -1587,7 +1583,7 @@ impl Render for ChatHeader {
             .offset(point(px(0.), px(HEADER_POPOVER_Y_OFFSET)))
             .trigger(HeaderPopoverTrigger::new(
                 "hdr-gallery",
-                IconName::ImageThumbnail,
+                IconName::FileImage,
                 &theme,
                 gallery_tooltip,
             ))
@@ -1626,7 +1622,7 @@ impl Render for ChatHeader {
             })
             .trigger(HeaderPopoverTrigger::new(
                 "hdr-files",
-                IconName::FileIcon,
+                IconName::File,
                 &theme,
                 files_tooltip,
             ))
@@ -1824,7 +1820,7 @@ impl RenderOnce for AddFriendsPopoverTrigger {
             .hover(move |s| s.bg(bg_hover))
             .tooltip(Tooltip::text(self.tooltip))
             .child(
-                Icon::new(IconName::IconAddFriendDM)
+                Icon::new(IconName::UserPlus)
                     .size(px(20.))
                     .text_color(self.icon_color),
             )
@@ -1892,11 +1888,7 @@ impl RenderOnce for ThreadPopoverTrigger {
             .cursor_pointer()
             .hover(move |s| s.bg(bg_hover))
             .occlude()
-            .child(
-                Icon::new(IconName::ThreadIcon)
-                    .size(px(20.))
-                    .text_color(tint),
-            );
+            .child(Icon::new(IconName::Thread).size(px(20.)).text_color(tint));
         if self.open {
             button = button.bg(self.bg_active);
         }
@@ -2061,7 +2053,7 @@ impl RenderOnce for PinPopoverTrigger {
             .child(
                 div()
                     .relative()
-                    .child(Icon::new(IconName::PinRight).size(px(20.)).text_color(tint))
+                    .child(Icon::new(IconName::Pin).size(px(20.)).text_color(tint))
                     .when(self.show_badge, |d| {
                         d.child(
                             div()
@@ -2126,7 +2118,7 @@ impl RenderOnce for CanvasPopoverTrigger {
         let mut button = Button::new("hdr-canvas-trigger")
             .with_size(Size::Small)
             .icon(
-                Icon::new(IconName::CanvasIcon)
+                Icon::new(IconName::Canvas)
                     .size(px(20.))
                     .text_color(self.icon_color),
             );
@@ -2265,7 +2257,7 @@ impl NotificationSettingTrigger {
     fn new(theme: &Theme, muted: bool) -> Self {
         Self {
             icon: if muted {
-                IconName::MuteBell
+                IconName::BellOff
             } else {
                 IconName::Bell
             },

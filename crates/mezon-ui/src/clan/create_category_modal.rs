@@ -214,11 +214,7 @@ impl Render for CreateCategoryModal {
                             .on_click(|_, _, cx| {
                                 Shell::global(cx).update(cx, |shell, cx| shell.close_modal(cx));
                             })
-                            .child(
-                                Icon::new(IconName::Close)
-                                    .size(px(22.))
-                                    .text_color(theme.text_secondary),
-                            ),
+                            .child(Icon::new(IconName::Close).size(px(24.)).selected(false)),
                     ),
             )
             .child(

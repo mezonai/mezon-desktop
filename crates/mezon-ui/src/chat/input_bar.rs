@@ -5,8 +5,10 @@ use crate::chat::quick_replies::{
 };
 use crate::chat::{MentionInput, ReplyTarget};
 use crate::components::primitives::{Icon, IconName};
+
 use crate::image_cache::LruImageCache;
 use crate::theme::{ActiveTheme, Theme};
+use crate::util::theme::theme_is_light;
 use gpui::{
     Context, Entity, FontWeight, ObjectFit, Render, SharedString, Subscription, Task, Window, div,
     img, prelude::*, px, radians, rgb,
@@ -200,6 +202,8 @@ impl InputBar {
         target: &ReplyTarget,
         reply_clear: ReplyClearSource,
     ) -> impl IntoElement {
+        let surface = theme.tokens.bg_surface;
+
         div()
             .id("reply-preview-bar")
             .flex()
@@ -211,6 +215,12 @@ impl InputBar {
             .rounded_tl_lg()
             .rounded_tr_lg()
             .bg(theme.tokens.theme_setting_nav)
+            .when(theme_is_light(theme), |bar| {
+                bar.bg(surface.blend(theme.tokens.bg_input_secondary))
+                    .border_t_1()
+                    .border_x_1()
+                    .border_color(theme.tokens.border_primary)
+            })
             .text_size(px(14.))
             .child(
                 div()
@@ -247,7 +257,7 @@ impl InputBar {
                     })
                     .child(
                         Icon::new(IconName::Close)
-                            .size_4()
+                            .size(px(16.))
                             .text_color(theme.tokens.text_theme_primary),
                     ),
             )
@@ -386,11 +396,7 @@ impl InputBar {
                     .rounded(px(4.))
                     .cursor_pointer()
                     .hover(|s| s.bg(theme.bg_hover))
-                    .child(
-                        Icon::new(IconName::Close)
-                            .size(px(14.))
-                            .text_color(theme.text_muted),
-                    )
+                    .child(Icon::new(IconName::Close).size(px(16.)).selected(false))
                     .on_click(cx.listener(|this, _event, _window, cx| {
                         this.mention_input
                             .update(cx, |input, cx| input.clear_ogp_preview(cx));
@@ -479,8 +485,8 @@ impl InputBar {
                             .when(anonymous, |composer| {
                                 composer.child(
                                     div().absolute().top(px(-12.)).right(px(-12.)).child(
-                                        Icon::new(IconName::HatIcon)
-                                            .size(px(28.))
+                                        Icon::new(IconName::Anonymous)
+                                            .size(px(32.))
                                             .text_color(theme.tokens.text_theme_primary)
                                             .with_transformation(gpui::Transformation::rotate(
                                                 radians(std::f32::consts::FRAC_PI_4),

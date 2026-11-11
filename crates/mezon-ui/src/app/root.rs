@@ -505,7 +505,6 @@ impl RootView {
             Route::SettingsNotifications => crate::settings::SettingsPage::Notifications,
             Route::SettingsLanguage => crate::settings::SettingsPage::Language,
             Route::SettingsVoice => crate::settings::SettingsPage::Voice,
-            Route::SettingsStreaming => crate::settings::SettingsPage::Streaming,
             Route::SettingsServer if mezon_store::RealtimeServer::is_offered(cx) => {
                 crate::settings::SettingsPage::Server
             }
@@ -639,7 +638,6 @@ impl Render for RootView {
                     | Route::SettingsNotifications
                     | Route::SettingsLanguage
                     | Route::SettingsVoice
-                    | Route::SettingsStreaming
                     | Route::SettingsServer
                     | Route::SettingsAdvanced => uncached_fill(self.settings_screen.clone()),
                     Route::ClanSettings { .. } => cached_fill(self.clan_setting_screen.clone()),
@@ -789,8 +787,8 @@ fn render_onboarding_preview_bar(clan_id: ClanId, theme: &Theme, locale: &str) -
                 .text_color(theme.text_primary)
                 .hover(|style| style.bg(theme.bg_hover))
                 .child(
-                    Icon::new(IconName::ArrowLeft)
-                        .size(px(14.))
+                    Icon::new(IconName::ChevronLeft)
+                        .size(px(16.))
                         .text_color(theme.text_primary),
                 )
                 .child(
@@ -1067,11 +1065,7 @@ fn render_not_found(theme: &Theme, locale: &str) -> gpui::AnyElement {
         .justify_center()
         .flex_col()
         .gap_4()
-        .child(
-            Icon::new(IconName::TriangleAlert)
-                .size_8()
-                .text_color(theme.text_muted),
-        )
+        .child(Icon::new(IconName::Warning).size(px(32.)).selected(false))
         .child(
             div()
                 .text_xl()

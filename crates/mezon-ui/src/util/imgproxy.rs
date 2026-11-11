@@ -70,3 +70,16 @@ pub fn emoji_url_sized(cx: &App, emoji_id: &str, size: u32) -> String {
         .map(|cfg| cfg.emoji_src_sized(emoji_id, size))
         .unwrap_or_default()
 }
+
+const PROFILE_COVER_WIDTH: u32 = 1200;
+const PROFILE_COVER_HEIGHT: u32 = 360;
+
+pub fn profile_cover_url(cx: &App, source_url: &str) -> String {
+    proxied(
+        cx,
+        source_url,
+        PROFILE_COVER_WIDTH,
+        PROFILE_COVER_HEIGHT,
+        "fill",
+    )
+}

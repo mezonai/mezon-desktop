@@ -719,8 +719,8 @@ impl RoleSettingPage {
                             )
                             .child(
                                 Icon::new(IconName::ChevronRight)
-                                    .size(px(18.0))
-                                    .text_color(theme.text_secondary),
+                                    .size(px(20.))
+                                    .selected(false),
                             ),
                     )
                     .on_click(cx.listener(|this, _, _, cx| {
@@ -977,7 +977,7 @@ impl RoleSettingPage {
                                 .opacity(0.)
                                 .group_hover(row_group.clone(), |s| s.opacity(1.))
                                 .child(
-                                    Icon::new(IconName::PenEdit)
+                                    Icon::new(IconName::Edit)
                                         .size(px(20.))
                                         .text_color(theme.text_primary),
                                 )
@@ -1010,7 +1010,7 @@ impl RoleSettingPage {
                                         .cursor_pointer()
                                         .bg(theme.danger_text)
                                         .child(
-                                            Icon::new(IconName::DeleteMessageRightClick)
+                                            Icon::new(IconName::Trash)
                                                 .size(px(20.))
                                                 .text_color(theme.text_primary),
                                         )

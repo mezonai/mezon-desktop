@@ -6,8 +6,8 @@ use std::rc::Rc;
 use gpui::{
     AnyElement, App, Bounds, CursorStyle, DispatchPhase, Element, ElementId, FontWeight,
     GlobalElementId, HighlightStyle, Hitbox, HitboxBehavior, Hsla, InspectorElementId, IntoElement,
-    LayoutId, MouseDownEvent, MouseUpEvent, Pixels, SharedString, StyledText, TextLayout,
-    TransformationMatrix, Window, point, px, size,
+    LayoutId, MouseDownEvent, MouseUpEvent, Pixels, SharedString, StyledText, TextLayout, Window,
+    point, px, size,
 };
 
 use super::selection::{SharedSelection, merge_selection_background};
@@ -54,6 +54,7 @@ pub struct ClickRegion {
 #[derive(Default)]
 struct InlineContentState {
     mouse_down_index: Rc<Cell<Option<usize>>>,
+    icon_motion: Vec<mezon_widgets::IconMotion>,
 }
 
 pub struct InlineContent {
@@ -218,7 +219,8 @@ impl Element for InlineContent {
         let text_layout = self.styled.layout().clone();
         let icons = mem::take(&mut self.icons);
         window.with_element_state::<InlineContentState, _>(global_id.unwrap(), |state, window| {
-            let state = state.unwrap_or_default();
+            let mut state = state.unwrap_or_default();
+            state.icon_motion.resize_with(icons.len(), Default::default);
 
             let mouse_position = window.mouse_position();
             window.set_cursor_style(self.cursor_style, hitbox);
@@ -286,7 +288,7 @@ impl Element for InlineContent {
                 .paint(None, inspector_id, bounds, &mut (), &mut (), window, cx);
 
             let line_height = text_layout.line_height();
-            for overlay in &icons {
+            for (overlay, motion) in icons.iter().zip(&mut state.icon_motion) {
                 let Some(start) = text_layout.position_for_index(overlay.byte_index) else {
                     continue;
                 };
@@ -331,12 +333,14 @@ impl Element for InlineContent {
                     ),
                     size: size(icon_size, icon_size),
                 };
-                let _ = window.paint_svg(
+                motion.paint(
+                    overlay.icon,
                     icon_bounds,
-                    overlay.icon.path().into(),
-                    None,
-                    TransformationMatrix::default(),
                     overlay.color,
+                    hitbox.is_hovered(window)
+                        && icon_bounds.contains(&window.mouse_position())
+                        && !cx.has_active_drag(),
+                    window,
                     cx,
                 );
             }

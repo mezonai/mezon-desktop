@@ -1028,6 +1028,7 @@ pub(crate) struct MentionMemberRaw {
     pub display_norm: String,
     pub username_norm: String,
     pub alt_norm: String,
+    pub alt_lc: String,
 }
 
 fn active_dm(cx: &App) -> Option<ChannelId> {
@@ -1053,6 +1054,7 @@ fn mention_member_raw(
         display_norm: normalize_search_string(name),
         username_norm: normalize_search_string(username),
         alt_norm: String::new(),
+        alt_lc: String::new(),
     }
 }
 
@@ -1112,6 +1114,7 @@ pub(crate) fn mention_member_from_clan_member(member: &ClanMember) -> MentionMem
     );
     if !member.clan_nick.is_empty() && !member.user.display_name.is_empty() {
         raw.alt_norm = normalize_search_string(&member.user.display_name);
+        raw.alt_lc = member.user.display_name.to_lowercase();
     }
     raw
 }
@@ -1331,7 +1334,7 @@ fn render_member(
     let dot = match crate::util::user_status::presence_badge_color(member.presence) {
         None => RowDot::None,
         Some(color) if member.presence == DmAvatarPresence::Idle => RowDot::Icon {
-            icon: IconName::DarkModeIcon,
+            icon: IconName::Moon,
             color: color.into(),
         },
         Some(color) => RowDot::Fill {
@@ -1787,18 +1790,6 @@ fn build_member_menu(args: MemberMenuArgs) -> ContextMenu {
             });
         }
 
-        if permissions.blocked_by_me {
-            menu = menu.item(t("contextMenu.member.unblock"), {
-                let panel = panel.clone();
-                move |_window: &mut Window, cx: &mut App| {
-                    FriendStore::global(cx).update(cx, |store, cx| {
-                        store.unblock_friend(user_id, cx);
-                    });
-                    close_member_menu(&panel, cx);
-                }
-            });
-        }
-
         if permissions.is_friend {
             menu = menu
                 .separator()
@@ -1827,6 +1818,28 @@ fn build_member_menu(args: MemberMenuArgs) -> ContextMenu {
                         });
                     }
                 });
+        }
+
+        if permissions.blocked_by_me {
+            menu = menu.item(t("contextMenu.member.unblock"), {
+                let panel = panel.clone();
+                move |_window: &mut Window, cx: &mut App| {
+                    FriendStore::global(cx).update(cx, |store, cx| {
+                        store.unblock_friend(user_id, cx);
+                    });
+                    close_member_menu(&panel, cx);
+                }
+            });
+        } else {
+            menu = menu.danger_item(t("contextMenu.member.block"), {
+                let panel = panel.clone();
+                move |_window: &mut Window, cx: &mut App| {
+                    FriendStore::global(cx).update(cx, |store, cx| {
+                        store.block_friend(user_id, cx);
+                    });
+                    close_member_menu(&panel, cx);
+                }
+            });
         }
     }
 

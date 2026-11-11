@@ -40,6 +40,7 @@ impl Default for MezonGrammarClient {
 
 impl MezonGrammarClient {
     pub fn new() -> Self {
+        crate::assets::prefetch_all_assets();
         Self {
             trie: WordTrie::new(),
             tokenizer: VietnameseTokenizer::new(),
@@ -60,6 +61,10 @@ impl MezonGrammarClient {
 
     pub fn restore_sentence(&self, text: &str) -> String {
         crate::neural::restore_sentence(text, true, true)
+    }
+
+    pub fn decode_teencode_diacritics(&self, text: &str) -> String {
+        crate::accent::decode_teencode_diacritics(text)
     }
 
     pub fn correct(&self, text: &str) -> CorrectionResult {

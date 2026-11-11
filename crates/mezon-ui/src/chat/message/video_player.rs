@@ -1184,7 +1184,7 @@ impl VideoPlayerView {
         let (copy_icon, copy_label) = if self.command_copied {
             (IconName::Check, "media.video.error.commandCopied")
         } else {
-            (IconName::CopyIcon, "common.copy")
+            (IconName::Copy, "common.copy")
         };
         let colors = (button_bg, title_color);
         div()
@@ -1201,8 +1201,8 @@ impl VideoPlayerView {
             .bg(SCRIM)
             .when(!compact, |card| {
                 card.child(
-                    Icon::new(IconName::TriangleAlert)
-                        .size(px(22.))
+                    Icon::new(IconName::Warning)
+                        .size(px(24.))
                         .text_color(body_color),
                 )
                 .child(
@@ -1261,7 +1261,7 @@ impl VideoPlayerView {
                     .when(missing_plugin && self.owns_player(), |row| {
                         row.child(card_button(
                             "video-unplayable-retry",
-                            IconName::ReloadIcon,
+                            IconName::Refresh,
                             mezon_i18n::t(locale, "media.video.error.retryButton"),
                             colors,
                             compact,
@@ -1330,19 +1330,19 @@ impl VideoPlayerView {
         };
         let label = self.time_label.clone();
         let play_icon = if playing {
-            IconName::PauseButton
+            IconName::Pause
         } else {
-            IconName::PlayButton
+            IconName::Play
         };
         let mute_icon = if muted {
-            IconName::MutedVolume
+            IconName::SpeakerOff
         } else {
-            IconName::LoudVolume
+            IconName::Speaker
         };
         let last_icon = if theater {
-            IconName::ExitFullScreen
+            IconName::FullscreenExit
         } else {
-            IconName::FullScreen
+            IconName::Fullscreen
         };
         div()
             .absolute()

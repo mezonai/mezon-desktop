@@ -102,7 +102,6 @@ fn neural_accent_restores_minh_sua_roi_nhe() {
 #[test]
 fn test_neural_model_called_after_pipeline_for_final_spelling_result() {
     let client = MezonGrammarClient::new();
-    // Partially accented or unaccented phrase where neural model completes diacritics
     let res = client.correct("anh em gio trao doi o day nhe");
     assert!(
         res.edits
@@ -117,13 +116,19 @@ fn test_neural_model_called_after_pipeline_for_final_spelling_result() {
 #[test]
 fn test_model2_precision_collocations() {
     let client = MezonGrammarClient::new();
-    let res1 = client.correct("tho lanh nghe cung duoc sang loc ky hon").corrected;
+    let res1 = client
+        .correct("tho lanh nghe cung duoc sang loc ky hon")
+        .corrected;
     assert!(res1.to_lowercase().contains("thợ lành nghề"));
 
-    let res2 = client.correct("cac tu lieu hoc tap: phieu hoc tap").corrected;
+    let res2 = client
+        .correct("cac tu lieu hoc tap: phieu hoc tap")
+        .corrected;
     assert!(res2.to_lowercase().contains("tư liệu học tập"));
 
-    let res3 = client.correct("doanh nghiep co gang dam phan de co loi nhat").corrected;
+    let res3 = client
+        .correct("doanh nghiep co gang dam phan de co loi nhat")
+        .corrected;
     assert!(res3.to_lowercase().contains("cố gắng đàm phán"));
 
     let res4 = client.correct("goc giua chung bang 90 do").corrected;
@@ -134,28 +139,149 @@ fn test_model2_precision_collocations() {
 fn test_restore_sentence_tab_prediction() {
     let client = MezonGrammarClient::new();
 
-    // 1. Homophone sentence with start capitalization
     let s1 = "tuoi tac tang len dong nghia voi viec the luc dang di xuong.";
     let res1 = client.restore_sentence(s1);
     assert!(res1.contains("thể lực đang đi xuống"));
     assert!(res1.starts_with("Tuổi tác"));
 
-    // 2. Chat question with 'còn bạn ở đâu?'
     let s2 = "toi o ha noi, con ban o dau?";
     let res2 = client.restore_sentence(s2);
     assert!(res2.contains("còn bạn ở đâu?"));
     assert!(res2.starts_with("Tôi"));
 
-    // 3. Proverb with teencode: 'ko co viec j kho, chi so long khong ben.'
     let s3 = "ko co viec j kho, chi so long khong ben.";
     let res3 = client.restore_sentence(s3);
     assert!(res3.contains("Không có việc gì khó") || res3.contains("không có việc gì khó"));
     assert!(res3.contains("chỉ sợ lòng không bền"));
 
-    // 4. Ultra-long sentence (> 150 characters) without truncation
     let s4 = "tuoi tac tang len dong nghia voi viec the luc dang di xuong va chung ta can phai tap luyen the duc the thao thuong xuyen de duy tri suc khoe tot nhat cho ban than";
     let res4 = client.restore_sentence(s4);
     assert!(res4.contains("thể lực đang đi xuống"));
     assert!(res4.contains("cho bạn thân") || res4.contains("cho bản thân"));
     assert!(res4.starts_with("Tuổi tác"));
+}
+
+#[test]
+fn test_download_only_when_config_enabled() {
+    let temp = std::env::temp_dir().join(format!("mezon_test_cfg_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&temp);
+    unsafe {
+        std::env::set_var("MEZON_GRAMMAR_DIR", &temp);
+    }
+
+    mezon_grammar::set_download_enabled(false);
+    assert!(!mezon_grammar::is_download_enabled());
+    let missing = mezon_grammar::assets::load_asset_bytes(mezon_grammar::assets::CONFIG_FILE);
+    assert!(missing.is_none());
+    assert!(!temp.join(mezon_grammar::assets::CONFIG_FILE).is_file());
+
+    mezon_grammar::set_download_enabled(true);
+    assert!(mezon_grammar::is_download_enabled());
+    let loaded = mezon_grammar::assets::load_asset_str(mezon_grammar::assets::CONFIG_FILE);
+    assert!(loaded.is_some());
+    assert!(temp.join(mezon_grammar::assets::CONFIG_FILE).is_file());
+
+    let _ = std::fs::remove_dir_all(&temp);
+    unsafe {
+        std::env::remove_var("MEZON_GRAMMAR_DIR");
+    }
+}
+
+#[test]
+fn test_syllable_vocab_download_and_loading() {
+    assert_eq!(mezon_grammar::SYLLABLE_VOCAB_FILE, "syllable_vocab.json");
+    let loaded = mezon_grammar::assets::load_asset_str(mezon_grammar::SYLLABLE_VOCAB_FILE);
+    assert!(
+        loaded.is_some(),
+        "syllable_vocab.json should be loaded/downloadable"
+    );
+    assert!(mezon_grammar::is_valid_syllable_vocab("người"));
+    assert!(mezon_grammar::is_valid_syllable_vocab("việt"));
+    assert!(mezon_grammar::is_valid_syllable_vocab("nam"));
+    let cands = mezon_grammar::candidates_for_syllable("muon");
+    assert!(cands.is_some());
+    let list = cands.unwrap();
+    assert!(list.iter().any(|s| s == "muốn"));
+}
+
+#[test]
+fn test_model2_mined_pairs() {
+    let client = MezonGrammarClient::new();
+    assert!(
+        client
+            .correct("16 máu")
+            .corrected
+            .to_lowercase()
+            .contains("16 màu")
+    );
+    assert!(
+        client
+            .correct("be thui")
+            .corrected
+            .to_lowercase()
+            .contains("bê thui")
+    );
+    assert!(
+        client
+            .correct("bo xung")
+            .corrected
+            .to_lowercase()
+            .contains("bổ sung")
+    );
+    assert!(
+        client
+            .correct("con luon")
+            .corrected
+            .to_lowercase()
+            .contains("con lươn")
+    );
+    assert!(
+        client
+            .correct("chuan doan")
+            .corrected
+            .to_lowercase()
+            .contains("chẩn đoán")
+    );
+    assert!(
+        client
+            .correct("xap sep")
+            .corrected
+            .to_lowercase()
+            .contains("sắp xếp")
+    );
+}
+
+#[test]
+fn test_teencode_diacritics_restoration() {
+    assert_eq!(mezon_grammar::decode_teencode_diacritics("o^"), "ô");
+    assert_eq!(mezon_grammar::decode_teencode_diacritics("o+"), "ơ");
+    assert_eq!(mezon_grammar::decode_teencode_diacritics("a^"), "â");
+    assert_eq!(mezon_grammar::decode_teencode_diacritics("e~"), "ẽ");
+    assert_eq!(mezon_grammar::decode_teencode_diacritics("e."), "ẹ");
+
+    assert_eq!(mezon_grammar::decode_teencode_diacritics("to+'i"), "tới");
+    assert_eq!(mezon_grammar::decode_teencode_diacritics("to+i'"), "tới");
+    assert_eq!(mezon_grammar::decode_teencode_diacritics("to^'i"), "tối");
+    assert_eq!(mezon_grammar::decode_teencode_diacritics("to^.i"), "tội");
+    assert_eq!(mezon_grammar::decode_teencode_diacritics("me. oi"), "mẹ oi");
+    assert_eq!(mezon_grammar::decode_teencode_diacritics("ba.n"), "bạn");
+    assert_eq!(mezon_grammar::decode_teencode_diacritics("e?"), "ẻ");
+}
+
+#[test]
+fn test_telecom_voip_call_sentence_restoration() {
+    let client = MezonGrammarClient::new();
+    let s_teencode = "Vua co call 1-1 to+'i. Ca mobile la^n~ desktop do^? chuong. Anh bat may tren mobile. Desktop ta(t' chuong, mobile nghe binh thuong. Good!!!!";
+    let res = client.restore_sentence(s_teencode);
+    let expected = "Vừa có call 1-1 tới. Cả mobile lẫn desktop đổ chuông. Anh bật máy trên mobile. Desktop tắt chuông, mobile nghe bình thường. Good!!!!";
+    assert_eq!(res, expected);
+
+    let res1 = client.restore_sentence("to^i muon an com");
+    assert_eq!(res1, "Tôi muốn ăn cơm");
+
+    let res2 = client.restore_sentence("to^'i muon an com");
+    assert_eq!(res2, "Tối muốn ăn cơm");
+
+    let res3 = client.restore_sentence("to^.i nghiep chu' meo");
+    assert_eq!(res3, "Tội nghiệp chú mèo");
 }
