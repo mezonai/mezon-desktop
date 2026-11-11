@@ -19,7 +19,7 @@ use mezon_client::transport::{
     OutgoingReply, PresignMarkers, SHARE_CONTACT_CODE, build_send_content,
     build_send_content_with_code, build_share_contact_content_json, detect_markdown,
     emoji_content_tokens, hashtag_content_tokens, is_here_user_id, markdown_content_tokens,
-    mention_content_tokens, with_create_time_seconds,
+    mention_content_tokens, strip_markdown, with_create_time_seconds,
 };
 use mezon_client::{
     ApiStatusError, AppApi, AttachmentUploadOutcome, ConnectionStatus, InboxCategory,
@@ -10712,11 +10712,11 @@ fn text_to_spans(text: &str) -> Vec<MessageSpan> {
     if text.is_empty() {
         return Vec::new();
     }
-    let markdowns = detect_markdown(text);
+    let stripped = strip_markdown(text);
     // Embed bodies stay inline. React only runs its social-link classifier over message content,
     // so a YouTube URL in a description is a link there, not the block-level card the classified
     // kinds would render inside the embed's column.
-    let mk = markdown_content_tokens(&markdowns)
+    let mk = markdown_content_tokens(&stripped.markdowns)
         .into_iter()
         .map(|mut tok| {
             if tok
@@ -10730,7 +10730,7 @@ fn text_to_spans(text: &str) -> Vec<MessageSpan> {
         })
         .collect();
     parse_spans(&ApiMessageContent {
-        t: text.to_string(),
+        t: stripped.text,
         mk,
         ..Default::default()
     })
@@ -13683,6 +13683,39 @@ mod tests {
                 }
             )),
             "an embed description renders inline, so it must not classify a social card"
+        );
+    }
+
+    #[test]
+    fn text_to_spans_strips_inline_style_markers() {
+        let nested = text_to_spans("**a ~~b~~ c**");
+        assert_eq!(
+            nested,
+            vec![
+                MessageSpan::Bold("a ".into()),
+                MessageSpan::Styled {
+                    text: "b".into(),
+                    style: crate::message::InlineStyle {
+                        bold: true,
+                        italic: false,
+                        strike: true,
+                    },
+                },
+                MessageSpan::Bold(" c".into()),
+            ]
+        );
+
+        let italic = text_to_spans("*x*");
+        assert_eq!(
+            italic,
+            vec![MessageSpan::Styled {
+                text: "x".into(),
+                style: crate::message::InlineStyle {
+                    bold: false,
+                    italic: true,
+                    strike: false,
+                },
+            }]
         );
     }
 

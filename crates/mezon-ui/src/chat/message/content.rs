@@ -4,10 +4,10 @@ use std::rc::Rc;
 use std::sync::Arc;
 
 use gpui::{
-    AnyElement, App, Bounds, DefiniteLength, DevicePixels, Entity, FontWeight, HighlightStyle,
-    Hsla, ImageSource, Img, InteractiveText, ObjectFit, Pixels, Resource, SharedString, Size,
-    StyledText, TextLayout, UnderlineStyle, canvas, div, fill, img, point, prelude::*, px,
-    relative, rems, rgb, rgba, size,
+    AnyElement, App, Bounds, DefiniteLength, DevicePixels, Entity, FontStyle, FontWeight,
+    HighlightStyle, Hsla, ImageSource, Img, InteractiveText, ObjectFit, Pixels, Resource,
+    SharedString, Size, StrikethroughStyle, StyledText, TextLayout, UnderlineStyle, canvas, div,
+    fill, img, point, prelude::*, px, relative, rems, rgb, rgba, size,
 };
 use mezon_store::{
     AppConfig, ChannelId, ChannelList, ChannelType, ClanId, ClanList, Embed, HashtagMeta, LinkKind,
@@ -348,6 +348,15 @@ pub(crate) fn rich_run_highlight(kind: RichRunKind, palette: &RichRunPalette) ->
     match kind {
         RichRunKind::Bold => HighlightStyle {
             font_weight: Some(FontWeight::BOLD),
+            ..Default::default()
+        },
+        RichRunKind::Styled(style) => HighlightStyle {
+            font_weight: style.bold.then_some(FontWeight::BOLD),
+            font_style: style.italic.then_some(FontStyle::Italic),
+            strikethrough: style.strike.then_some(StrikethroughStyle {
+                thickness: px(1.),
+                color: None,
+            }),
             ..Default::default()
         },
         RichRunKind::Code => HighlightStyle {
@@ -855,6 +864,36 @@ fn render_selectable_segmented_spans(
                 }
                 base = end;
             }
+            MessageSpan::Styled { text, style } => {
+                let end = base + text.len();
+                for piece in memoized_selectable_text_pieces(text, ctx).iter() {
+                    match piece {
+                        CachedSelectableTextPiece::LineBreak => {
+                            row = row.child(div().w_full().h_0())
+                        }
+                        CachedSelectableTextPiece::EmptyLine => {
+                            row = row.child(div().w_full().child(SharedString::default()))
+                        }
+                        CachedSelectableTextPiece::Text { text, range } => {
+                            let start = base + range.start;
+                            let styled =
+                                selectable_segment_shared(text.clone(), start, selected.as_ref());
+                            segments.push(TextSegment::text(
+                                styled.layout().clone(),
+                                start..start + text.len(),
+                            ));
+                            row = row.child(
+                                div()
+                                    .when(style.bold, |d| d.font_weight(FontWeight::BOLD))
+                                    .when(style.italic, |d| d.italic())
+                                    .when(style.strike, |d| d.line_through())
+                                    .child(styled),
+                            );
+                        }
+                    }
+                }
+                base = end;
+            }
             MessageSpan::Code(text) => {
                 let end = base + text.len();
                 let styled = selectable_segment(text, base, selected.as_ref());
@@ -1216,9 +1255,10 @@ fn selectable_spans_walk(
     let mut text = String::new();
     for span in spans {
         match span {
-            MessageSpan::Text(value) | MessageSpan::Bold(value) | MessageSpan::Code(value) => {
-                text.push_str(value)
-            }
+            MessageSpan::Text(value)
+            | MessageSpan::Bold(value)
+            | MessageSpan::Styled { text: value, .. }
+            | MessageSpan::Code(value) => text.push_str(value),
             MessageSpan::CodeBlock { text: value, .. }
             | MessageSpan::Link { text: value, .. }
             | MessageSpan::Emoji { name: value, .. }
@@ -1906,6 +1946,16 @@ fn append_span(
                 .max_w_full()
                 .min_w_0()
                 .font_weight(FontWeight::BOLD)
+                .text_color(body_color)
+                .child(text.clone()),
+        ),
+        MessageSpan::Styled { text, style } => row.child(
+            div()
+                .max_w_full()
+                .min_w_0()
+                .when(style.bold, |d| d.font_weight(FontWeight::BOLD))
+                .when(style.italic, |d| d.italic())
+                .when(style.strike, |d| d.line_through())
                 .text_color(body_color)
                 .child(text.clone()),
         ),
