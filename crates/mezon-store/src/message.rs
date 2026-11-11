@@ -1082,6 +1082,13 @@ fn parse_spans_with_source(
         }
         String::from_utf16_lossy(&units[s..e])
     };
+    let snap = |s: i64, e: i64| -> (i64, i64) {
+        let is_low = |i: i64| i > 0 && i < total && (0xDC00..=0xDFFF).contains(&units[i as usize]);
+        (
+            if is_low(s) { s - 1 } else { s },
+            if is_low(e) { e + 1 } else { e },
+        )
+    };
 
     #[derive(Clone, Copy)]
     enum Kind {
@@ -1095,8 +1102,7 @@ fn parse_spans_with_source(
     let collect =
         |list: &[ContentToken], kind: Kind, toks: &mut Vec<(i64, i64, Kind, ContentToken)>| {
             for t in list {
-                let s = t.s.unwrap_or(0);
-                let e = t.e.unwrap_or(0);
+                let (s, e) = snap(t.s.unwrap_or(0), t.e.unwrap_or(0));
                 if e > s {
                     toks.push((s, e, kind, t.clone()));
                 }
@@ -1107,8 +1113,7 @@ fn parse_spans_with_source(
     collect(&content.ej, Kind::Emoji, &mut toks);
     collect(&content.mk, Kind::Markdown, &mut toks);
     for t in &content.lk {
-        let s = t.s.unwrap_or(0);
-        let e = t.e.unwrap_or(0);
+        let (s, e) = snap(t.s.unwrap_or(0), t.e.unwrap_or(0));
         if e > s {
             let text = slice(s, e);
             let target = resolve_link_url(t.url.as_deref().unwrap_or(""), &text);
@@ -3257,6 +3262,26 @@ mod tests {
                 user_id: Some("1".into()),
                 role_id: None,
             })
+        );
+    }
+
+    #[test]
+    fn parse_spans_does_not_split_emoji_in_mention() {
+        let content = ApiMessageContent {
+            t: "@duoc 🐲".into(),
+            mentions: vec![ContentToken {
+                user_id: Some("1".into()),
+                ..token(0, 7)
+            }],
+            ..Default::default()
+        };
+        assert_eq!(
+            parse_spans(&content),
+            vec![MessageSpan::Mention {
+                display: "@duoc 🐲".into(),
+                user_id: Some("1".into()),
+                role_id: None,
+            }]
         );
     }
 
