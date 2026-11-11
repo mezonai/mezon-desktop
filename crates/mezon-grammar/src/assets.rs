@@ -29,7 +29,6 @@ static DOWNLOAD_ENABLED: AtomicBool = AtomicBool::new(true);
 #[cfg(not(test))]
 static DOWNLOAD_ENABLED: AtomicBool = AtomicBool::new(false);
 
-/// Enables or disables downloading grammar assets from the CDN.
 pub fn set_download_enabled(enabled: bool) {
     DOWNLOAD_ENABLED.store(enabled, Ordering::SeqCst);
     if !enabled {
@@ -37,7 +36,6 @@ pub fn set_download_enabled(enabled: bool) {
     }
 }
 
-/// Returns true if downloading from the CDN is enabled by configuration.
 pub fn is_download_enabled() -> bool {
     if std::env::var_os("MEZON_GRAMMAR_DOWNLOAD").is_some() {
         return true;
@@ -45,7 +43,6 @@ pub fn is_download_enabled() -> bool {
     DOWNLOAD_ENABLED.load(Ordering::SeqCst)
 }
 
-/// Returns the directory used for caching grammar models and vocabularies on disk.
 pub fn cache_dir() -> PathBuf {
     if let Ok(dir) = std::env::var("MEZON_GRAMMAR_DIR") {
         let path = PathBuf::from(dir);
@@ -58,7 +55,6 @@ pub fn cache_dir() -> PathBuf {
         .unwrap_or_else(|| std::env::temp_dir().join("mezon").join("grammar"))
 }
 
-/// Returns the base CDN URL for downloading grammar assets.
 pub fn cdn_base_url() -> String {
     std::env::var("MEZON_GRAMMAR_CDN_URL")
         .unwrap_or_else(|_| DEFAULT_CDN_BASE_URL.to_string())
@@ -66,7 +62,6 @@ pub fn cdn_base_url() -> String {
         .to_string()
 }
 
-/// Check if a local copy exists (e.g., during tests or development).
 fn find_local_fallback(filename: &str) -> Option<PathBuf> {
     if let Ok(manifest) = std::env::var("CARGO_MANIFEST_DIR") {
         let p = PathBuf::from(manifest).join("assets").join(filename);
@@ -96,8 +91,6 @@ fn find_external_fallback(filename: &str) -> Option<PathBuf> {
     None
 }
 
-/// Run an operation inside a dedicated OS thread with its own single-threaded tokio runtime.
-/// This prevents "Cannot start a runtime from within a runtime" errors if called from an async thread.
 fn run_in_dedicated_thread<F, T>(f: F) -> Result<T, String>
 where
     F: FnOnce() -> Result<T, String> + Send + 'static,
@@ -111,7 +104,6 @@ where
         .map_err(|_| "Download thread panicked".to_string())?
 }
 
-/// Downloads an asset from the CDN.
 fn download_from_cdn(filename: &str) -> Result<Vec<u8>, String> {
     let url = format!("{}/{}", cdn_base_url(), filename);
     tracing::info!("Downloading grammar asset from CDN: {url}");
@@ -154,7 +146,6 @@ fn save_asset_to_disk(dir: &Path, filename: &str, bytes: &[u8]) -> std::io::Resu
     std::fs::rename(&tmp, &target)
 }
 
-/// Loads asset bytes from the local disk cache, or downloads it from the CDN if not yet cached.
 pub fn load_asset_bytes(filename: &str) -> Option<Vec<u8>> {
     let dir = cache_dir();
     let cached_path = dir.join(filename);
@@ -203,13 +194,11 @@ pub fn load_asset_bytes(filename: &str) -> Option<Vec<u8>> {
     }
 }
 
-/// Loads asset text from disk cache, or downloads it from the CDN.
 pub fn load_asset_str(filename: &str) -> Option<String> {
     let bytes = load_asset_bytes(filename)?;
     String::from_utf8(bytes).ok()
 }
 
-/// Starts prefetching all grammar assets in a background thread if enabled and not already started.
 pub fn prefetch_all_assets() {
     if !is_download_enabled() {
         return;
@@ -230,7 +219,6 @@ pub fn prefetch_all_assets() {
         .ok();
 }
 
-/// Ensures all assets are present in the disk cache, downloading missing ones synchronously.
 pub fn ensure_all_assets_cached() -> bool {
     ALL_ASSETS
         .iter()

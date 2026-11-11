@@ -297,7 +297,6 @@ pub fn quick_replies_with_intent(
         return Vec::new();
     };
 
-    // 100% correct suggestion rule: only show suggestions if intent confidence rounds to 100%
     let conf_100 = (d.intent.confidence * 100.0).round() >= (INTENT_MIN_CONFIDENCE * 100.0).round();
     if !conf_100
         || matches!(
