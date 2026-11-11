@@ -1605,6 +1605,7 @@ fn pin_wrap_selectable_link(
         .text_sm()
         .line_height(rems(1.25))
         .text_color(link_color)
+        .underline()
         .on_click(move |_, _, cx| {
             if selection_gate
                 .as_ref()
