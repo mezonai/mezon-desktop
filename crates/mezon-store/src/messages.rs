@@ -9325,9 +9325,6 @@ fn merge_message_update(existing: &mut Message, incoming: &Message) {
     } else if !existing.code.is_user_timeline() {
         existing.code = MessageCode::Chat;
     }
-    if existing.location.is_none() {
-        existing.location = incoming.display_location();
-    }
 }
 
 fn patch_reply_previews_after_update(
@@ -9982,14 +9979,10 @@ fn merge_sparse_sender(prior: &Message, mut incoming: Message) -> Message {
     }
     carry_local_previews(prior, &mut incoming);
     if incoming.location.is_none() {
-        incoming.location = prior
-            .location
-            .clone()
-            .or_else(|| prior.display_location())
-            .or_else(|| incoming.display_location());
+        incoming.location = prior.location.clone();
     }
     if incoming.code == MessageCode::Chat
-        && (prior.code == MessageCode::Location || prior.shows_location_card())
+        && (prior.code == MessageCode::Location || prior.location.is_some())
     {
         incoming.code = MessageCode::Location;
     }

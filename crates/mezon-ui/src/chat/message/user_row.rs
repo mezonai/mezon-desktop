@@ -50,7 +50,7 @@ pub fn render_user_message(
     let ephemeral = msg.code == MessageCode::Ephemeral;
     let sending = msg.is_sending();
     let is_me = msg.is_sent_by(ctx.current_user_id);
-    let display_location = msg.display_location();
+    let display_location = msg.location.as_ref();
     let needs_composite_selection = msg.call_log.is_some()
         || display_location.is_some()
         || msg.code == MessageCode::Location
@@ -130,7 +130,7 @@ pub fn render_user_message(
     {
         render_poll_card(msg, ctx, primary_base, selection_context)
     } else if let (Some(location), Some(selection_context)) =
-        (display_location.as_ref(), selection_context.as_ref())
+        (display_location, selection_context.as_ref())
     {
         render_location_card(msg, location, is_me, ctx, primary_base, selection_context)
     } else if sending {

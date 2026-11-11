@@ -2186,19 +2186,12 @@ impl Message {
         !user_id.is_empty() && self.sender_id == user_id
     }
 
-    pub fn display_location(&self) -> Option<MessageLocation> {
-        if let Some(location) = &self.location {
-            return Some(location.clone());
-        }
-        build_message_location(self.code, &self.content).or_else(|| {
-            self.raw_content
-                .as_deref()
-                .and_then(|raw| build_message_location(self.code, raw))
-        })
+    pub fn display_location(&self) -> Option<&MessageLocation> {
+        self.location.as_ref()
     }
 
     pub fn shows_location_card(&self) -> bool {
-        self.display_location().is_some()
+        self.location.is_some()
     }
 
     pub fn message_ref(&self) -> MessageRef {
@@ -4177,6 +4170,25 @@ mod tests {
     #[test]
     fn rich_layout_none_for_empty_spans() {
         assert!(build_rich_layout(&[]).is_none());
+    }
+
+    #[test]
+    fn location_card_is_code_17_or_a_link_only_message() {
+        let link = "https://www.google.com/maps?q=10.5,106.2";
+        let prose = format!("see {link}");
+        assert!(build_message_location(MessageCode::Location, link).is_some());
+        assert!(build_message_location(MessageCode::Chat, link).is_some());
+        assert!(build_message_location(MessageCode::Chat, &prose).is_none());
+        let stored = Message::new(MessageId(1), prose, "1", "a", 0);
+        assert!(stored.display_location().is_none());
+        assert!(!stored.shows_location_card());
+        let card = stored.with_location(build_message_location(MessageCode::Chat, link));
+        let maps_url = mezon_client::transport::build_location_maps_link(10.5, 106.2);
+        assert_eq!(
+            card.display_location()
+                .map(|location| location.maps_url.as_ref()),
+            Some(maps_url.as_str())
+        );
     }
 
     #[test]

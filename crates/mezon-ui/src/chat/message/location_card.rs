@@ -1,9 +1,9 @@
 use gpui::{
-    AnyElement, App, Bounds, Corners, Entity, FontWeight, ImageCache, Pixels, Resource, Window,
-    canvas, div, point, prelude::*, px, rgba, size,
+    AnyElement, App, Bounds, Corners, Entity, FontWeight, ImageCache, MouseButton, Pixels,
+    Resource, Window, canvas, div, point, prelude::*, px, rgba, size,
 };
-use mezon_client::transport::location_map_preview;
-use mezon_store::{Message, MessageLocation};
+use mezon_client::transport::{location_map_preview, mezon_location_tile_base};
+use mezon_store::{AppConfig, Message, MessageLocation};
 
 use super::content::{SelectableSectionCursor, SelectableTextContext, open_message_link};
 use super::context::RowCtx;
@@ -18,6 +18,7 @@ const CARD_RADIUS: f32 = 10.;
 const CARD_MAX_WIDTH: f32 = 520.;
 const MAP_TILE_PX: f32 = 256.;
 const AVATAR_BORDER: u32 = 0xff_ff_ff_ff;
+const MAP_CREDIT_URL: &str = "https://www.openstreetmap.org/copyright";
 
 pub fn render_location_card(
     msg: &Message,
@@ -38,11 +39,17 @@ pub fn render_location_card(
         CARD_MAX_WIDTH
     };
 
+    let tile_base = mezon_location_tile_base(
+        AppConfig::try_global(ctx.app)
+            .map(|cfg| cfg.mezon_cdn_url.as_str())
+            .unwrap_or("https://cdn.mezon.ai"),
+    );
     let map_preview = location_map_preview(
         location.latitude,
         location.longitude,
         card_width,
         MAP_HEIGHT,
+        &tile_base,
     );
     let map_origin_left = map_preview.origin_left_px;
     let map_origin_top = map_preview.origin_top_px;
@@ -113,6 +120,7 @@ pub fn render_location_card(
                     .absolute()
                     .inset_0(),
                 )
+                .child(map_credit(ctx.locale))
                 .child(
                     div()
                         .absolute()
@@ -205,6 +213,27 @@ fn paint_location_map(
     }
 }
 
+fn map_credit(locale: &str) -> AnyElement {
+    div()
+        .absolute()
+        .bottom(px(4.))
+        .left(px(6.))
+        .px(px(4.))
+        .py(px(1.))
+        .rounded(px(3.))
+        .bg(rgba(0x000000_99))
+        .cursor_pointer()
+        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+        .on_click(|_, _, cx| open_message_link(MAP_CREDIT_URL.to_string(), cx))
+        .child(
+            div()
+                .text_size(px(10.))
+                .text_color(rgba(0xffffff_e6))
+                .child(mezon_i18n::t(locale, "message.mapView.mapCredit")),
+        )
+        .into_any_element()
+}
+
 fn px_near(left: Pixels, right: Pixels) -> bool {
     (f32::from(left) - f32::from(right)).abs() < 0.5
 }
@@ -228,8 +257,24 @@ mod tests {
     #[test]
     fn preview_strip_uses_expected_zoom() {
         assert_eq!(LOCATION_MAP_PREVIEW_ZOOM, 15);
-        let preview = mezon_client::transport::location_map_preview(18.6734, 105.6923, 400., 150.);
-        assert!(preview.tile_urls[1][1].contains("tile.openstreetmap.org/15/"));
+        let preview = mezon_client::transport::location_map_preview(
+            18.6734,
+            105.6923,
+            400.,
+            150.,
+            mezon_client::transport::LOCATION_MAP_TILE_ROOT,
+        );
+        assert!(preview.tile_urls[1][1].starts_with(&format!(
+            "{}/15/",
+            mezon_client::transport::LOCATION_MAP_TILE_ROOT
+        )));
+        assert!(
+            !preview
+                .tile_urls
+                .iter()
+                .flatten()
+                .any(|url| url.contains("openstreetmap.org"))
+        );
         assert!(preview.origin_top_px + 256. * 3. >= 150.);
     }
 }

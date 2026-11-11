@@ -618,7 +618,27 @@ pub fn parse_google_maps_coordinates(text: &str) -> Option<(f64, f64)> {
 
 pub fn is_standalone_google_maps_content(content: &str) -> bool {
     let text = location_message_plain_text(content);
-    text.contains("google.com/maps") && parse_google_maps_coordinates(&text).is_some()
+    let text = text.trim();
+    !text.is_empty()
+        && !text.contains(char::is_whitespace)
+        && is_google_maps_url(text)
+        && parse_google_maps_coordinates(text).is_some()
+}
+
+fn is_google_maps_url(text: &str) -> bool {
+    let Some(rest) = text.strip_prefix("https://") else {
+        return false;
+    };
+    let host_end = rest.find(['/', '?', '#']).unwrap_or(rest.len());
+    let authority = &rest[..host_end];
+    let host = authority.rsplit('@').next().unwrap_or(authority);
+    let host = host.split(':').next().unwrap_or(host);
+    let path = &rest[host_end..];
+    if host.eq_ignore_ascii_case("maps.google.com") {
+        return true;
+    }
+    (host.eq_ignore_ascii_case("www.google.com") || host.eq_ignore_ascii_case("google.com"))
+        && path.starts_with("/maps")
 }
 
 pub fn parse_location_from_text(code: i32, content: &str) -> Option<ParsedLocation> {
@@ -630,15 +650,10 @@ pub fn parse_location_from_text(code: i32, content: &str) -> Option<ParsedLocati
         return None;
     }
     let (latitude, longitude) = parse_google_maps_coordinates(&text)?;
-    let maps_url = if text.contains("google.com/maps") {
-        text
-    } else {
-        build_location_maps_link(latitude, longitude)
-    };
     Some(ParsedLocation {
         latitude,
         longitude,
-        maps_url,
+        maps_url: build_location_maps_link(latitude, longitude),
     })
 }
 
@@ -655,9 +670,25 @@ pub fn lat_lon_map_tile(latitude: f64, longitude: f64, zoom: u32) -> (u32, u32) 
 
 pub const LOCATION_MAP_PREVIEW_ZOOM: u32 = 15;
 
-pub fn location_map_osm_tile_url(latitude: f64, longitude: f64, zoom: u32) -> String {
-    let (x, y) = lat_lon_map_tile(latitude, longitude, zoom);
-    format!("https://tile.openstreetmap.org/{zoom}/{x}/{y}.png")
+pub const LOCATION_MAP_TILE_ROOT: &str = "https://cdn.mezon.ai/maps";
+
+pub fn mezon_location_tile_base(cdn_url: &str) -> String {
+    let cdn = cdn_url.trim().trim_end_matches('/');
+    if cdn.is_empty() {
+        LOCATION_MAP_TILE_ROOT.to_string()
+    } else {
+        format!("{cdn}/maps")
+    }
+}
+
+pub fn location_map_tile_url(tile_base: &str, zoom: u32, x: u32, y: u32) -> String {
+    let base = tile_base.trim().trim_end_matches('/');
+    let base = if base.is_empty() {
+        LOCATION_MAP_TILE_ROOT
+    } else {
+        base
+    };
+    format!("{base}/{zoom}/{x}/{y}.png")
 }
 
 const MAP_TILE_PX: f64 = 256.0;
@@ -684,6 +715,7 @@ pub fn location_map_preview(
     longitude: f64,
     viewport_width: f32,
     viewport_height: f32,
+    tile_base: &str,
 ) -> LocationMapPreview {
     let zoom = LOCATION_MAP_PREVIEW_ZOOM;
     let (world_x, world_y) = location_map_world_pixel(latitude, longitude, zoom);
@@ -696,7 +728,7 @@ pub fn location_map_preview(
         let y = origin_y.saturating_add(row);
         [0, 1, 2].map(|col| {
             let x = origin_x.saturating_add(col);
-            format!("https://tile.openstreetmap.org/{zoom}/{x}/{y}.png")
+            location_map_tile_url(tile_base, zoom, x, y)
         })
     });
     LocationMapPreview {
@@ -13784,7 +13816,7 @@ mod tests {
 
     #[test]
     fn location_map_preview_fills_viewport_and_centers_pin() {
-        let preview = location_map_preview(18.6734, 105.6923, 400., 150.);
+        let preview = location_map_preview(18.6734, 105.6923, 400., 150., LOCATION_MAP_TILE_ROOT);
         let (world_x, world_y) =
             location_map_world_pixel(18.6734, 105.6923, LOCATION_MAP_PREVIEW_ZOOM);
         let (tile_x, tile_y) = lat_lon_map_tile(18.6734, 105.6923, LOCATION_MAP_PREVIEW_ZOOM);
@@ -13798,16 +13830,53 @@ mod tests {
         assert!(preview.origin_top_px <= 0.);
         assert!(preview.origin_left_px + (MAP_TILE_PX as f32 * 3.) >= 400.);
         assert!(preview.origin_top_px + (MAP_TILE_PX as f32 * 3.) >= 150.);
+        assert!(preview.tile_urls[1][1].starts_with(LOCATION_MAP_TILE_ROOT));
         assert!(preview.tile_urls[1][1].contains(&format!(
             "/{LOCATION_MAP_PREVIEW_ZOOM}/{tile_x}/{tile_y}.png"
         )));
+        assert!(
+            !preview
+                .tile_urls
+                .iter()
+                .flatten()
+                .any(|url| url.contains("openstreetmap.org"))
+        );
     }
 
+    #[test]
     fn parse_location_from_content_json() {
         let json = build_location_content_json(10.5, 106.2);
         let parsed = parse_location_from_text(LOCATION_CODE, &json).expect("location");
         assert!((parsed.latitude - 10.5).abs() < f64::EPSILON);
         assert!((parsed.longitude - 106.2).abs() < f64::EPSILON);
+        assert_eq!(parsed.maps_url, build_location_maps_link(10.5, 106.2));
+    }
+
+    #[test]
+    fn location_click_opens_the_built_maps_link() {
+        let hostile = "https://evil.example/?google.com/maps&q=1,2";
+        let parsed = parse_location_from_text(LOCATION_CODE, hostile).expect("coords");
+        assert_eq!(parsed.maps_url, build_location_maps_link(1.0, 2.0));
+        assert!(!parsed.maps_url.contains("evil.example"));
+    }
+
+    #[test]
+    fn standalone_maps_content_is_a_link_and_nothing_else() {
+        assert!(is_standalone_google_maps_content(
+            "https://www.google.com/maps?q=10.5,106.2&z=14"
+        ));
+        assert!(is_standalone_google_maps_content(
+            r#"{"t":"https://maps.google.com/maps?q=10.5,106.2"}"#
+        ));
+        assert!(!is_standalone_google_maps_content(
+            "meet here https://www.google.com/maps?q=10.5,106.2"
+        ));
+        assert!(!is_standalone_google_maps_content(
+            "https://evil.example/?google.com/maps&q=1,2"
+        ));
+        assert!(!is_standalone_google_maps_content(
+            "https://www.google.com.evil.example/maps?q=1,2"
+        ));
     }
 
     #[test]
