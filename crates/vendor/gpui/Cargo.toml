@@ -94,6 +94,7 @@ lyon = "1.0"
 pin-project = "1.1.10"
 spin = "0.10.0"
 pollster.workspace = true
+unicode-segmentation.workspace = true
 url.workspace = true
 uuid.workspace = true
 web-time.workspace = true
