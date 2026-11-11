@@ -202,6 +202,11 @@ impl ReportMessageModal {
             return;
         };
         let friends = FriendStore::global(cx);
+        if friends.read(cx).is_user_blocked_by_me(user_id, cx) {
+            self.toast_success("contextMenu.reportMessageModal.userBlockedSuccess", cx);
+            Self::close(cx);
+            return;
+        }
         self.block_state = BlockState::Sending;
         friends.update(cx, |store, cx| store.block_friend(user_id, cx));
         cx.notify();
