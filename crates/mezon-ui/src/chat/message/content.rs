@@ -3141,21 +3141,96 @@ pub(crate) fn open_message_link(url: String, cx: &mut App) {
 
 pub(crate) fn interactive_link_text(
     id: impl Into<gpui::ElementId>,
-    styled: StyledText,
+    text: impl Into<SharedString>,
+    highlights: Vec<(Range<usize>, HighlightStyle)>,
     links: Vec<(Range<usize>, String)>,
 ) -> AnyElement {
+    let text = text.into();
     if links.is_empty() {
-        return styled.into_any_element();
+        return StyledText::new(text)
+            .with_highlights(highlights)
+            .into_any_element();
     }
-    let (ranges, urls): (Vec<_>, Vec<_>) = links.into_iter().unzip();
-    InteractiveText::new(id, styled)
-        .on_click(ranges, move |index, _, cx| {
-            if let Some(url) = urls.get(index) {
-                cx.stop_propagation();
-                open_message_link(url.clone(), cx);
-            }
-        })
-        .into_any_element()
+    HoverLinkText {
+        id: id.into(),
+        text,
+        highlights,
+        links,
+    }
+    .into_any_element()
+}
+
+#[derive(IntoElement)]
+struct HoverLinkText {
+    id: gpui::ElementId,
+    text: SharedString,
+    highlights: Vec<(Range<usize>, HighlightStyle)>,
+    links: Vec<(Range<usize>, String)>,
+}
+
+impl RenderOnce for HoverLinkText {
+    fn render(self, window: &mut gpui::Window, cx: &mut App) -> impl IntoElement {
+        let hovered = window.use_keyed_state(self.id.clone(), cx, |_, _| None::<usize>);
+        let hovered_ix = *hovered.read(cx);
+        let (ranges, urls): (Vec<_>, Vec<_>) = self.links.into_iter().unzip();
+        let hovered_range = hovered_ix.and_then(|ix| ranges.get(ix));
+        let highlights: Vec<_> = self
+            .highlights
+            .into_iter()
+            .map(|(range, mut style)| {
+                let overlaps =
+                    |link: &Range<usize>| range.start < link.end && link.start < range.end;
+                if ranges.iter().any(|link| overlaps(link)) {
+                    let color = style.color;
+                    style.underline =
+                        hovered_range
+                            .filter(|link| overlaps(link))
+                            .map(|_| UnderlineStyle {
+                                thickness: px(1.),
+                                color,
+                                wavy: false,
+                            });
+                }
+                (range, style)
+            })
+            .collect();
+        let hover_ranges = ranges.clone();
+        let set_hover = hovered.clone();
+        div()
+            .id(self.id.clone())
+            .on_hover(move |is_hovered, _, cx| {
+                if !*is_hovered {
+                    hovered.update(cx, |ix, cx| {
+                        if ix.take().is_some() {
+                            cx.notify();
+                        }
+                    });
+                }
+            })
+            .child(
+                InteractiveText::new(
+                    self.id,
+                    StyledText::new(self.text).with_highlights(highlights),
+                )
+                .on_click(ranges, move |index, _, cx| {
+                    if let Some(url) = urls.get(index) {
+                        cx.stop_propagation();
+                        open_message_link(url.clone(), cx);
+                    }
+                })
+                .on_hover(move |offset, _, _, cx| {
+                    let next = offset
+                        .and_then(|offset| hover_ranges.iter().position(|r| r.contains(&offset)));
+                    set_hover.update(cx, |ix, cx| {
+                        if *ix != next {
+                            *ix = next;
+                            cx.notify();
+                        }
+                    });
+                }),
+            )
+            .into_any_element()
+    }
 }
 
 pub(crate) fn meeting_code(url: &str, cx: &App) -> Option<String> {
