@@ -3918,13 +3918,14 @@ fn control_bar(
         .connected_channel()
         .and_then(|(_, clan)| clan.parse::<i64>().ok())
         .map(ClanId);
-    let can_manage_agent = agent_clan_id.is_some_and(|clan_id| {
-        PermissionStore::try_global(cx).is_some_and(|store| {
-            store
-                .read(cx)
-                .check_permission(clan_id, PERMISSION_MANAGE_CHANNEL, cx)
-        })
-    });
+    let can_manage_agent = store.external_meeting().is_some()
+        || agent_clan_id.is_some_and(|clan_id| {
+            PermissionStore::try_global(cx).is_some_and(|store| {
+                store
+                    .read(cx)
+                    .check_permission(clan_id, PERMISSION_MANAGE_CHANNEL, cx)
+            })
+        });
     let agent_hint_visible = can_manage_agent
         && !agent_active
         && !settings.read(cx).agent_hint_dismissed
