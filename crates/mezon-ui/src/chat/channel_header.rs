@@ -1301,7 +1301,7 @@ impl ChatHeader {
         let blocked_by_me = dm.peer_user_id.is_some_and(|peer| {
             !is_group
                 && FriendStore::try_global(cx)
-                    .is_some_and(|store| store.read(cx).is_user_blocked_by_me(peer, cx))
+                    .is_some_and(|store| store.read(cx).is_blocked_with(peer))
         });
         let presence = dm_peer_presence(dm, cx);
         let avatar_src = if dm.avatar.is_empty() {

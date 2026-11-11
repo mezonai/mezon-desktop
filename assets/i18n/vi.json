@@ -2364,6 +2364,7 @@
   "contextMenu.member.shareContact": "Chia sẻ liên hệ này",
   "contextMenu.member.unBanChat": "Bỏ chặn",
   "contextMenu.member.unblock": "Bỏ chặn",
+  "contextMenu.member.block": "Chặn",
   "contextMenu.member.unblockFailed": "Không thể bỏ chặn người dùng",
   "contextMenu.member.unblockSuccess": "Bỏ chặn người dùng thành công",
   "contextMenu.menu": "Tùy chọn",

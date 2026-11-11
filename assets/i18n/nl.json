@@ -2364,6 +2364,7 @@
   "contextMenu.member.shareContact": "Dit contact delen",
   "contextMenu.member.unBanChat": "Uitsluiting opheffen",
   "contextMenu.member.unblock": "Blok opheffen",
+  "contextMenu.member.block": "Blokken",
   "contextMenu.member.unblockFailed": "Gebruiker kon niet worden ontgrendeld",
   "contextMenu.member.unblockSuccess": "Gebruiker succesvol ontgrendeld",
   "contextMenu.menu": "Optie",
