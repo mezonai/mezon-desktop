@@ -2583,20 +2583,25 @@ struct ResolvedHashtag {
     icon: IconName,
 }
 
-fn hashtag_meta_visible(meta: &HashtagMeta, clan_loaded: bool, parent_visible: bool) -> bool {
+fn hashtag_meta_visible(
+    meta: &HashtagMeta,
+    in_clan: bool,
+    clan_loaded: bool,
+    parent_visible: bool,
+) -> bool {
     if meta.channel_type == ChannelType::Thread {
-        parent_visible && !meta.private
+        in_clan && parent_visible && !meta.private
     } else {
-        !clan_loaded
+        in_clan && !clan_loaded
     }
 }
 
-fn hashtag_meta_visible_in(store: &ChannelList, meta: &HashtagMeta) -> bool {
+fn hashtag_meta_visible_in(store: &ChannelList, meta: &HashtagMeta, in_clan: bool) -> bool {
     let clan_loaded = store.is_clan_cache_loaded(meta.clan_id);
     let parent_visible = meta
         .parent_id
         .is_some_and(|parent| store.linkable_channel(parent).is_some());
-    hashtag_meta_visible(meta, clan_loaded, parent_visible)
+    hashtag_meta_visible(meta, in_clan, clan_loaded, parent_visible)
 }
 
 fn thread_link_wants_detail(meta: &HashtagMeta, in_clan: bool, meta_visible: bool) -> bool {
@@ -2616,7 +2621,7 @@ pub(super) fn hashtag_chip(
         Some(meta) if resolved.is_none() => {
             let store = ChannelList::global(cx).read(cx);
             let in_clan = ClanList::global(cx).read(cx).clan(meta.clan_id).is_some();
-            (in_clan, hashtag_meta_visible_in(store, meta))
+            (in_clan, hashtag_meta_visible_in(store, meta, in_clan))
         }
         _ => (false, false),
     };
@@ -2949,62 +2954,72 @@ fn parse_channel_id(raw: &str) -> Option<ChannelId> {
         .filter(|id| !id.is_zero())
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LinkClick {
+    Navigate(ClanId),
+    AskServer,
+    NoAccess,
+    Nothing,
+}
+
+fn link_click(known: Option<ClanId>, hint: Option<ClanId>, member: bool) -> LinkClick {
+    if let Some(clan_id) = known {
+        return LinkClick::Navigate(clan_id);
+    }
+    match hint {
+        Some(_) if member => LinkClick::AskServer,
+        Some(_) => LinkClick::Nothing,
+        None => LinkClick::NoAccess,
+    }
+}
+
 fn navigate_to_channel(
     channel_id: ChannelId,
     clan_hint: Option<ClanId>,
     locale: &str,
     cx: &mut App,
 ) {
+    let known = clan_for_channel(channel_id, cx);
+    let member = known.is_none()
+        && clan_hint.is_some_and(|clan_id| ClanList::global(cx).read(cx).clan(clan_id).is_some());
     let no_access = mezon_i18n::t(locale, "message.noAccess");
-    if let Some(clan_id) = clan_for_channel(channel_id, cx) {
-        navigate(
+    match link_click(known, clan_hint, member) {
+        LinkClick::Navigate(clan_id) => navigate(
             cx,
             Route::Channel {
                 clan_id,
                 channel_id,
             },
-        );
-        return;
-    }
-    let Some(clan_id) = clan_hint else {
-        Shell::global(cx).update(cx, |shell, cx| {
-            shell.info(no_access, cx);
-        });
-        return;
-    };
-    if ChannelList::global(cx)
-        .read(cx)
-        .is_clan_cache_loaded(clan_id)
-    {
-        let task =
-            ChannelList::global(cx).update(cx, |c, cx| c.channel_link_detail(channel_id, cx));
-        cx.spawn(async move |cx| {
-            let resolved = task.await;
-            cx.update(|cx| match resolved {
-                Some(clan_id) => navigate(
-                    cx,
-                    Route::Channel {
-                        clan_id,
-                        channel_id,
-                    },
-                ),
-                None => {
-                    Shell::global(cx).update(cx, |shell, cx| {
-                        shell.info(no_access, cx);
-                    });
-                }
+        ),
+        LinkClick::Nothing => {}
+        LinkClick::NoAccess => {
+            Shell::global(cx).update(cx, |shell, cx| {
+                shell.info(no_access, cx);
             });
-        })
-        .detach();
-        return;
+        }
+        LinkClick::AskServer => {
+            let task =
+                ChannelList::global(cx).update(cx, |c, cx| c.channel_link_detail(channel_id, cx));
+            cx.spawn(async move |cx| {
+                let resolved = task.await;
+                cx.update(|cx| match resolved {
+                    Some(clan_id) => navigate(
+                        cx,
+                        Route::Channel {
+                            clan_id,
+                            channel_id,
+                        },
+                    ),
+                    None => {
+                        Shell::global(cx).update(cx, |shell, cx| {
+                            shell.info(no_access, cx);
+                        });
+                    }
+                });
+            })
+            .detach();
+        }
     }
-    navigate(
-        cx,
-        Route::Channel {
-            clan_id,
-            channel_id,
-        },
-    );
 }
 
 fn clan_for_channel(channel_id: ChannelId, cx: &App) -> Option<ClanId> {
@@ -3701,8 +3716,9 @@ mod tests {
 #[cfg(test)]
 mod hashtag_label_tests {
     use super::{
-        ChannelId, ChannelType, ClanId, HashtagChip, HashtagMeta, IconName, ResolvedHashtag,
-        hashtag_chip_for, hashtag_chip_from_meta, hashtag_meta_visible, thread_link_wants_detail,
+        ChannelId, ChannelType, ClanId, HashtagChip, HashtagMeta, IconName, LinkClick,
+        ResolvedHashtag, hashtag_chip_for, hashtag_chip_from_meta, hashtag_meta_visible,
+        link_click, thread_link_wants_detail,
     };
     use gpui::SharedString;
 
@@ -3786,31 +3802,46 @@ mod hashtag_label_tests {
     #[test]
     fn thread_meta_with_visible_parent_is_visible() {
         let meta = meta(ChannelType::Thread, Some(10), false);
-        assert!(hashtag_meta_visible(&meta, true, true));
+        assert!(hashtag_meta_visible(&meta, true, true, true));
     }
 
     #[test]
     fn thread_meta_without_parent_is_hidden() {
         let meta = meta(ChannelType::Thread, None, false);
-        assert!(!hashtag_meta_visible(&meta, true, false));
+        assert!(!hashtag_meta_visible(&meta, true, true, false));
     }
 
     #[test]
     fn private_thread_meta_with_visible_parent_is_hidden() {
         let meta = meta(ChannelType::Thread, Some(10), true);
-        assert!(!hashtag_meta_visible(&meta, true, true));
+        assert!(!hashtag_meta_visible(&meta, true, true, true));
     }
 
     #[test]
     fn channel_meta_in_loaded_clan_is_hidden() {
         let meta = meta(ChannelType::Text, None, false);
-        assert!(!hashtag_meta_visible(&meta, true, false));
+        assert!(!hashtag_meta_visible(&meta, true, true, false));
     }
 
     #[test]
     fn channel_meta_in_unloaded_clan_is_visible() {
         let meta = meta(ChannelType::Text, None, false);
-        assert!(hashtag_meta_visible(&meta, false, false));
+        assert!(hashtag_meta_visible(&meta, true, false, false));
+    }
+
+    #[test]
+    fn channel_meta_in_foreign_unloaded_clan_is_hidden() {
+        let meta = meta(ChannelType::Text, None, false);
+        assert!(!hashtag_meta_visible(&meta, false, false, false));
+    }
+
+    #[test]
+    fn thread_meta_in_foreign_clan_is_hidden() {
+        let with_parent = meta(ChannelType::Thread, Some(10), false);
+        let without_parent = meta(ChannelType::Thread, None, false);
+        assert!(!hashtag_meta_visible(&with_parent, false, false, true));
+        assert!(!hashtag_meta_visible(&with_parent, false, true, true));
+        assert!(!hashtag_meta_visible(&without_parent, false, false, false));
     }
 
     #[test]
@@ -3837,7 +3868,7 @@ mod hashtag_label_tests {
             None,
             Some(&thread),
             true,
-            hashtag_meta_visible(&thread, true, false),
+            hashtag_meta_visible(&thread, true, true, false),
             "en",
         );
 
@@ -3857,7 +3888,7 @@ mod hashtag_label_tests {
             None,
             Some(&channel),
             true,
-            hashtag_meta_visible(&channel, true, false),
+            hashtag_meta_visible(&channel, true, true, false),
             "en",
         );
 
@@ -3865,6 +3896,58 @@ mod hashtag_label_tests {
         assert!(!chip.italic);
         assert_eq!(chip.icon.path(), IconName::Lock.path());
         assert_eq!(chip.channel_id, None);
+    }
+
+    #[test]
+    fn foreign_clan_channel_and_thread_links_build_non_clickable_private_chips() {
+        let channel = meta(ChannelType::Text, None, false);
+        let channel_chip = hashtag_chip_from_meta(
+            "#general",
+            Some(ChannelId(2)),
+            None,
+            Some(&channel),
+            false,
+            hashtag_meta_visible(&channel, false, false, false),
+            "en",
+        );
+        assert_eq!(channel_chip.label, "private-channel");
+        assert!(!channel_chip.italic);
+        assert_eq!(channel_chip.icon.path(), IconName::Lock.path());
+        assert_eq!(channel_chip.channel_id, None);
+
+        let thread = meta(ChannelType::Thread, Some(10), false);
+        let thread_chip = hashtag_chip_from_meta(
+            "#zz-1091-anon",
+            Some(ChannelId(3)),
+            None,
+            Some(&thread),
+            false,
+            hashtag_meta_visible(&thread, false, false, true),
+            "en",
+        );
+        assert_eq!(thread_chip.label, "private-channel");
+        assert!(!thread_chip.italic);
+        assert_eq!(thread_chip.icon.path(), IconName::Lock.path());
+        assert_eq!(thread_chip.channel_id, None);
+    }
+
+    #[test]
+    fn link_click_routes_by_known_clan_and_membership() {
+        assert_eq!(
+            link_click(Some(ClanId(1)), None, false),
+            LinkClick::Navigate(ClanId(1))
+        );
+        assert_eq!(
+            link_click(Some(ClanId(1)), Some(ClanId(2)), false),
+            LinkClick::Navigate(ClanId(1))
+        );
+        assert_eq!(
+            link_click(None, Some(ClanId(1)), true),
+            LinkClick::AskServer
+        );
+        assert_eq!(link_click(None, Some(ClanId(1)), false), LinkClick::Nothing);
+        assert_eq!(link_click(None, None, false), LinkClick::NoAccess);
+        assert_eq!(link_click(None, None, true), LinkClick::NoAccess);
     }
 }
 
