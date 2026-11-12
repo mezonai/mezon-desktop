@@ -529,10 +529,13 @@ impl ClanSettingScreen {
                 .integrations_page
                 .as_ref()
                 .map(|p| p.clone().into_any_element()),
-            ClanSettingsPage::ClanCommunity => self
-                .community_page
-                .as_ref()
-                .map(|p| p.clone().into_any_element()),
+            ClanSettingsPage::ClanCommunity => self.community_page.as_ref().map(|page| {
+                if page.read(cx).is_setup_open() {
+                    div().into_any_element()
+                } else {
+                    page.clone().into_any_element()
+                }
+            }),
             ClanSettingsPage::Onboarding => self.onboarding_page.as_ref().map(|page| {
                 if page.read(cx).is_setup_open() {
                     OnboardingSettingPage::render_enable_card(page.clone(), locale, theme)
@@ -568,7 +571,11 @@ impl Render for ClanSettingScreen {
         let fixed_content_layout = matches!(
             page,
             ClanSettingsPage::AuditLog | ClanSettingsPage::ArchivedChannels
-        );
+        ) || (page == ClanSettingsPage::ClanCommunity
+            && self
+                .community_page
+                .as_ref()
+                .is_some_and(|community| community.read(cx).fills_content_height()));
         let content = self
             .current_page_view(&locale, &theme, cx)
             .unwrap_or_else(|| {
@@ -613,6 +620,9 @@ impl Render for ClanSettingScreen {
                 .as_ref()
                 .is_some_and(|community| community.read(cx).should_show_save_bar(cx));
         let community_save_bar = self.community_page.clone().filter(|_| show_community_save);
+        let community_setup_modal = self.community_page.clone().filter(|community| {
+            page == ClanSettingsPage::ClanCommunity && community.read(cx).is_setup_open()
+        });
         let show_onboarding_save = page == ClanSettingsPage::Onboarding
             && self
                 .onboarding_page
@@ -1002,6 +1012,20 @@ impl Render for ClanSettingScreen {
                 panel.child(deferred(render_community_save_bar(
                     community, &locale, &theme, cx,
                 )))
+            })
+            .when_some(community_setup_modal, |panel, community| {
+                panel.child(
+                    div()
+                        .absolute()
+                        .inset_0()
+                        .occlude()
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .p_4()
+                        .bg(gpui::black().alpha(0.6))
+                        .child(community),
+                )
             })
             .when_some(onboarding_save_bar, |panel, onboarding| {
                 panel.child(deferred(render_onboarding_save_bar(
