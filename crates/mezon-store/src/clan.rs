@@ -17,10 +17,25 @@ use crate::realtime::{RealtimeDispatch, RealtimeKind};
 pub const MAX_CLAN_LOGO_BYTES: u64 = 1_000_000;
 pub const MAX_CLAN_BANNER_BYTES: u64 = 10_000_000;
 pub const MAX_COMMUNITY_BANNER_BYTES: u64 = MAX_CLAN_BANNER_BYTES;
-pub const MAX_COMMUNITY_ABOUT_CHARS: usize = 100;
+pub const MAX_COMMUNITY_ABOUT_CHARS: usize = 3000;
 pub const MAX_COMMUNITY_DESCRIPTION_CHARS: usize = 300;
 pub const MAX_COMMUNITY_SHORT_URL_CHARS: usize = 50;
 pub const MAX_COMMUNITY_BANNER_URL_BYTES: usize = 2048;
+pub const MIN_COMMUNITY_HASHTAGS: usize = 1;
+pub const MAX_COMMUNITY_HASHTAGS: usize = 6;
+pub const DEFAULT_COMMUNITY_HASHTAG: &str = "Community";
+pub const COMMUNITY_HASHTAGS: [&str; 10] = [
+    "Gaming",
+    "Technology",
+    "Education",
+    "Entertainment",
+    "Music",
+    "Art",
+    "Crypto",
+    "Anime",
+    "Sports",
+    DEFAULT_COMMUNITY_HASHTAG,
+];
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct OnboardingAnswer {
@@ -177,6 +192,7 @@ pub struct Clan {
     pub about: String,
     pub description: String,
     pub short_url: String,
+    pub hashtags: Vec<String>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -227,6 +243,7 @@ pub struct CommunityInfo {
     pub about: String,
     pub description: String,
     pub short_url: String,
+    pub hashtags: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -235,6 +252,22 @@ pub struct CommunityDraft {
     pub about: String,
     pub description: String,
     pub short_url: String,
+    pub hashtags: Vec<String>,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct CommunityFieldIssues {
+    pub banner: bool,
+    pub about: bool,
+    pub description: bool,
+    pub vanity_url: bool,
+    pub hashtags: bool,
+}
+
+impl CommunityFieldIssues {
+    pub fn is_empty(&self) -> bool {
+        *self == Self::default()
+    }
 }
 
 impl CommunityDraft {
@@ -244,6 +277,7 @@ impl CommunityDraft {
             about: info.about.clone(),
             description: info.description.clone(),
             short_url: info.short_url.clone(),
+            hashtags: info.hashtags.clone(),
         }
     }
 
@@ -257,15 +291,53 @@ impl CommunityDraft {
         self.description = truncate_chars(self.description.trim(), MAX_COMMUNITY_DESCRIPTION_CHARS);
         self.short_url = sanitize_community_short_url(&self.short_url);
         self.community_banner = sanitize_community_banner_url(&self.community_banner);
+        self.hashtags = normalize_community_hashtags(self.hashtags);
         self
     }
 
-    pub fn is_valid(&self) -> bool {
+    pub fn missing_fields(&self) -> CommunityFieldIssues {
         let draft = self.clone().sanitized();
-        !draft.community_banner.is_empty()
-            && !draft.about.is_empty()
-            && !draft.description.is_empty()
-            && !draft.short_url.is_empty()
+        CommunityFieldIssues {
+            banner: draft.community_banner.is_empty(),
+            about: draft.about.is_empty(),
+            description: draft.description.is_empty(),
+            vanity_url: draft.short_url.is_empty(),
+            hashtags: draft.hashtags.len() < MIN_COMMUNITY_HASHTAGS,
+        }
+    }
+
+    pub fn is_valid(&self) -> bool {
+        self.missing_fields().is_empty()
+    }
+
+    pub fn has_hashtag(&self, tag: &str) -> bool {
+        self.hashtags.iter().any(|t| t.eq_ignore_ascii_case(tag))
+    }
+
+    pub fn can_toggle_hashtag(&self, tag: &str) -> bool {
+        if self.has_hashtag(tag) {
+            self.hashtags.len() > MIN_COMMUNITY_HASHTAGS
+        } else {
+            self.hashtags.len() < MAX_COMMUNITY_HASHTAGS
+        }
+    }
+
+    pub fn toggle_hashtag(&mut self, tag: &str) -> bool {
+        if !self.can_toggle_hashtag(tag) {
+            return false;
+        }
+        if self.has_hashtag(tag) {
+            self.hashtags.retain(|t| !t.eq_ignore_ascii_case(tag));
+        } else {
+            self.hashtags.push(tag.to_string());
+        }
+        true
+    }
+
+    pub fn ensure_default_hashtag(&mut self) {
+        if self.hashtags.is_empty() {
+            self.hashtags.push(DEFAULT_COMMUNITY_HASHTAG.to_string());
+        }
     }
 }
 
@@ -277,6 +349,7 @@ impl From<&Clan> for CommunityInfo {
             about: clan.about.clone(),
             description: clan.description.clone(),
             short_url: clan.short_url.clone(),
+            hashtags: clan.hashtags.clone(),
         }
     }
 }
@@ -289,8 +362,56 @@ impl From<ApiClanDesc> for CommunityInfo {
             about: desc.about,
             description: desc.description,
             short_url: desc.short_url,
+            hashtags: parse_community_hashtags(&desc.hashtags),
         }
     }
+}
+
+fn clean_community_hashtag(raw: &str) -> String {
+    raw.trim().trim_start_matches('#').trim().to_string()
+}
+
+pub fn parse_community_hashtags(raw: &str) -> Vec<String> {
+    let raw = raw.trim();
+    if raw.is_empty() {
+        return Vec::new();
+    }
+    let tags: Vec<String> = if let Ok(values) = serde_json::from_str::<Vec<serde_json::Value>>(raw)
+    {
+        values
+            .iter()
+            .map(|value| match value {
+                serde_json::Value::String(text) => clean_community_hashtag(text),
+                other => clean_community_hashtag(&other.to_string()),
+            })
+            .collect()
+    } else if raw.contains(',') {
+        raw.split(',').map(clean_community_hashtag).collect()
+    } else {
+        raw.split_whitespace()
+            .map(clean_community_hashtag)
+            .collect()
+    };
+    tags.into_iter().filter(|tag| !tag.is_empty()).collect()
+}
+
+pub fn serialize_community_hashtags(tags: &[String]) -> String {
+    tags.iter()
+        .map(|tag| clean_community_hashtag(tag))
+        .filter(|tag| !tag.is_empty())
+        .collect::<Vec<_>>()
+        .join(",")
+}
+
+fn normalize_community_hashtags(tags: Vec<String>) -> Vec<String> {
+    let mut normalized: Vec<String> = Vec::with_capacity(tags.len());
+    for tag in tags {
+        let tag = clean_community_hashtag(&tag);
+        if !tag.is_empty() && !normalized.iter().any(|t| t.eq_ignore_ascii_case(&tag)) {
+            normalized.push(tag);
+        }
+    }
+    normalized
 }
 
 pub fn truncate_chars(value: &str, max: usize) -> String {
@@ -439,6 +560,7 @@ impl From<ApiClanDesc> for Clan {
             about: c.about,
             description: c.description,
             short_url: c.short_url,
+            hashtags: parse_community_hashtags(&c.hashtags),
         }
     }
 }
@@ -1387,14 +1509,9 @@ impl ClanList {
         let about = draft.about.clone();
         let description = draft.description.clone();
         let short_url = draft.short_url.clone();
+        let hashtags = draft.hashtags.clone();
+        let request = community_save_request(clan_id, &clan, &draft);
         cx.spawn(async move |this, cx| {
-            let mut request = community_update_request(clan_id, &clan, |req| {
-                req.is_community = Some(true);
-            });
-            request.community_banner = Some(banner.clone());
-            request.about = Some(about.clone());
-            request.description = Some(description.clone());
-            request.short_url = Some(short_url.clone());
             api.update_clan_desc(request)
                 .await
                 .map_err(|e| e.to_string())?;
@@ -1405,6 +1522,7 @@ impl ClanList {
                     clan.about = about;
                     clan.description = description;
                     clan.short_url = short_url;
+                    clan.hashtags = hashtags;
                 }
                 cx.notify();
             })
@@ -1544,6 +1662,22 @@ fn community_update_request(
     request
 }
 
+fn community_save_request(
+    clan_id: ClanId,
+    clan: &Clan,
+    draft: &CommunityDraft,
+) -> UpdateClanDescRequest {
+    let mut request = community_update_request(clan_id, clan, |req| {
+        req.is_community = Some(true);
+    });
+    request.community_banner = Some(draft.community_banner.clone());
+    request.about = Some(draft.about.clone());
+    request.description = Some(draft.description.clone());
+    request.short_url = Some(draft.short_url.clone());
+    request.hashtags = Some(serialize_community_hashtags(&draft.hashtags));
+    request
+}
+
 fn moved_clan_order(clans: &[Clan], from: usize, to: usize) -> Option<Vec<ClanId>> {
     if from == to || from >= clans.len() || to >= clans.len() {
         return None;
@@ -1601,6 +1735,7 @@ fn update_clan(clans: &mut [Clan], clan_id: ClanId, update: ClanUpdate) -> bool 
         clan.about = community.about;
         clan.description = community.description;
         clan.short_url = community.short_url;
+        clan.hashtags = community.hashtags;
     }
     true
 }
@@ -1687,6 +1822,7 @@ mod tests {
             about: String::new(),
             description: String::new(),
             short_url: String::new(),
+            hashtags: Vec::new(),
         }
     }
 
@@ -1821,6 +1957,7 @@ mod tests {
                 about: "about".into(),
                 description: "desc".into(),
                 short_url: "vanity".into(),
+                hashtags: vec!["Gaming".into(), "Music".into()],
             }),
         };
         assert!(update_clan(&mut c, ClanId(1), update));
@@ -1836,6 +1973,10 @@ mod tests {
         assert_eq!(c[0].about, "about");
         assert_eq!(c[0].description, "desc");
         assert_eq!(c[0].short_url, "vanity");
+        assert_eq!(
+            c[0].hashtags,
+            vec!["Gaming".to_string(), "Music".to_string()]
+        );
     }
 
     fn make_draft(logo: &str, banner: &str) -> ClanOverviewDraft {
@@ -1887,14 +2028,16 @@ mod tests {
     fn community_draft_sanitizes_and_rejects_unsafe_banner() {
         let draft = CommunityDraft {
             community_banner: "javascript:alert(1)".into(),
-            about: format!("  {}  ", "a".repeat(120)),
+            about: format!("  {}  ", "a".repeat(MAX_COMMUNITY_ABOUT_CHARS + 20)),
             description: "ok".into(),
             short_url: "Bad_URL!!".into(),
+            hashtags: vec![" #Gaming ".into(), "gaming".into(), "#".into()],
         }
         .sanitized();
         assert!(draft.community_banner.is_empty());
         assert_eq!(draft.about.len(), MAX_COMMUNITY_ABOUT_CHARS);
         assert_eq!(draft.short_url, "badurl");
+        assert_eq!(draft.hashtags, vec!["Gaming".to_string()]);
         assert!(!draft.is_valid());
 
         let ok = CommunityDraft {
@@ -1902,9 +2045,145 @@ mod tests {
             about: "about".into(),
             description: "desc".into(),
             short_url: "vanity".into(),
+            hashtags: vec![DEFAULT_COMMUNITY_HASHTAG.into()],
         }
         .sanitized();
         assert!(ok.is_valid());
+    }
+
+    #[test]
+    fn community_save_request_sends_hashtags_with_the_other_fields() {
+        let clan = make_clan(1, "One", None);
+        let draft = CommunityDraft {
+            hashtags: vec!["Gaming".into(), "Music".into()],
+            ..complete_community_draft()
+        };
+        let request = community_save_request(ClanId(1), &clan, &draft);
+        assert_eq!(request.is_community, Some(true));
+        assert_eq!(request.hashtags.as_deref(), Some("Gaming,Music"));
+        assert_eq!(request.short_url.as_deref(), Some("vanity"));
+        assert_eq!(request.about.as_deref(), Some("about"));
+        assert_eq!(request.description.as_deref(), Some("desc"));
+        assert_eq!(
+            request.community_banner.as_deref(),
+            Some("https://cdn.example/b.png")
+        );
+    }
+
+    fn complete_community_draft() -> CommunityDraft {
+        CommunityDraft {
+            community_banner: "https://cdn.example/b.png".into(),
+            about: "about".into(),
+            description: "desc".into(),
+            short_url: "vanity".into(),
+            hashtags: vec![DEFAULT_COMMUNITY_HASHTAG.into()],
+        }
+    }
+
+    #[test]
+    fn community_draft_without_hashtags_reports_only_the_hashtag_field() {
+        let mut draft = complete_community_draft();
+        draft.hashtags.clear();
+        assert!(!draft.is_valid());
+        assert_eq!(
+            draft.missing_fields(),
+            CommunityFieldIssues {
+                hashtags: true,
+                ..Default::default()
+            }
+        );
+
+        let empty = CommunityDraft::default().missing_fields();
+        assert!(empty.banner && empty.about && empty.description);
+        assert!(empty.vanity_url && empty.hashtags);
+    }
+
+    #[test]
+    fn community_hashtag_toggle_keeps_between_min_and_max() {
+        let mut draft = complete_community_draft();
+        assert!(!draft.can_toggle_hashtag(DEFAULT_COMMUNITY_HASHTAG));
+        assert!(!draft.toggle_hashtag("community"));
+        assert_eq!(draft.hashtags, vec![DEFAULT_COMMUNITY_HASHTAG.to_string()]);
+
+        for tag in COMMUNITY_HASHTAGS
+            .iter()
+            .filter(|tag| **tag != DEFAULT_COMMUNITY_HASHTAG)
+        {
+            draft.toggle_hashtag(tag);
+        }
+        assert_eq!(draft.hashtags.len(), MAX_COMMUNITY_HASHTAGS);
+        let unselected = COMMUNITY_HASHTAGS
+            .iter()
+            .find(|tag| !draft.has_hashtag(tag))
+            .expect("catalog is larger than the limit");
+        assert!(!draft.can_toggle_hashtag(unselected));
+        assert!(!draft.toggle_hashtag(unselected));
+        assert_eq!(draft.hashtags.len(), MAX_COMMUNITY_HASHTAGS);
+
+        assert!(draft.toggle_hashtag("GAMING"));
+        assert!(!draft.has_hashtag("Gaming"));
+        assert!(draft.toggle_hashtag(unselected));
+        assert!(draft.has_hashtag(unselected));
+    }
+
+    #[test]
+    fn ensure_default_hashtag_only_fills_an_empty_selection() {
+        let mut draft = CommunityDraft::default();
+        draft.ensure_default_hashtag();
+        assert_eq!(draft.hashtags, vec![DEFAULT_COMMUNITY_HASHTAG.to_string()]);
+
+        let mut chosen = CommunityDraft {
+            hashtags: vec!["Music".into()],
+            ..Default::default()
+        };
+        chosen.ensure_default_hashtag();
+        assert_eq!(chosen.hashtags, vec!["Music".to_string()]);
+    }
+
+    #[test]
+    fn community_hashtags_parse_every_server_format_and_round_trip() {
+        assert!(parse_community_hashtags("").is_empty());
+        assert!(parse_community_hashtags("  ").is_empty());
+        assert_eq!(parse_community_hashtags("Gaming"), vec!["Gaming"]);
+        assert_eq!(
+            parse_community_hashtags("Gaming, #Music,,"),
+            vec!["Gaming", "Music"]
+        );
+        assert_eq!(
+            parse_community_hashtags("#Gaming #Music"),
+            vec!["Gaming", "Music"]
+        );
+        assert_eq!(
+            parse_community_hashtags(r##"["#Art", " Crypto ", ""]"##),
+            vec!["Art", "Crypto"]
+        );
+
+        let tags = vec!["Gaming".to_string(), "#Music".to_string(), " ".to_string()];
+        let serialized = serialize_community_hashtags(&tags);
+        assert_eq!(serialized, "Gaming,Music");
+        assert_eq!(
+            parse_community_hashtags(&serialized),
+            vec!["Gaming", "Music"]
+        );
+    }
+
+    #[test]
+    fn clan_and_community_info_read_hashtags_from_api_desc() {
+        use mezon_client::transport::ApiClanDesc;
+        let desc = ApiClanDesc {
+            clan_id: 9,
+            is_community: true,
+            hashtags: "Gaming,Music".into(),
+            ..Default::default()
+        };
+        let clan = Clan::from(desc.clone());
+        assert_eq!(clan.hashtags, vec!["Gaming", "Music"]);
+        assert_eq!(CommunityInfo::from(&clan).hashtags, clan.hashtags);
+        assert_eq!(CommunityInfo::from(desc).hashtags, clan.hashtags);
+        assert_eq!(
+            CommunityDraft::from_info(&CommunityInfo::from(&clan)).hashtags,
+            clan.hashtags
+        );
     }
 
     #[test]

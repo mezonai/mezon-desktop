@@ -1195,6 +1195,8 @@ pub struct ApiClanDesc {
     pub about: String,
     #[serde(default)]
     pub short_url: String,
+    #[serde(default)]
+    pub hashtags: String,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -5088,6 +5090,7 @@ impl MezonTransport {
             description: clan.description,
             about: clan.about,
             short_url: clan.short_url,
+            hashtags: clan.hashtags,
         }
     }
 
