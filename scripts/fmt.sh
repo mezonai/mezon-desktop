@@ -29,6 +29,7 @@ PKGS=(
     -p mezon-record
     -p mezon-active-windows
     -p mezon-grammar
+    -p mezon-ns
     -p mmn-client
 )
 
