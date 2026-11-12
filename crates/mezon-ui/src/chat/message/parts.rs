@@ -375,16 +375,6 @@ pub fn avatar_element(msg: &Message, ctx: &RowCtx, cx: &App) -> AnyElement {
     let mut avatar = Avatar::new()
         .with_size(Size::Small)
         .image_cache(ctx.avatar_cache.clone());
-    if let Some(ProfileContext::Clan(clan_id)) = ctx.profile_context
-        && let Some(user_id) = msg.sender_user_id.filter(|id| !id.is_zero())
-        && ClanMembersStore::global(cx)
-            .read(cx)
-            .is_known_non_member(clan_id, user_id)
-        && !msg.is_sending()
-        && !mezon_store::is_anonymous_sender_id(&msg.sender_id, cx)
-    {
-        return avatar.anonymous(true).into_any_element();
-    }
     let (raw_url, proxied) = if mezon_store::is_anonymous_sender_id(&msg.sender_id, cx) {
         avatar = avatar.pending(msg.is_sending());
         if msg.avatar_url.is_empty() {
