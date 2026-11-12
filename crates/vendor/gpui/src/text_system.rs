@@ -642,13 +642,26 @@ impl WindowTextSystem {
     /// Subsets of the line can be styled independently with the `runs` parameter.
     /// Generally, you should prefer to use [`Self::shape_line`] instead, which
     /// can be painted directly.
-    pub fn layout_line(
+    pub fn layout_line<Text>(
         &self,
-        text: &str,
+        text: Text,
         font_size: Pixels,
         runs: &[TextRun],
         force_width: Option<Pixels>,
-    ) -> Arc<LineLayout> {
+    ) -> Arc<LineLayout>
+    where
+        Text: AsRef<str>,
+        SharedString: From<Text>,
+    {
+        let font_runs = self.font_runs(runs);
+        let layout = self
+            .line_layout_cache
+            .layout_line(text, font_size, &font_runs, force_width);
+        self.font_runs_pool.lock().push(font_runs);
+        layout
+    }
+
+    fn font_runs(&self, runs: &[TextRun]) -> Vec<FontRun> {
         let mut last_run = None::<&TextRun>;
         let mut font_runs = self.font_runs_pool.lock().pop().unwrap_or_default();
         font_runs.clear();
@@ -681,17 +694,7 @@ impl WindowTextSystem {
             }
         }
 
-        // mezon vendor edit: `LineLayoutCache::layout_line` is generic over
-        // `AsRef<str>`, but upstream passed `&SharedString::new(text)` — an `Arc<str>`
-        // copy of the whole line on EVERY call, including the common cache hit. Pass
-        // the `&str` straight through so only a genuine cache miss allocates.
-        let layout = self
-            .line_layout_cache
-            .layout_line(text, font_size, &font_runs, force_width);
-
-        self.font_runs_pool.lock().push(font_runs);
-
-        layout
+        font_runs
     }
 
     /// Returns the shaped layout width of for the given character, in the given font and size.
