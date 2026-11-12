@@ -2365,6 +2365,7 @@
   "contextMenu.member.shareContact": "Share This Contact",
   "contextMenu.member.unBanChat": "Unban",
   "contextMenu.member.unblock": "Unblock",
+  "contextMenu.member.block": "Block",
   "contextMenu.member.unblockFailed": "Failed to unblock user",
   "contextMenu.member.unblockSuccess": "Unblocked user successfully",
   "contextMenu.menu": "Menu",

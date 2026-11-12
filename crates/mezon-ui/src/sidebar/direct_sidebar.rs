@@ -6,10 +6,10 @@ use gpui::{
     UniformListScrollHandle, WeakEntity, Window, div, prelude::*, px, size, uniform_list,
 };
 use mezon_store::{
-    AccountEvent, AccountStore, BuzzStore, ChannelEvent, ChannelId, ChannelList, ClanId,
-    DirectChannel, DirectKind, DirectMessageStore, DmAvatarPresence, FriendState, FriendStore,
-    NotificationSettingStore, PresenceEvent, PresenceStore, Settings, UserId, UserPresence,
-    current_user_presence,
+    AccountEvent, AccountStore, BadgeService, BuzzStore, ChannelEvent, ChannelId, ChannelList,
+    ClanId, DirectChannel, DirectKind, DirectMessageStore, DmAvatarPresence, FriendState,
+    FriendStore, NotificationSettingStore, PresenceEvent, PresenceStore, Settings, UserId,
+    UserPresence, current_user_presence,
 };
 
 use super::channel_sidebar::menu::{MUTE_DURATIONS, apply_mute, mute_label, submenu_options};
@@ -379,6 +379,8 @@ struct DmMenuTarget {
     avatar: String,
     pinned: bool,
     friend_state: Option<FriendState>,
+    blocked_by_me: bool,
+    is_self: bool,
 }
 
 fn dm_menu_target(channel_id: ChannelId, cx: &App) -> Option<DmMenuTarget> {
@@ -386,9 +388,19 @@ fn dm_menu_target(channel_id: ChannelId, cx: &App) -> Option<DmMenuTarget> {
     let store = store.read(cx);
     let channel = store.find(channel_id)?;
     let peer = channel.peer_user_id;
-    let friend_state = peer.and_then(|user| {
-        FriendStore::try_global(cx)
-            .and_then(|friends| friends.read(cx).friend(user).map(|friend| friend.state))
+    let (friend_state, blocked_by_me) = peer
+        .and_then(|user| {
+            FriendStore::try_global(cx).map(|friends| {
+                let friends = friends.read(cx);
+                let blocked_by_me = friends.is_user_blocked_by_me(user, cx);
+                let friend_state = friends.friend(user).map(|friend| friend.state);
+                (friend_state, blocked_by_me)
+            })
+        })
+        .unwrap_or((None, false));
+    let is_self = peer.is_some_and(|user| {
+        BadgeService::try_global(cx).and_then(|badge| badge.read(cx).current_user_id(cx))
+            == Some(user)
     });
     Some(DmMenuTarget {
         is_group: channel.kind == DirectKind::Group,
@@ -398,6 +410,8 @@ fn dm_menu_target(channel_id: ChannelId, cx: &App) -> Option<DmMenuTarget> {
         avatar: channel.avatar.clone(),
         pinned: store.is_pinned(channel_id),
         friend_state,
+        blocked_by_me,
+        is_self,
     })
 }
 
@@ -426,6 +440,8 @@ fn build_dm_menu(
     let peer = target.as_ref().and_then(|target| target.peer);
     let friend_state = target.as_ref().and_then(|target| target.friend_state);
     let blocked = friend_state == Some(FriendState::Blocked);
+    let blocked_by_me = target.as_ref().is_some_and(|target| target.blocked_by_me);
+    let is_self = target.as_ref().is_some_and(|target| target.is_self);
 
     if !is_group && let Some(user) = peer {
         let profile_settings = settings.clone();
@@ -500,6 +516,7 @@ fn build_dm_menu(
     }
 
     if !is_group
+        && !is_self
         && let Some(user) = peer
         && let Some(target) = target.as_ref()
     {
@@ -550,24 +567,20 @@ fn build_dm_menu(
             }
         }
 
-        if friend_state == Some(FriendState::Friend) || blocked {
-            if blocked {
-                menu = menu.item(
-                    t("directMessage.contextMenu.unblock"),
-                    move |_window: &mut Window, cx: &mut App| {
-                        FriendStore::global(cx)
-                            .update(cx, |store, cx| store.unblock_friend(user, cx));
-                    },
-                );
-            } else {
-                menu = menu.danger_item(
-                    t("directMessage.contextMenu.block"),
-                    move |_window: &mut Window, cx: &mut App| {
-                        FriendStore::global(cx)
-                            .update(cx, |store, cx| store.block_friend(user, cx));
-                    },
-                );
-            }
+        if blocked_by_me {
+            menu = menu.item(
+                t("directMessage.contextMenu.unblock"),
+                move |_window: &mut Window, cx: &mut App| {
+                    FriendStore::global(cx).update(cx, |store, cx| store.unblock_friend(user, cx));
+                },
+            );
+        } else {
+            menu = menu.danger_item(
+                t("directMessage.contextMenu.block"),
+                move |_window: &mut Window, cx: &mut App| {
+                    FriendStore::global(cx).update(cx, |store, cx| store.block_friend(user, cx));
+                },
+            );
         }
     }
 

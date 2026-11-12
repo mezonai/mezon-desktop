@@ -2365,6 +2365,7 @@
   "contextMenu.member.shareContact": "Dela denna kontakt",
   "contextMenu.member.unBanChat": "Avbannlys",
   "contextMenu.member.unblock": "Avblockera",
+  "contextMenu.member.block": "Blokera",
   "contextMenu.member.unblockFailed": "Kunde inte av blockera användare",
   "contextMenu.member.unblockSuccess": "Användare av blockerad framgångsrikt",
   "contextMenu.menu": "Alternativ",

@@ -1082,6 +1082,20 @@ fn rebuild_pin_content_json(msg: &Message) -> String {
                     "type": "b",
                 }));
             }
+            MessageSpan::Styled { text, style } => {
+                let start = pin_utf16_len(&t);
+                t.push_str(text);
+                let end = pin_utf16_len(&t);
+                for (on, kind) in [(style.bold, "b"), (style.italic, "i"), (style.strike, "st")] {
+                    if on {
+                        mk.push(serde_json::json!({
+                            "s": start,
+                            "e": end,
+                            "type": kind,
+                        }));
+                    }
+                }
+            }
             MessageSpan::Code(text) => {
                 let start = pin_utf16_len(&t);
                 t.push_str(text);

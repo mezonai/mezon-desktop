@@ -390,10 +390,21 @@ pub enum LinkKind {
     TikTok,
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct InlineStyle {
+    pub bold: bool,
+    pub italic: bool,
+    pub strike: bool,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum MessageSpan {
     Text(SharedString),
     Bold(SharedString),
+    Styled {
+        text: SharedString,
+        style: InlineStyle,
+    },
     Code(SharedString),
     CodeBlock {
         language: Option<String>,
@@ -731,6 +742,7 @@ pub struct PollDetail {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RichRunKind {
     Bold,
+    Styled(InlineStyle),
     Code,
     Link,
     Mention,
@@ -1112,6 +1124,13 @@ fn parse_spans_with_source(
         }
         String::from_utf16_lossy(&units[s..e])
     };
+    let snap = |s: i64, e: i64| -> (i64, i64) {
+        let is_low = |i: i64| i > 0 && i < total && (0xDC00..=0xDFFF).contains(&units[i as usize]);
+        (
+            if is_low(s) { s - 1 } else { s },
+            if is_low(e) { e + 1 } else { e },
+        )
+    };
 
     #[derive(Clone, Copy)]
     enum Kind {
@@ -1121,12 +1140,39 @@ fn parse_spans_with_source(
         Markdown,
         Link(LinkKind),
     }
+    let mut styles: Vec<(i64, i64, InlineStyle)> = Vec::new();
+    for t in &content.mk {
+        let s = t.s.unwrap_or(0).clamp(0, total);
+        let e = t.e.unwrap_or(0).clamp(0, total);
+        if e <= s {
+            continue;
+        }
+        let style = match t.kind.as_deref() {
+            Some("b") => InlineStyle {
+                bold: true,
+                italic: false,
+                strike: false,
+            },
+            Some("i") => InlineStyle {
+                bold: false,
+                italic: true,
+                strike: false,
+            },
+            Some("st") => InlineStyle {
+                bold: false,
+                italic: false,
+                strike: true,
+            },
+            _ => continue,
+        };
+        styles.push((s, e, style));
+    }
+
     let mut toks: Vec<(i64, i64, Kind, ContentToken)> = Vec::new();
     let collect =
         |list: &[ContentToken], kind: Kind, toks: &mut Vec<(i64, i64, Kind, ContentToken)>| {
             for t in list {
-                let s = t.s.unwrap_or(0);
-                let e = t.e.unwrap_or(0);
+                let (s, e) = snap(t.s.unwrap_or(0), t.e.unwrap_or(0));
                 if e > s {
                     toks.push((s, e, kind, t.clone()));
                 }
@@ -1135,10 +1181,21 @@ fn parse_spans_with_source(
     collect(&content.mentions, Kind::Mention, &mut toks);
     collect(&content.hg, Kind::Hashtag, &mut toks);
     collect(&content.ej, Kind::Emoji, &mut toks);
-    collect(&content.mk, Kind::Markdown, &mut toks);
-    for t in &content.lk {
+    for t in &content.mk {
+        if !matches!(
+            t.kind.as_deref(),
+            Some("c" | "s" | "t" | "pre" | "lk" | "vk" | "lk_yt" | "lk_fb" | "lk_tt" | "lk_ogp")
+        ) {
+            continue;
+        }
         let s = t.s.unwrap_or(0);
         let e = t.e.unwrap_or(0);
+        if e > s {
+            toks.push((s, e, Kind::Markdown, t.clone()));
+        }
+    }
+    for t in &content.lk {
+        let (s, e) = snap(t.s.unwrap_or(0), t.e.unwrap_or(0));
         if e > s {
             let text = slice(s, e);
             let target = resolve_link_url(t.url.as_deref().unwrap_or(""), &text);
@@ -1151,7 +1208,73 @@ fn parse_spans_with_source(
     toks.retain(|(s, e, kind, _)| !matches!(kind, Kind::Mention) || slice(*s, *e).starts_with('@'));
     toks.sort_by_key(|t| t.0);
 
+    let emit_styled_range =
+        |a: i64, b: i64, spans: &mut Vec<MessageSpan>, source_ranges: &mut Vec<Range<i64>>| {
+            let a = a.clamp(0, total);
+            let b = b.clamp(0, total);
+            if b <= a {
+                return;
+            }
+            let mut points = Vec::with_capacity(2 + styles.len() * 2);
+            points.push(a);
+            points.push(b);
+            for &(s, e, _) in &styles {
+                if s > a && s < b {
+                    points.push(s);
+                }
+                if e > a && e < b {
+                    points.push(e);
+                }
+            }
+            points.sort_unstable();
+            points.dedup();
+
+            let style_at = |seg_s: i64, seg_e: i64| -> InlineStyle {
+                let mut out = InlineStyle::default();
+                for &(s, e, st) in &styles {
+                    if s <= seg_s && e >= seg_e {
+                        out.bold |= st.bold;
+                        out.italic |= st.italic;
+                        out.strike |= st.strike;
+                    }
+                }
+                out
+            };
+
+            let mut idx = 0;
+            while idx + 1 < points.len() {
+                let seg_s = points[idx];
+                let mut seg_e = points[idx + 1];
+                let style = style_at(seg_s, seg_e);
+                idx += 1;
+                while idx + 1 < points.len() && style_at(points[idx], points[idx + 1]) == style {
+                    seg_e = points[idx + 1];
+                    idx += 1;
+                }
+                let raw = slice(seg_s, seg_e);
+                let span = match style {
+                    InlineStyle {
+                        bold: false,
+                        italic: false,
+                        strike: false,
+                    } => MessageSpan::Text(raw.into()),
+                    InlineStyle {
+                        bold: true,
+                        italic: false,
+                        strike: false,
+                    } => MessageSpan::Bold(strip_marker(&raw, "**").into()),
+                    _ => MessageSpan::Styled {
+                        text: raw.into(),
+                        style,
+                    },
+                };
+                source_ranges.push(seg_s..seg_e);
+                spans.push(span);
+            }
+        };
+
     let mut spans: Vec<MessageSpan> = Vec::new();
+    let mut source_ranges: Vec<Range<i64>> = Vec::new();
     let mut last = 0i64;
     let mut prev_end = i64::MIN;
     for (s, e, kind, tok) in toks {
@@ -1159,9 +1282,7 @@ fn parse_spans_with_source(
             continue;
         }
         if last < s {
-            let gap = MessageSpan::Text(slice(last, s).into());
-            on_source(last..s, &gap);
-            spans.push(gap);
+            emit_styled_range(last, s, &mut spans, &mut source_ranges);
         }
         let inner = slice(s, e);
         let source_start = spans.len();
@@ -1213,7 +1334,6 @@ fn parse_spans_with_source(
             Kind::Markdown => {
                 let ty = tok.kind.as_deref().unwrap_or("");
                 match ty {
-                    "b" => spans.push(MessageSpan::Bold(strip_marker(&inner, "**").into())),
                     "c" | "s" => spans.push(MessageSpan::Code(strip_marker(&inner, "`").into())),
                     "t" | "pre" => {
                         let (language, text) = strip_code_fence(&inner);
@@ -1246,23 +1366,26 @@ fn parse_spans_with_source(
                 }
             }
         }
-        for span in &spans[source_start..] {
-            on_source(s..e, span);
+        for _ in source_start..spans.len() {
+            source_ranges.push(s..e);
         }
         prev_end = e;
         last = e;
     }
-    let tail_index = spans.len();
     if last < total {
-        let tail = MessageSpan::Text(slice(last, total).into());
-        spans.push(tail);
+        emit_styled_range(last, total, &mut spans, &mut source_ranges);
     }
+    let prev_len = spans.len();
     drop_hanging_line_break(&mut spans);
-    if let Some(MessageSpan::Text(tail)) = spans.get(tail_index) {
-        on_source(
-            last..last + tail.encode_utf16().count() as i64,
-            &spans[tail_index],
-        );
+    if spans.len() < prev_len {
+        source_ranges.pop();
+    } else if let (Some(MessageSpan::Text(tail)), Some(range)) =
+        (spans.last(), source_ranges.last_mut())
+    {
+        range.end = range.start + tail.encode_utf16().count() as i64;
+    }
+    for (range, span) in source_ranges.into_iter().zip(&spans) {
+        on_source(range, span);
     }
     apply_headings(spans)
 }
@@ -1551,29 +1674,350 @@ pub fn spans_only_emoji(spans: &[MessageSpan]) -> bool {
     has_emoji
 }
 
-pub fn composer_edit_source(content: &str, spans: &[MessageSpan]) -> String {
+pub fn composer_edit_source(
+    content: &str,
+    spans: &[MessageSpan],
+    raw_content: Option<&str>,
+) -> String {
+    if let Some(raw) = raw_content
+        && let Ok(parsed) = serde_json::from_str::<ApiMessageContent>(raw)
+        && let Some(out) = position_edit_source(content, &parsed)
+    {
+        return out;
+    }
     markdown_edit_source(content, spans).unwrap_or_else(|| content.to_string())
+}
+
+fn position_edit_source(content: &str, parsed: &ApiMessageContent) -> Option<String> {
+    if parsed.t != content {
+        return None;
+    }
+    let units: Vec<u16> = content.encode_utf16().collect();
+    let total = units.len();
+
+    let mut original_set: Vec<(&'static str, i32, i32)> = Vec::new();
+    let mut style_ranges: Vec<(usize, usize, bool, bool, bool)> = Vec::new();
+    let mut code_spans: Vec<(usize, usize, &'static str, u8)> = Vec::new();
+
+    for tok in &parsed.mk {
+        let s = tok.s.unwrap_or(0).clamp(0, total as i64) as usize;
+        let e = tok.e.unwrap_or(0).clamp(0, total as i64) as usize;
+        if e <= s {
+            continue;
+        }
+        let canonical = match tok.kind.as_deref() {
+            Some("b") => {
+                if let Some(entry) = style_ranges.iter_mut().find(|r| r.0 == s && r.1 == e) {
+                    entry.2 = true;
+                } else {
+                    style_ranges.push((s, e, true, false, false));
+                }
+                "b"
+            }
+            Some("i") => {
+                if let Some(entry) = style_ranges.iter_mut().find(|r| r.0 == s && r.1 == e) {
+                    entry.3 = true;
+                } else {
+                    style_ranges.push((s, e, false, true, false));
+                }
+                "i"
+            }
+            Some("st") => {
+                if let Some(entry) = style_ranges.iter_mut().find(|r| r.0 == s && r.1 == e) {
+                    entry.4 = true;
+                } else {
+                    style_ranges.push((s, e, false, false, true));
+                }
+                "st"
+            }
+            Some("c" | "s") => {
+                code_spans.push((s, e, "`", 0));
+                "c"
+            }
+            Some("pre" | "t") => {
+                code_spans.push((s, e, "```", 1));
+                "pre"
+            }
+            _ => continue,
+        };
+        original_set.push((canonical, s as i32, e as i32));
+    }
+
+    if original_set.is_empty() {
+        return None;
+    }
+    original_set.sort_unstable();
+    original_set.dedup();
+
+    #[derive(Clone, Copy)]
+    struct PosMarker {
+        s: usize,
+        e: usize,
+        marker: &'static str,
+        rank: u8,
+    }
+
+    let raw_protected: Vec<(usize, usize)> = parsed
+        .mentions
+        .iter()
+        .chain(&parsed.hg)
+        .chain(&parsed.ej)
+        .filter_map(|tok| {
+            let s = tok.s.unwrap_or(0).clamp(0, total as i64) as usize;
+            let e = tok.e.unwrap_or(0).clamp(0, total as i64) as usize;
+            (e > s).then_some((s, e))
+        })
+        .collect();
+
+    for italic_marker in ["*", "_"] {
+        let mut markers: Vec<PosMarker> = Vec::with_capacity(style_ranges.len() + code_spans.len());
+        for &(s, e, bold, italic, strike) in &style_ranges {
+            if strike {
+                markers.push(PosMarker {
+                    s,
+                    e,
+                    marker: "~~",
+                    rank: 5,
+                });
+            }
+            if bold && italic {
+                markers.push(PosMarker {
+                    s,
+                    e,
+                    marker: "***",
+                    rank: 4,
+                });
+            } else if bold {
+                markers.push(PosMarker {
+                    s,
+                    e,
+                    marker: "**",
+                    rank: 3,
+                });
+            } else if italic {
+                markers.push(PosMarker {
+                    s,
+                    e,
+                    marker: italic_marker,
+                    rank: 2,
+                });
+            }
+        }
+        for &(s, e, marker, rank) in &code_spans {
+            markers.push(PosMarker { s, e, marker, rank });
+        }
+        markers.sort_by_key(|m| (m.s, std::cmp::Reverse(m.e), std::cmp::Reverse(m.rank)));
+
+        let mut points: Vec<usize> = Vec::with_capacity(2 + markers.len() * 2);
+        points.push(0);
+        points.push(total);
+        for m in &markers {
+            points.push(m.s);
+            points.push(m.e);
+        }
+        points.sort_unstable();
+        points.dedup();
+
+        let mut out = String::with_capacity(content.len() + markers.len() * 4);
+        for (idx, &cursor) in points.iter().enumerate() {
+            if cursor > 0 {
+                for m in markers.iter().rev().filter(|m| m.e == cursor) {
+                    out.push_str(m.marker);
+                }
+            }
+            let Some(&next_pos) = points.get(idx + 1) else {
+                break;
+            };
+            for m in markers.iter().filter(|m| m.s == cursor) {
+                out.push_str(m.marker);
+            }
+            out.push_str(&String::from_utf16_lossy(&units[cursor..next_pos]));
+        }
+
+        let shift_start = |pos: usize| -> i32 {
+            let inserted: usize = markers
+                .iter()
+                .map(|m| {
+                    let mut n = 0;
+                    if m.s <= pos {
+                        n += m.marker.len();
+                    }
+                    if m.e <= pos {
+                        n += m.marker.len();
+                    }
+                    n
+                })
+                .sum();
+            (pos + inserted) as i32
+        };
+        let shift_end = |pos: usize| -> i32 {
+            let inserted: usize = markers
+                .iter()
+                .map(|m| {
+                    let mut n = 0;
+                    if m.s < pos {
+                        n += m.marker.len();
+                    }
+                    if m.e < pos {
+                        n += m.marker.len();
+                    }
+                    n
+                })
+                .sum();
+            (pos + inserted) as i32
+        };
+        let protected: Vec<(i32, i32)> = raw_protected
+            .iter()
+            .map(|&(s, e)| (shift_start(s), shift_end(e)))
+            .collect();
+
+        let stripped = mezon_client::transport::strip_markdown_protected(&out, &protected);
+        if stripped.text != content {
+            continue;
+        }
+        let mut stripped_set: Vec<(&'static str, i32, i32)> = stripped
+            .markdowns
+            .iter()
+            .filter_map(|m| {
+                let canonical = match m.kind.as_str() {
+                    "b" => "b",
+                    "i" => "i",
+                    "st" => "st",
+                    "c" | "s" => "c",
+                    "pre" | "t" => "pre",
+                    _ => return None,
+                };
+                Some((canonical, m.s, m.e))
+            })
+            .collect();
+        stripped_set.sort_unstable();
+        stripped_set.dedup();
+        if stripped_set == original_set {
+            return Some(out);
+        }
+    }
+    None
+}
+
+fn span_inline_style(span: &MessageSpan) -> Option<(&str, InlineStyle)> {
+    match span {
+        MessageSpan::Bold(t) => Some((
+            t.as_ref(),
+            InlineStyle {
+                bold: true,
+                italic: false,
+                strike: false,
+            },
+        )),
+        MessageSpan::Styled { text, style } => Some((text.as_ref(), *style)),
+        _ => None,
+    }
+}
+
+#[derive(Clone, Copy)]
+enum EditMarker {
+    Strike(usize),
+    BoldItalic(usize),
+    Bold(usize),
+    Italic(usize),
+}
+
+impl EditMarker {
+    fn end_span(self) -> usize {
+        match self {
+            Self::Strike(end) | Self::BoldItalic(end) | Self::Bold(end) | Self::Italic(end) => end,
+        }
+    }
+
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Strike(_) => "~~",
+            Self::BoldItalic(_) => "***",
+            Self::Bold(_) => "**",
+            Self::Italic(_) => "*",
+        }
+    }
+
+    fn order_key(self) -> (usize, u8) {
+        let rank = match self {
+            Self::Strike(_) => 3,
+            Self::BoldItalic(_) => 2,
+            Self::Bold(_) => 1,
+            Self::Italic(_) => 0,
+        };
+        (self.end_span(), rank)
+    }
 }
 
 pub fn markdown_edit_source(content: &str, spans: &[MessageSpan]) -> Option<String> {
     let has_markdown = spans.iter().any(|span| {
         matches!(
             span,
-            MessageSpan::Bold(_) | MessageSpan::Code(_) | MessageSpan::CodeBlock { .. }
+            MessageSpan::Bold(_)
+                | MessageSpan::Styled { .. }
+                | MessageSpan::Code(_)
+                | MessageSpan::CodeBlock { .. }
         )
     });
     if !has_markdown {
         return None;
     }
     let mut out = String::with_capacity(content.len() + 8);
-    for span in spans {
+    let mut open: Vec<EditMarker> = Vec::new();
+    for (idx, span) in spans.iter().enumerate() {
+        if let Some((text, style)) = span_inline_style(span) {
+            let has_strike = open.iter().any(|m| matches!(m, EditMarker::Strike(_)));
+            let has_bold = open
+                .iter()
+                .any(|m| matches!(m, EditMarker::Bold(_) | EditMarker::BoldItalic(_)));
+            let has_italic = open
+                .iter()
+                .any(|m| matches!(m, EditMarker::Italic(_) | EditMarker::BoldItalic(_)));
+            let max_end = open.last().map_or(usize::MAX, |m| m.end_span());
+            let run_end = |pred: fn(InlineStyle) -> bool| -> usize {
+                let mut end = idx;
+                while end + 1 < spans.len()
+                    && span_inline_style(&spans[end + 1]).is_some_and(|(_, s)| pred(s))
+                {
+                    end += 1;
+                }
+                end.min(max_end)
+            };
+            let mut new_markers = Vec::with_capacity(3);
+            if style.strike && !has_strike {
+                new_markers.push(EditMarker::Strike(run_end(|s| s.strike)));
+            }
+            let need_bold = style.bold && !has_bold;
+            let need_italic = style.italic && !has_italic;
+            if need_bold && need_italic {
+                let b_end = run_end(|s| s.bold);
+                let i_end = run_end(|s| s.italic);
+                if b_end == i_end {
+                    new_markers.push(EditMarker::BoldItalic(b_end));
+                } else {
+                    new_markers.push(EditMarker::Bold(b_end));
+                    new_markers.push(EditMarker::Italic(i_end));
+                }
+            } else if need_bold {
+                new_markers.push(EditMarker::Bold(run_end(|s| s.bold)));
+            } else if need_italic {
+                new_markers.push(EditMarker::Italic(run_end(|s| s.italic)));
+            }
+            new_markers.sort_by_key(|m| std::cmp::Reverse(m.order_key()));
+            for m in new_markers {
+                out.push_str(m.as_str());
+                open.push(m);
+            }
+            out.push_str(text);
+            while open.last().is_some_and(|m| m.end_span() == idx) {
+                let m = open.pop().expect("checked above");
+                out.push_str(m.as_str());
+            }
+            continue;
+        }
         match span {
             MessageSpan::Text(t) => out.push_str(t),
-            MessageSpan::Bold(t) => {
-                out.push_str("**");
-                out.push_str(t);
-                out.push_str("**");
-            }
+            MessageSpan::Bold(_) | MessageSpan::Styled { .. } => unreachable!(),
             MessageSpan::Code(t) => {
                 out.push('`');
                 out.push_str(t);
@@ -1698,6 +2142,7 @@ pub(crate) fn reply_preview_spans(spans: &[MessageSpan]) -> Vec<MessageSpan> {
             } => builder.push_emoji(name, emoji_id, src),
             MessageSpan::Text(text)
             | MessageSpan::Bold(text)
+            | MessageSpan::Styled { text, .. }
             | MessageSpan::Code(text)
             | MessageSpan::CodeBlock { text, .. }
             | MessageSpan::Link { text, .. }
@@ -1892,6 +2337,15 @@ pub fn build_rich_layout(spans: &[MessageSpan]) -> Option<Arc<RichLayout>> {
                 runs.push(RichRun {
                     range: start..text.len(),
                     kind: RichRunKind::Bold,
+                    click: None,
+                });
+            }
+            MessageSpan::Styled { text: t, style } => {
+                let start = text.len();
+                text.push_str(t);
+                runs.push(RichRun {
+                    range: start..text.len(),
+                    kind: RichRunKind::Styled(*style),
                     click: None,
                 });
             }
@@ -2812,7 +3266,15 @@ mod tests {
             serde_json::from_str(&sent.json).expect("send content json");
         let spans = parse_spans(&content);
         assert_ne!(content.t.as_str(), raw);
-        assert_eq!(composer_edit_source(&content.t, &spans), raw);
+        assert_eq!(
+            composer_edit_source(&content.t, &spans, Some(&sent.json)),
+            raw
+        );
+        assert_eq!(composer_edit_source(&content.t, &spans, None), raw);
+        assert_eq!(
+            composer_edit_source(&content.t, &spans, Some(r#"{"t":"other"}"#)),
+            raw
+        );
     }
 
     #[test]
@@ -3232,6 +3694,258 @@ mod tests {
     }
 
     #[test]
+    fn parse_spans_emits_italic_strike_and_bold_italic_styles() {
+        let italic = ApiMessageContent {
+            t: "it".into(),
+            mk: vec![ContentToken {
+                kind: Some("i".into()),
+                ..token(0, 2)
+            }],
+            ..Default::default()
+        };
+        assert_eq!(
+            parse_spans(&italic),
+            vec![MessageSpan::Styled {
+                text: "it".into(),
+                style: InlineStyle {
+                    bold: false,
+                    italic: true,
+                    strike: false,
+                },
+            }]
+        );
+
+        let strike = ApiMessageContent {
+            t: "st".into(),
+            mk: vec![ContentToken {
+                kind: Some("st".into()),
+                ..token(0, 2)
+            }],
+            ..Default::default()
+        };
+        assert_eq!(
+            parse_spans(&strike),
+            vec![MessageSpan::Styled {
+                text: "st".into(),
+                style: InlineStyle {
+                    bold: false,
+                    italic: false,
+                    strike: true,
+                },
+            }]
+        );
+
+        let bold_italic = ApiMessageContent {
+            t: "bi".into(),
+            mk: vec![
+                ContentToken {
+                    kind: Some("b".into()),
+                    ..token(0, 2)
+                },
+                ContentToken {
+                    kind: Some("i".into()),
+                    ..token(0, 2)
+                },
+            ],
+            ..Default::default()
+        };
+        assert_eq!(
+            parse_spans(&bold_italic),
+            vec![MessageSpan::Styled {
+                text: "bi".into(),
+                style: InlineStyle {
+                    bold: true,
+                    italic: true,
+                    strike: false,
+                },
+            }]
+        );
+    }
+
+    #[test]
+    fn parse_spans_splits_nested_bold_and_strike_without_dropping_text() {
+        let content = ApiMessageContent {
+            t: "a b c".into(),
+            mk: vec![
+                ContentToken {
+                    kind: Some("b".into()),
+                    ..token(0, 5)
+                },
+                ContentToken {
+                    kind: Some("st".into()),
+                    ..token(2, 3)
+                },
+            ],
+            ..Default::default()
+        };
+        assert_eq!(
+            parse_spans(&content),
+            vec![
+                MessageSpan::Bold("a ".into()),
+                MessageSpan::Styled {
+                    text: "b".into(),
+                    style: InlineStyle {
+                        bold: true,
+                        italic: false,
+                        strike: true,
+                    },
+                },
+                MessageSpan::Bold(" c".into()),
+            ]
+        );
+    }
+
+    #[test]
+    fn parse_spans_styles_plain_text_around_a_mention_and_ignores_unknown_mk() {
+        let with_mention = ApiMessageContent {
+            t: "hi @bob yo".into(),
+            mk: vec![ContentToken {
+                kind: Some("i".into()),
+                ..token(0, 10)
+            }],
+            mentions: vec![ContentToken {
+                user_id: Some("42".into()),
+                username: Some("bob".into()),
+                ..token(3, 7)
+            }],
+            ..Default::default()
+        };
+        let italic = InlineStyle {
+            bold: false,
+            italic: true,
+            strike: false,
+        };
+        assert_eq!(
+            parse_spans(&with_mention),
+            vec![
+                MessageSpan::Styled {
+                    text: "hi ".into(),
+                    style: italic,
+                },
+                MessageSpan::Mention {
+                    display: "@bob".into(),
+                    user_id: Some("42".into()),
+                    role_id: None,
+                },
+                MessageSpan::Styled {
+                    text: " yo".into(),
+                    style: italic,
+                },
+            ]
+        );
+
+        let unknown = ApiMessageContent {
+            t: "plain".into(),
+            mk: vec![ContentToken {
+                kind: Some("unknown_future_type".into()),
+                ..token(0, 5)
+            }],
+            ..Default::default()
+        };
+        assert_eq!(
+            parse_spans(&unknown),
+            vec![MessageSpan::Text("plain".into())]
+        );
+    }
+
+    #[test]
+    fn markdown_edit_source_round_trips_inline_styles() {
+        for raw in [
+            "*it*",
+            "_it_",
+            "***bi***",
+            "~~st~~",
+            "**a ~~b~~ c**",
+            "**a *b* c**",
+            "*a ~~b~~ c*",
+            "~~a **b** c~~",
+        ] {
+            let first = mezon_client::transport::strip_markdown(raw);
+            let content = ApiMessageContent {
+                t: first.text.clone(),
+                mk: first
+                    .markdowns
+                    .iter()
+                    .map(|m| ContentToken {
+                        kind: Some(m.kind.to_string()),
+                        ..token(m.s.into(), m.e.into())
+                    })
+                    .collect(),
+                ..Default::default()
+            };
+            let spans = parse_spans(&content);
+            let edited = markdown_edit_source(&content.t, &spans)
+                .unwrap_or_else(|| panic!("expected edit source for {raw:?}"));
+            let second = mezon_client::transport::strip_markdown(&edited);
+            assert_eq!(second.text, first.text, "text mismatch for {raw:?}");
+            assert_eq!(
+                second.markdowns, first.markdowns,
+                "markdowns mismatch for {raw:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn composer_edit_source_position_builder_round_trips_nested_and_protected() {
+        let style_set = |mds: &[mezon_client::transport::OutgoingMarkdown]| {
+            let mut set: Vec<(String, i32, i32)> = mds
+                .iter()
+                .filter(|m| matches!(m.kind.as_str(), "b" | "i" | "st" | "c" | "s" | "pre" | "t"))
+                .map(|m| (m.kind.clone(), m.s, m.e))
+                .collect();
+            set.sort();
+            set.dedup();
+            set
+        };
+
+        for raw in [
+            "_a **b**_",
+            "**run `x` first**",
+            "~~**a** b~~",
+            "***bi***",
+            "**a ~~b~~ c**",
+            "mid*word*s",
+        ] {
+            let sent =
+                mezon_client::transport::build_send_content(raw, &[], &Default::default(), &[]);
+            let content: ApiMessageContent =
+                serde_json::from_str(&sent.json).expect("send content json");
+            let spans = parse_spans(&content);
+            let edited = composer_edit_source(&content.t, &spans, Some(&sent.json));
+            let stripped = mezon_client::transport::strip_markdown(&edited);
+            assert_eq!(stripped.text, sent.text, "text mismatch for {raw:?}");
+            assert_eq!(
+                style_set(&stripped.markdowns),
+                style_set(&sent.markdowns),
+                "style set mismatch for {raw:?}"
+            );
+        }
+
+        let mention_raw = "**a @bob c**";
+        let mention = mezon_client::transport::OutgoingMention {
+            user_id: "42".into(),
+            username: "bob".into(),
+            s: 4,
+            e: 8,
+            ..Default::default()
+        };
+        let sent = mezon_client::transport::build_send_content(
+            mention_raw,
+            std::slice::from_ref(&mention),
+            &Default::default(),
+            &[],
+        );
+        let content: ApiMessageContent =
+            serde_json::from_str(&sent.json).expect("send content json");
+        let spans = parse_spans(&content);
+        let edited = composer_edit_source(&content.t, &spans, Some(&sent.json));
+        assert_eq!(edited, mention_raw);
+        let stripped = mezon_client::transport::strip_markdown_protected(&edited, &[(4, 8)]);
+        assert_eq!(stripped.text, sent.text);
+        assert_eq!(style_set(&stripped.markdowns), style_set(&sent.markdowns));
+    }
+
+    #[test]
     fn parse_spans_accepts_numeric_user_id_from_json() {
         let content: ApiMessageContent = serde_json::from_str(
             r#"{"t":"hi @bob","mentions":[{"s":3,"e":7,"user_id":42,"username":"bob"}]}"#,
@@ -3301,6 +4015,26 @@ mod tests {
                 user_id: Some("1".into()),
                 role_id: None,
             })
+        );
+    }
+
+    #[test]
+    fn parse_spans_does_not_split_emoji_in_mention() {
+        let content = ApiMessageContent {
+            t: "@duoc 🐲".into(),
+            mentions: vec![ContentToken {
+                user_id: Some("1".into()),
+                ..token(0, 7)
+            }],
+            ..Default::default()
+        };
+        assert_eq!(
+            parse_spans(&content),
+            vec![MessageSpan::Mention {
+                display: "@duoc 🐲".into(),
+                user_id: Some("1".into()),
+                role_id: None,
+            }]
         );
     }
 

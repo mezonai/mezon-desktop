@@ -2364,6 +2364,7 @@
   "contextMenu.member.shareContact": "Падзяліцца гэтым кантактам",
   "contextMenu.member.unBanChat": "Разблакаваць",
   "contextMenu.member.unblock": "Разблакаваць",
+  "contextMenu.member.block": "Заблакаваць",
   "contextMenu.member.unblockFailed": "Не атрымалася разблакаваць карыстальніка",
   "contextMenu.member.unblockSuccess": "Карыстальнік паспяхова разблакаваны",
   "contextMenu.menu": "Меню",

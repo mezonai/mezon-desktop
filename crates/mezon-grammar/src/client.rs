@@ -63,6 +63,10 @@ impl MezonGrammarClient {
         crate::neural::restore_sentence(text, true, true)
     }
 
+    pub fn decode_teencode_diacritics(&self, text: &str) -> String {
+        crate::accent::decode_teencode_diacritics(text)
+    }
+
     pub fn correct(&self, text: &str) -> CorrectionResult {
         if text.trim().is_empty() {
             return CorrectionResult {

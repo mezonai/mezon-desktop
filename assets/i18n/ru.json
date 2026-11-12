@@ -2603,6 +2603,7 @@
   "contextMenu.member.shareContact": "Поделиться контактом",
   "contextMenu.member.unBanChat": "Разбанить",
   "contextMenu.member.unblock": "Разблокировать",
+  "contextMenu.member.block": "Заблокировать",
   "contextMenu.member.unblockFailed": "Не удалось разблокировать пользователя",
   "contextMenu.member.unblockSuccess": "Пользователь разблокирован",
   "contextMenu.menu": "Меню",

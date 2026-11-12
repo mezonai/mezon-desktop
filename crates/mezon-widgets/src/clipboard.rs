@@ -1,5 +1,5 @@
 #[cfg(target_os = "macos")]
-use gpui::AppContext as _;
+use gpui::{AppContext as _, ClipboardEntry, ClipboardString};
 use gpui::{ClipboardItem, Context, Window};
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -17,15 +17,14 @@ pub fn read_then<T: 'static>(
 ) {
     #[cfg(target_os = "macos")]
     if OFF_MAIN_THREAD_READS.load(Ordering::Relaxed) && mac::advertises_plain_text_only() {
-        let text = cx.background_spawn(async { mac::plain_text() });
+        let content = cx.background_spawn(async { mac::plain_text() });
         cx.spawn_in(window, async move |entity, cx| {
-            let Some(text) = text.await else {
+            let Some(text) = content.await else {
                 return;
             };
+            let item = ClipboardItem::new_string(text);
             entity
-                .update_in(cx, |this, window, cx| {
-                    apply(this, ClipboardItem::new_string(text), window, cx)
-                })
+                .update_in(cx, |this, window, cx| apply(this, item, window, cx))
                 .ok();
         })
         .detach();
@@ -33,6 +32,38 @@ pub fn read_then<T: 'static>(
     }
 
     let Some(item) = cx.read_from_clipboard() else {
+        return;
+    };
+    apply(this, item, window, cx);
+}
+
+pub fn read_rich_then<T: 'static>(
+    this: &mut T,
+    window: &mut Window,
+    cx: &mut Context<T>,
+    apply: impl FnOnce(&mut T, ClipboardItem, &mut Window, &mut Context<T>) + 'static,
+) {
+    #[cfg(target_os = "macos")]
+    if OFF_MAIN_THREAD_READS.load(Ordering::Relaxed) && mac::advertises_plain_text_only() {
+        let content = cx.background_spawn(async { mac::plain_text_and_html() });
+        cx.spawn_in(window, async move |entity, cx| {
+            let Some((text, html)) = content.await else {
+                return;
+            };
+            let item = ClipboardItem {
+                entries: vec![ClipboardEntry::String(
+                    ClipboardString::new(text).with_html(html),
+                )],
+            };
+            entity
+                .update_in(cx, |this, window, cx| apply(this, item, window, cx))
+                .ok();
+        })
+        .detach();
+        return;
+    }
+
+    let Some(item) = gpui::with_clipboard_html(|| cx.read_from_clipboard()) else {
         return;
     };
     apply(this, item, window, cx);
@@ -46,6 +77,7 @@ mod mac {
     use std::ptr;
 
     const PLAIN_TEXT: &str = "public.utf8-plain-text";
+    const HTML: &str = "public.html";
     const FILENAMES: &str = "NSFilenamesPboardType";
     const ZED_TEXT_HASH: &str = "zed-text-hash";
 
@@ -69,15 +101,39 @@ mod mac {
         unsafe {
             let pool: *mut Object = msg_send![class!(NSAutoreleasePool), new];
             let pasteboard: *mut Object = msg_send![class!(NSPasteboard), generalPasteboard];
-            let text = if pasteboard.is_null() {
+            let result = if pasteboard.is_null() {
                 None
             } else {
-                let kind = ns_string(PLAIN_TEXT);
-                let value: *mut Object = msg_send![pasteboard, stringForType: kind];
-                ns_string_to_rust(value)
+                string_for_type(pasteboard, PLAIN_TEXT)
             };
             let _: () = msg_send![pool, release];
-            text
+            result
+        }
+    }
+
+    pub(super) fn plain_text_and_html() -> Option<(String, Option<String>)> {
+        unsafe {
+            let pool: *mut Object = msg_send![class!(NSAutoreleasePool), new];
+            let pasteboard: *mut Object = msg_send![class!(NSPasteboard), generalPasteboard];
+            let result = if pasteboard.is_null() {
+                None
+            } else {
+                string_for_type(pasteboard, PLAIN_TEXT)
+                    .map(|text| (text, string_for_type(pasteboard, HTML)))
+            };
+            let _: () = msg_send![pool, release];
+            result
+        }
+    }
+
+    unsafe fn string_for_type(pasteboard: *mut Object, kind: &str) -> Option<String> {
+        unsafe {
+            let kind = ns_string(kind);
+            if kind.is_null() {
+                return None;
+            }
+            let value: *mut Object = msg_send![pasteboard, stringForType: kind];
+            ns_string_to_rust(value)
         }
     }
 

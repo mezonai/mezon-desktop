@@ -278,7 +278,6 @@ fn test_keeps_dotted_and_at_tokens() {
 fn test_model1_100_percent_correct_rule_and_noise_suppression() {
     let client = MezonGrammarClient::new();
 
-    // 1. Standalone acknowledgements / closing phrases -> empty
     assert!(
         client
             .suggest_quick_replies_with_model("OK bạn nhé", None, 4)
@@ -310,7 +309,6 @@ fn test_model1_100_percent_correct_rule_and_noise_suppression() {
             .is_empty()
     );
 
-    // 2. Emojis, laughter, mentions -> empty
     assert!(
         client
             .suggest_quick_replies_with_model(": ))", None, 4)
@@ -332,7 +330,6 @@ fn test_model1_100_percent_correct_rule_and_noise_suppression() {
             .is_empty()
     );
 
-    // 3. Arbitrary chatter without directive/question -> empty
     assert!(
         client
             .suggest_quick_replies_with_model("Hôm nay trời đẹp quá", None, 4)
@@ -344,7 +341,6 @@ fn test_model1_100_percent_correct_rule_and_noise_suppression() {
             .is_empty()
     );
 
-    // 4. Confident prompts with verified pronouns -> suggest replies
     let r1 = client.suggest_quick_replies_with_model("Sáng mai anh nghỉ làm nhé", None, 4);
     assert!(!r1.is_empty());
     assert!(r1.iter().any(|r| r == "Dạ vâng anh."));
@@ -362,7 +358,6 @@ fn test_model1_100_percent_correct_rule_and_noise_suppression() {
 fn test_mentioned_pronoun_syntactic_extraction_and_masking() {
     use mezon_grammar::extract_mentioned_pronoun;
 
-    // 1. Non-pronoun homophones must NOT match false pronouns
     assert_eq!(
         extract_mentioned_pronoun("Địa chỉ công ty ở đâu vậy bạn?"),
         "bạn"
@@ -383,7 +378,6 @@ fn test_mentioned_pronoun_syntactic_extraction_and_masking() {
         "bạn"
     );
 
-    // 2. Relational pairs: accurately identifies WHO IS MENTIONED
     assert_eq!(extract_mentioned_pronoun("Chị cảm ơn em nhé"), "em");
     assert_eq!(extract_mentioned_pronoun("Em cảm ơn chị nhé"), "chị");
     assert_eq!(

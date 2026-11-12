@@ -682,6 +682,18 @@ fn run_app(lock: SingleInstance, initial_url: Option<String>) {
                 include_bytes!(concat!(env!("OUT_DIR"), "/ggsans-ExtraBold.ttf")),
                 "ExtraBold",
             ),
+            (
+                include_bytes!(
+                    "../../../assets/fonts/ibm-plex-sans/IBMPlexSans-Italic-as-ggsans.ttf"
+                ),
+                "Italic",
+            ),
+            (
+                include_bytes!(
+                    "../../../assets/fonts/ibm-plex-sans/IBMPlexSans-SemiBoldItalic-as-ggsans.ttf"
+                ),
+                "SemiBoldItalic",
+            ),
         ];
         let fonts: Vec<Cow<'static, [u8]>> = gg_sans_paths
             .iter()

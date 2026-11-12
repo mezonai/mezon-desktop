@@ -8,6 +8,8 @@ pub mod deep_link;
 pub mod instance;
 pub mod notifications;
 pub mod power;
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
+mod startup_notification;
 pub mod tray;
 pub mod window_icon;
 
@@ -40,12 +42,20 @@ fn open_url_reaped(url: &str) -> anyhow::Result<()> {
     use std::os::unix::process::CommandExt as _;
     use std::process::Stdio;
 
+    #[cfg(not(target_os = "macos"))]
+    let startup_id = startup_notification::announce_launch();
     let mut last_err: Option<std::io::Error> = None;
     for mut command in open::commands(url) {
         command
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null());
+        #[cfg(not(target_os = "macos"))]
+        if let Some(id) = &startup_id {
+            command
+                .env("DESKTOP_STARTUP_ID", id)
+                .env("XDG_ACTIVATION_TOKEN", id);
+        }
         unsafe {
             command.pre_exec(|| {
                 match libc::fork() {
