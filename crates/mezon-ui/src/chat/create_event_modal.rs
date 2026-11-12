@@ -4,8 +4,9 @@ use gpui::{
     PathPromptOptions, Render, SharedString, Subscription, Task, Window, div, img, prelude::*, px,
 };
 use mezon_store::{
-    ChannelId, ChannelList, ChannelType, ClanEventItem, ClanId, ClanImageMimeType, ClanList,
-    CreateEventDraft, EventsStore, MAX_CLAN_LOGO_BYTES, Settings, UpdateEventDraft,
+    BadgeService, ChannelId, ChannelList, ChannelType, ClanEventItem, ClanId, ClanImageMimeType,
+    ClanList, ClanMembersStore, CreateEventDraft, EventsStore, MAX_CLAN_LOGO_BYTES, Settings,
+    UpdateEventDraft, UserId,
 };
 use std::rc::Rc;
 
@@ -156,6 +157,7 @@ struct EventSelect {
     icons: Rc<Vec<Option<IconName>>>,
     selected: Option<usize>,
     open: bool,
+    locked: bool,
     placeholder: SharedString,
     no_results: SharedString,
     placement: EventSelectPlacement,
@@ -177,6 +179,7 @@ impl EventSelect {
             icons: Rc::new(Vec::new()),
             selected: None,
             open: false,
+            locked: false,
             placeholder: SharedString::default(),
             no_results: SharedString::default(),
             placement: EventSelectPlacement::Down,
@@ -265,7 +268,15 @@ impl EventSelect {
         cx.notify();
     }
 
+    fn set_locked(&mut self, locked: bool, cx: &mut Context<Self>) {
+        self.locked = locked;
+        cx.notify();
+    }
+
     fn set_open(&mut self, open: bool, window: &mut Window, cx: &mut Context<Self>) {
+        if open && self.locked {
+            return;
+        }
         if self.open != open
             && let Some(search) = self.search.clone()
         {
@@ -408,6 +419,9 @@ pub struct CreateEventModal {
     audience_channels: Vec<(ChannelId, String, ChannelType, bool, i32)>,
     voice_select: Entity<EventSelect>,
     audience_select: Entity<EventSelect>,
+    co_host_select: Entity<EventSelect>,
+    co_host_members: Vec<UserId>,
+    pending_co_host: Option<UserId>,
     repeat_select: Entity<EventSelect>,
     start_time: Entity<EventSelect>,
     end_time: Entity<EventSelect>,
@@ -447,6 +461,7 @@ impl CreateEventModal {
     ) -> Self {
         let channels_entity = ChannelList::global(cx);
         channels_entity.update(cx, |channels, cx| channels.load_for_clan(clan_id, cx));
+        ClanMembersStore::global(cx).update(cx, |store, cx| store.ensure_loaded(clan_id, cx));
         let channels = channels_entity.read(cx);
         let mut seen = std::collections::HashSet::new();
         let mut voice_channels = Vec::new();
@@ -518,6 +533,13 @@ impl CreateEventModal {
                     .collect(),
             )
             .searchable(t("common.search"), window, cx)
+        });
+        let co_host_select = cx.new(|cx| {
+            EventSelect::new("event-co-host", Vec::new())
+                .placeholder(t("eventCreator.fields.coHost.placeholder"))
+                .no_results(t("invitation.noResults"))
+                .placement(EventSelectPlacement::Down)
+                .searchable(t("common.search"), window, cx)
         });
         let now = Local::now();
         let repeat_labels = event_repeat_labels(&locale, now.date_naive());
@@ -610,6 +632,14 @@ impl CreateEventModal {
             }),
         );
         subscriptions.push(
+            cx.subscribe(&co_host_select, |_, _, _: &EventSelectEvent, cx| {
+                cx.notify()
+            }),
+        );
+        subscriptions.push(cx.observe(&ClanMembersStore::global(cx), |this, _, cx| {
+            this.refresh_co_host_members(cx);
+        }));
+        subscriptions.push(
             cx.subscribe(&repeat_select, |this, _, _: &EventSelectEvent, cx| {
                 this.error = None;
                 cx.notify();
@@ -657,7 +687,7 @@ impl CreateEventModal {
 
         let last_end_slot = end_time.read(cx).selected();
 
-        Self {
+        let mut modal = Self {
             clan_id,
             settings,
             step: Step::Location,
@@ -666,6 +696,9 @@ impl CreateEventModal {
             audience_channels,
             voice_select,
             audience_select,
+            co_host_select,
+            co_host_members: Vec::new(),
+            pending_co_host: None,
             repeat_select,
             start_time,
             end_time,
@@ -688,7 +721,9 @@ impl CreateEventModal {
             last_schedule_date: Some(start_day),
             last_start_slot: Some((start_minutes / 15) as usize),
             last_end_slot,
-        }
+        };
+        modal.refresh_co_host_members(cx);
+        modal
     }
 
     pub fn new_for_edit(
@@ -699,7 +734,7 @@ impl CreateEventModal {
         cx: &mut Context<Self>,
     ) -> Self {
         let mut modal = Self::new(clan_id, settings, window, cx);
-        modal.location_kind = Some(if event.is_private {
+        modal.location_kind = Some(if event.is_external {
             LocationKind::External
         } else if !event.address.is_empty() {
             LocationKind::Somewhere
@@ -768,7 +803,13 @@ impl CreateEventModal {
             .description
             .update(cx, |input, cx| input.set_value(&event.description, cx));
         modal.cover_url = (!event.logo.is_empty()).then(|| event.logo.clone().into());
+        modal.pending_co_host = event.co_host;
         modal.original_event = Some(event);
+        modal.refresh_co_host_members(cx);
+        let locked = !modal.can_change_co_host(cx);
+        modal
+            .co_host_select
+            .update(cx, |select, cx| select.set_locked(locked, cx));
         modal.refresh_end_time_options(false, cx);
         modal.last_schedule_date = modal.start_date.read(cx).selected();
         modal.last_start_slot = modal.start_time.read(cx).selected();
@@ -861,6 +902,53 @@ impl CreateEventModal {
         });
         cx.notify();
     }
+
+    fn refresh_co_host_members(&mut self, cx: &mut Context<Self>) {
+        let current_user = BadgeService::global(cx).read(cx).current_user_id(cx);
+        let selected_id = self
+            .co_host_select
+            .read(cx)
+            .selected()
+            .and_then(|index| self.co_host_members.get(index).copied())
+            .or(self.pending_co_host);
+        let mut members: Vec<(UserId, String)> = ClanMembersStore::global(cx)
+            .read(cx)
+            .members(self.clan_id)
+            .into_iter()
+            .filter(|member| Some(member.id()) != current_user)
+            .map(|member| (member.id(), member.name().to_string()))
+            .collect();
+        members.sort_by_key(|left| left.1.to_lowercase());
+        self.co_host_members = members.iter().map(|(id, _)| *id).collect();
+        let labels = members
+            .iter()
+            .map(|(_, name)| name.clone().into())
+            .collect();
+        let selected =
+            selected_id.and_then(|id| self.co_host_members.iter().position(|member| *member == id));
+        if selected.is_some() {
+            self.pending_co_host = None;
+        }
+        self.co_host_select.update(cx, |select, cx| {
+            select.set_items(labels, vec![None; self.co_host_members.len()], cx);
+            select.set_selected(selected, cx);
+        });
+    }
+
+    fn selected_co_host(&self, cx: &App) -> Option<UserId> {
+        self.co_host_select
+            .read(cx)
+            .selected()
+            .and_then(|index| self.co_host_members.get(index).copied())
+    }
+
+    fn can_change_co_host(&self, cx: &App) -> bool {
+        let Some(event) = self.original_event.as_ref() else {
+            return true;
+        };
+        BadgeService::global(cx).read(cx).current_user_id(cx) == Some(event.creator_id)
+    }
+
     fn return_to_events(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         super::clan_events_page::open_clan_events_modal(
             self.clan_id,
@@ -985,7 +1073,14 @@ impl CreateEventModal {
                     .map(|v| v.0)
             },
             repeat_type: self.repeat_select.read(cx).selected().unwrap_or(0) as i32 + 1,
-            is_private: self.location_kind == Some(LocationKind::External),
+            is_external: self.location_kind == Some(LocationKind::External),
+            co_host: if self.can_change_co_host(cx) {
+                (self.location_kind == Some(LocationKind::External))
+                    .then(|| self.selected_co_host(cx))
+                    .flatten()
+            } else {
+                self.original_event.as_ref().and_then(|event| event.co_host)
+            },
         };
         self.creating = true;
         cx.notify();
@@ -1004,6 +1099,7 @@ impl CreateEventModal {
                 end_time_seconds: draft.end_time_seconds,
                 channel_id: draft.channel_id,
                 repeat_type: draft.repeat_type,
+                co_host: draft.co_host,
             };
             EventsStore::global(cx).update(cx, |store, cx| store.update_event(update, cx))
         } else {
@@ -1294,18 +1390,18 @@ impl CreateEventModal {
 
     fn location_content(&self, cx: &Context<Self>) -> AnyElement {
         let theme = cx.theme();
-        let editing_private = self
+        let editing_external = self
             .original_event
             .as_ref()
-            .is_some_and(|event| event.is_private);
-        let editing_non_private = self
+            .is_some_and(|event| event.is_external);
+        let editing_non_external = self
             .original_event
             .as_ref()
-            .is_some_and(|event| !event.is_private);
+            .is_some_and(|event| !event.is_external);
         let can_select_audience = self
             .original_event
             .as_ref()
-            .is_none_or(|event| !event.is_private);
+            .is_none_or(|event| !event.is_external);
         let private_voice_channel = (self.location_kind == Some(LocationKind::Voice))
             .then(|| {
                 self.voice_select
@@ -1338,7 +1434,7 @@ impl CreateEventModal {
                     .flex()
                     .flex_col()
                     .gap_3()
-                    .when(!editing_private, |options| {
+                    .when(!editing_external, |options| {
                         options
                             .child(self.option(
                                 LocationKind::Voice,
@@ -1357,7 +1453,7 @@ impl CreateEventModal {
                                 cx,
                             ))
                     })
-                    .when(!editing_non_private, |options| {
+                    .when(!editing_non_external, |options| {
                         options.child(self.option(
                             LocationKind::External,
                             IconName::Speaker,
@@ -1496,6 +1592,45 @@ impl CreateEventModal {
                     })
                 },
             )
+            .when(self.location_kind == Some(LocationKind::External), |d| {
+                d.child(
+                    div()
+                        .mt_4()
+                        .child(
+                            div()
+                                .mb_1()
+                                .text_size(px(14.))
+                                .font_weight(FontWeight::BOLD)
+                                .child(self.tr("eventCreator.fields.coHost.title", cx)),
+                        )
+                        .child(self.co_host_select.clone())
+                        .when(
+                            self.can_change_co_host(cx)
+                                && self.co_host_select.read(cx).selected().is_some(),
+                            |d| {
+                                d.child(
+                                    div()
+                                        .id("clear-event-co-host")
+                                        .mt_1()
+                                        .flex()
+                                        .justify_end()
+                                        .text_size(px(13.))
+                                        .text_color(theme.brand)
+                                        .cursor_pointer()
+                                        .hover(|style| style.underline())
+                                        .on_click(cx.listener(|this, _, _, cx| {
+                                            this.pending_co_host = None;
+                                            this.co_host_select.update(cx, |select, cx| {
+                                                select.set_selected(None, cx)
+                                            });
+                                            cx.notify();
+                                        }))
+                                        .child(self.tr("eventCreator.actions.clearCoHost", cx)),
+                                )
+                            },
+                        ),
+                )
+            })
             .into_any_element()
     }
     fn details_content(&self, cx: &Context<Self>) -> AnyElement {
@@ -1693,7 +1828,12 @@ impl CreateEventModal {
             self.tr("eventCreator.eventDetail.clanEvent", cx)
         };
         let audience_note = if self.location_kind == Some(LocationKind::External) {
-            self.tr("eventCreator.eventDetail.onlyInvitedMembers", cx)
+            if let Some(name) = self.co_host_select.read(cx).value() {
+                self.tr("eventCreator.eventDetail.coHost", cx)
+                    .replace("{{username}}", name)
+            } else {
+                self.tr("eventCreator.eventDetail.onlyInvitedMembers", cx)
+            }
         } else if let Some(index) = self.audience_select.read(cx).selected() {
             let (_, name, ty, _, _) = &self.audience_channels[index];
             format!(

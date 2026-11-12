@@ -55,7 +55,8 @@ pub struct ClanEventItem {
     pub user_ids: Vec<UserId>,
     pub channel_id: Option<ChannelId>,
     pub event_status: i32,
-    pub is_private: bool,
+    pub is_external: bool,
+    pub co_host: Option<UserId>,
     pub external_link: String,
     pub repeat_type: i32,
 }
@@ -75,7 +76,8 @@ impl ClanEventItem {
             user_ids: event.user_ids.into_iter().map(UserId).collect(),
             channel_id: nonzero_channel(event.channel_id),
             event_status: event.event_status,
-            is_private: event.is_private,
+            is_external: event.is_external,
+            co_host: nonzero_user(event.co_host),
             external_link: event
                 .meet_room
                 .map(|room| room.external_link)
@@ -98,7 +100,8 @@ impl ClanEventItem {
             user_ids: vec![UserId(event.creator_id)],
             channel_id: nonzero_channel(event.channel_id),
             event_status: event.event_status,
-            is_private: event.is_private,
+            is_external: event.is_external,
+            co_host: nonzero_user(event.co_host),
             external_link: event
                 .meet_room
                 .as_ref()
@@ -127,7 +130,8 @@ impl ClanEventItem {
         if event.event_status != 0 {
             self.event_status = event.event_status;
         }
-        self.is_private = event.is_private;
+        self.is_external = event.is_external;
+        self.co_host = nonzero_user(event.co_host);
         self.repeat_type = event.repeat_type;
         if let Some(room) = &event.meet_room {
             self.external_link.clone_from(&room.external_link);
@@ -137,6 +141,10 @@ impl ClanEventItem {
 
 fn nonzero_channel(id: i64) -> Option<ChannelId> {
     (id != 0).then_some(ChannelId(id))
+}
+
+fn nonzero_user(id: i64) -> Option<UserId> {
+    (id != 0).then_some(UserId(id))
 }
 
 #[derive(Clone, Debug)]
@@ -156,7 +164,8 @@ pub struct CreateEventDraft {
     pub end_time_seconds: u32,
     pub channel_id: Option<ChannelId>,
     pub repeat_type: i32,
-    pub is_private: bool,
+    pub is_external: bool,
+    pub co_host: Option<UserId>,
 }
 
 #[derive(Clone, Debug)]
@@ -174,6 +183,7 @@ pub struct UpdateEventDraft {
     pub end_time_seconds: u32,
     pub channel_id: Option<ChannelId>,
     pub repeat_type: i32,
+    pub co_host: Option<UserId>,
 }
 
 pub struct EventsStore {
@@ -254,7 +264,8 @@ impl EventsStore {
             end_time_seconds: draft.end_time_seconds,
             channel_id: draft.channel_id.map_or(0, |id| id.0),
             repeat_type: draft.repeat_type,
-            is_private: draft.is_private,
+            is_external: draft.is_external,
+            co_host: draft.co_host.map_or(0, |id| id.0),
             ..Default::default()
         };
         cx.spawn(async move |this, cx| {
@@ -305,6 +316,7 @@ impl EventsStore {
             channel_voice_id: draft.channel_voice_id.map_or(0, |id| id.0),
             channel_id_old: draft.channel_id_old.map_or(0, |id| id.0),
             repeat_type: draft.repeat_type,
+            co_host: draft.co_host.map_or(0, |id| id.0),
         };
         cx.spawn(async move |this, cx| {
             api.update_event(request).await?;
@@ -593,13 +605,6 @@ impl EventsStore {
         .detach();
     }
 
-    /// Rows the viewer may see in `clan_id`. `visible_events` and
-    /// `visible_event_count` must agree exactly — the sidebar count is rendered
-    /// next to the list the modal shows — so both go through this one predicate.
-    ///
-    /// Keeps parity with React's `useEventManagementQuantity`: private events are
-    /// only visible to their creator, and an event pinned to a channel is hidden
-    /// unless that channel is in the clan the viewer can see.
     fn visible_in_clan<'a>(
         &'a self,
         clan_id: ClanId,
@@ -650,5 +655,27 @@ mod tests {
         let item = ClanEventItem::from_create_response(response, 4);
 
         assert_eq!(item.repeat_type, 4);
+    }
+
+    #[test]
+    fn maps_co_host_from_api_and_skips_zero() {
+        let with_host = api::EventManagement {
+            co_host: 42,
+            ..Default::default()
+        };
+        let without_host = api::EventManagement::default();
+
+        assert_eq!(
+            ClanEventItem::from_api(with_host).co_host,
+            Some(crate::UserId(42))
+        );
+        assert_eq!(ClanEventItem::from_api(without_host).co_host, None);
+        assert!(
+            ClanEventItem::from_api(api::EventManagement {
+                is_external: true,
+                ..Default::default()
+            })
+            .is_external
+        );
     }
 }
