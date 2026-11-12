@@ -242,7 +242,10 @@ mod tests {
             feed(&mut quality, &mut frames, &[false; 6]),
             [true, true, true, true, true, false]
         );
-        assert_eq!(feed(&mut quality, &mut frames, &[true, true]), [false, true]);
+        assert_eq!(
+            feed(&mut quality, &mut frames, &[true, true]),
+            [false, true]
+        );
         let relapse = feed(&mut quality, &mut frames, &[false; 12]);
         assert!(relapse[..11].iter().all(|&limited| limited));
         assert!(!relapse[11]);

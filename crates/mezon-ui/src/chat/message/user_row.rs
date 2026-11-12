@@ -10,6 +10,7 @@ use super::content::{
 };
 use super::context::{AVATAR_LEFT, AVATAR_SIZE, CONTENT_INSET, CONTENT_RIGHT_PAD, RowCtx};
 use super::embed_card::render_embeds;
+use super::location_card::render_location_card;
 use super::message_actions_panel::render_actions_panel;
 use super::ogp_embed::render_ogp_embed;
 use super::parts::{
@@ -49,7 +50,10 @@ pub fn render_user_message(
     let ephemeral = msg.code == MessageCode::Ephemeral;
     let sending = msg.is_sending();
     let is_me = msg.is_sent_by(ctx.current_user_id);
+    let display_location = msg.location.as_ref();
     let needs_composite_selection = msg.call_log.is_some()
+        || display_location.is_some()
+        || msg.code == MessageCode::Location
         || msg.code == MessageCode::SendToken
         || msg.poll.is_some()
         || msg.invite.is_some()
@@ -125,6 +129,10 @@ pub fn render_user_message(
         && let Some(selection_context) = selection_context.as_ref()
     {
         render_poll_card(msg, ctx, primary_base, selection_context)
+    } else if let (Some(location), Some(selection_context)) =
+        (display_location, selection_context.as_ref())
+    {
+        render_location_card(msg, location, is_me, ctx, primary_base, selection_context)
     } else if sending {
         div()
             .w_full()
@@ -141,8 +149,10 @@ pub fn render_user_message(
     };
     body_column = body_column.child(content_element);
 
-    let shows_text_content =
-        !editing && msg.call_log.is_none() && msg.code != MessageCode::SendToken;
+    let shows_text_content = !editing
+        && msg.call_log.is_none()
+        && display_location.is_none()
+        && msg.code != MessageCode::SendToken;
     if ephemeral && shows_text_content && command.is_none() {
         body_column = body_column.child(render_ephemeral_notice(msg, ctx));
     }

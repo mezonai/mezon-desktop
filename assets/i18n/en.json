@@ -3434,6 +3434,7 @@
   "message.manage.edit": "Edit",
   "message.manage.editRoles": "Edit Roles",
   "message.manage.roles": "Roles",
+  "message.mapView.mapCredit": "© OpenStreetMap contributors",
   "message.mapView.locationOf": "{{name}}'s location",
   "message.mapView.sender": "Sender",
   "message.mapView.yourLocation": "Your location",

@@ -1559,6 +1559,12 @@ pub(crate) fn selectable_message_layout(
         super::token_transaction_card::selectable_token_transaction_text(msg)
     } else if let Some(poll) = msg.poll.as_ref() {
         super::poll_card::selectable_poll_text(poll)
+    } else if msg.shows_location_card() {
+        super::location_card::selectable_location_text(
+            msg,
+            msg.sender_id.as_str() == current_user_id,
+            locale,
+        )
     } else if matches!(
         msg.code,
         MessageCode::CreatePin | MessageCode::CreateThread | MessageCode::DeleteThread
@@ -1574,17 +1580,20 @@ pub(crate) fn selectable_message_layout(
 
     let mut text = String::new();
     let primary = append_layout_section(&mut text, &primary_text);
-    let invite =
-        if msg.call_log.is_none() && msg.code != MessageCode::SendToken && msg.poll.is_none() {
-            msg.invite.as_deref().and_then(|invite| {
-                append_layout_section(
-                    &mut text,
-                    &super::invite_card::selectable_invite_text(invite, locale),
-                )
-            })
-        } else {
-            None
-        };
+    let invite = if msg.call_log.is_none()
+        && !msg.shows_location_card()
+        && msg.code != MessageCode::SendToken
+        && msg.poll.is_none()
+    {
+        msg.invite.as_deref().and_then(|invite| {
+            append_layout_section(
+                &mut text,
+                &super::invite_card::selectable_invite_text(invite, locale),
+            )
+        })
+    } else {
+        None
+    };
     let ogp = msg.ogp.as_deref().and_then(|ogp| {
         append_layout_section(&mut text, &super::ogp_embed::selectable_ogp_text(ogp))
     });
