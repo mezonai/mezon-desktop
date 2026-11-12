@@ -13,9 +13,18 @@ use std::sync::Arc;
 use std::sync::OnceLock;
 use tokio::io::AsyncWriteExt as _;
 use tokio::runtime::Runtime;
+use tokio::task::AbortHandle;
 
 static TRANSPORT_RUNTIME: OnceLock<Runtime> = OnceLock::new();
 static HTTP_CLIENT: OnceLock<Arc<ReqwestClient>> = OnceLock::new();
+
+struct AbortOnDrop(AbortHandle);
+
+impl Drop for AbortOnDrop {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
+}
 
 /// A probe must never hold a slot the way a transfer does; it is a liveness
 /// check, not a download.
@@ -1226,21 +1235,23 @@ impl TransportClient {
         json_data: String,
         channel_id: i64,
         caller_id: i64,
-    ) -> Result<()> {
+        call_setup: bool,
+    ) -> Result<bool> {
         let transport = self.inner.clone();
-        runtime()
-            .spawn(async move {
-                transport
-                    .forward_webrtc_signaling(
-                        receiver_id,
-                        data_type,
-                        json_data,
-                        channel_id,
-                        caller_id,
-                    )
-                    .await
-            })
-            .await
+        let task = runtime().spawn(async move {
+            transport
+                .forward_webrtc_signaling(
+                    receiver_id,
+                    data_type,
+                    json_data,
+                    channel_id,
+                    caller_id,
+                    call_setup,
+                )
+                .await
+        });
+        let _abort = call_setup.then(|| AbortOnDrop(task.abort_handle()));
+        task.await
             .map_err(|e| anyhow::anyhow!("transport task failed: {e}"))?
     }
 
@@ -1250,15 +1261,16 @@ impl TransportClient {
         json_data: String,
         channel_id: i64,
         caller_id: i64,
+        call_setup: bool,
     ) -> Result<()> {
         let transport = self.inner.clone();
-        runtime()
-            .spawn(async move {
-                transport
-                    .make_call_push(receiver_id, json_data, channel_id, caller_id)
-                    .await
-            })
-            .await
+        let task = runtime().spawn(async move {
+            transport
+                .make_call_push(receiver_id, json_data, channel_id, caller_id, call_setup)
+                .await
+        });
+        let _abort = call_setup.then(|| AbortOnDrop(task.abort_handle()));
+        task.await
             .map_err(|e| anyhow::anyhow!("transport task failed: {e}"))?
     }
 

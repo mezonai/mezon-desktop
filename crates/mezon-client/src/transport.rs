@@ -1,3 +1,4 @@
+use crate::transport_adapter::SocketUnavailable;
 /// Main Mezon transport client with WebSocket/TCP support and REST API methods.
 ///
 /// Handles connection management, message routing, and provides typed API methods
@@ -5,7 +6,7 @@
 pub use crate::transport_adapter::TransportAdapter;
 use anyhow::{Context, Result};
 use futures::AsyncReadExt as _;
-use http_client::{AsyncBody, HttpClient, http};
+use http_client::{AsyncBody, HttpClient, HttpRequestExt, RedirectPolicy, http};
 use mezon_proto::{api, realtime};
 use parking_lot::{Mutex, RwLock};
 use prost::Message;
@@ -23,6 +24,7 @@ const DEFAULT_SEND_TIMEOUT_MS: u64 = 10000;
 pub const CHANNEL_DESC_FETCH_LIMIT: i32 = 1000;
 pub const SEARCH_CTRL_K_MAX_TEXT_BYTES: usize = 255;
 const DEFAULT_CONNECT_GATE_MS: u64 = 5000;
+const CALL_SETUP_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 const DEFAULT_PING_TIMEOUT_MS: u64 = 5000;
 const MULTIPART_OP_TIMEOUT_MS: u64 = 120000;
 const HTTP_FALLBACK_TIMEOUT: Duration = Duration::from_secs(20);
@@ -215,6 +217,17 @@ pub fn mention_search_text_accepted(text: &str) -> bool {
 /// Promise executor for matching responses to requests.
 struct PromiseExecutor {
     sender: oneshot::Sender<(u32, Vec<u8>)>,
+}
+
+struct PendingRequest<'a> {
+    requests: &'a Mutex<HashMap<u16, PromiseExecutor>>,
+    cid: u16,
+}
+
+impl Drop for PendingRequest<'_> {
+    fn drop(&mut self) {
+        self.requests.lock().remove(&self.cid);
+    }
 }
 
 #[derive(Clone, PartialEq, Message)]
@@ -910,22 +923,58 @@ impl MezonTransport {
         timeout: Duration,
     ) -> Result<(u32, Vec<u8>)> {
         self.wait_connected(self.connect_gate).await?;
+        self.send_connected(cid, message, timeout).await
+    }
+
+    async fn send_connected(
+        &self,
+        cid: u16,
+        message: Vec<u8>,
+        timeout: Duration,
+    ) -> Result<(u32, Vec<u8>)> {
         let (tx, rx) = oneshot::channel();
         self.pending_requests
             .lock()
             .insert(cid, PromiseExecutor { sender: tx });
-        if let Err(e) = self.adapter.send(message).await {
-            self.pending_requests.lock().remove(&cid);
-            return Err(e);
-        }
-        let result = tokio::time::timeout(timeout, rx)
+        let _pending = PendingRequest {
+            requests: &self.pending_requests,
+            cid,
+        };
+        self.adapter.send(message).await?;
+        tokio::time::timeout(timeout, rx)
             .await
             .map_err(|_| {
-                self.pending_requests.lock().remove(&cid);
                 anyhow::anyhow!("Request timed out (cid={cid}, {}ms)", timeout.as_millis())
             })?
-            .map_err(|_| anyhow::anyhow!("Response channel closed"))?;
-        Ok(result)
+            .map_err(|_| anyhow::anyhow!("Response channel closed"))
+    }
+
+    async fn send_call_setup(&self, cid: u16, message: Vec<u8>) -> Result<(u32, Vec<u8>)> {
+        let deadline = tokio::time::Instant::now() + CALL_SETUP_CONNECT_TIMEOUT;
+        let mut connection = self.connected_rx.clone();
+        tokio::time::timeout_at(deadline, connection.wait_for(|open| *open))
+            .await
+            .context("call setup timed out waiting for a socket")??;
+
+        let error = match self
+            .send_connected(cid, message.clone(), self.send_timeout_ms)
+            .await
+        {
+            Err(error) if error.is::<SocketUnavailable>() => error,
+            result => return result,
+        };
+        tracing::info!(cid, %error, "call setup waiting for a new socket before retry");
+        // The first request never entered the write queue. A request awaiting a reply
+        // may have reached the server and cannot be replayed safely.
+        tokio::time::timeout_at(deadline, async {
+            connection.changed().await?;
+            connection.wait_for(|open| *open).await?;
+            Ok::<_, watch::error::RecvError>(())
+        })
+        .await
+        .context("call setup timed out waiting for a new socket")??;
+        self.send_connected(cid, message, self.send_timeout_ms)
+            .await
     }
 
     async fn send_realtime_control(
@@ -4849,6 +4898,9 @@ impl MezonTransport {
             .header("Authorization", format!("Bearer {}", fallback.token))
             .header("Content-Type", "application/proto")
             .header("Accept", "application/proto")
+            .when(api_name == "ForwardCallSetup", |request| {
+                request.follow_redirects(RedirectPolicy::NoFollow)
+            })
             .body(AsyncBody::from(body))
             .context("failed to build the HTTP fallback request")?;
 
@@ -5793,6 +5845,7 @@ impl MezonTransport {
             .map(|_| ())
     }
 
+    /// Returns true if signaling used the socket. An HTTP offer includes the push on the server.
     pub async fn forward_webrtc_signaling(
         &self,
         receiver_id: i64,
@@ -5800,24 +5853,73 @@ impl MezonTransport {
         json_data: String,
         channel_id: i64,
         caller_id: i64,
-    ) -> Result<()> {
+        call_setup: bool,
+    ) -> Result<bool> {
         let cid = self.generate_cid();
         tracing::debug!(target: "socket", "realtime_send: action=WebrtcSignalingFwd cid={} data_type={data_type}", i32::from(cid));
+        let signal = realtime::WebrtcSignalingFwd {
+            receiver_id,
+            data_type,
+            json_data,
+            channel_id,
+            caller_id,
+        };
+        let http_body = call_setup.then(|| signal.encode_to_vec());
         let envelope = realtime::Envelope {
             cid: i32::from(cid),
-            message: Some(realtime::envelope::Message::WebrtcSignalingFwd(
-                realtime::WebrtcSignalingFwd {
-                    receiver_id,
-                    data_type,
-                    json_data,
-                    channel_id,
-                    caller_id,
-                },
-            )),
+            message: Some(realtime::envelope::Message::WebrtcSignalingFwd(signal)),
         };
-        self.send_realtime_control(cid, "forward_webrtc_signaling", envelope)
+        let Some(http_body) = http_body else {
+            self.send_realtime_control(cid, "forward_webrtc_signaling", envelope)
+                .await?;
+            return Ok(true);
+        };
+        let packet = encode_envelope_cid_last(envelope);
+        if *self.connected_rx.borrow() {
+            match self
+                .send_connected(cid, packet.clone(), self.send_timeout_ms)
+                .await
+            {
+                Ok((code, response)) => {
+                    complete_realtime_control_request("forward_webrtc_signaling", code, &response)?;
+                    return Ok(true);
+                }
+                // A closed queue did not accept the frame. A write or ACK failure is ambiguous.
+                Err(error) if error.is::<SocketUnavailable>() => {}
+                Err(error) => return Err(error),
+            }
+        }
+
+        if self.http_fallback.read().is_some() {
+            let result = tokio::time::timeout(
+                Duration::from_secs(5),
+                self.send_api_request_over_http("ForwardCallSetup", http_body),
+            )
             .await
-            .map(|_| ())
+            .context("call setup HTTP request timed out")?;
+            match result {
+                Ok(bytes) => {
+                    let ack = realtime::WebrtcSignalingFwd::decode(bytes.as_slice())?;
+                    anyhow::ensure!(
+                        ack.receiver_id == receiver_id
+                            && ack.channel_id == channel_id
+                            && ack.caller_id == caller_id
+                            && ack.data_type == data_type,
+                        "invalid call setup acknowledgement"
+                    );
+                    return Ok(false);
+                }
+                Err(error)
+                    if error
+                        .downcast_ref::<HttpFallbackStatus>()
+                        .is_some_and(|status| matches!(status.status, 401 | 404 | 405 | 501)) => {}
+                Err(error) => return Err(error),
+            }
+        }
+
+        let (code, response) = self.send_call_setup(cid, packet).await?;
+        complete_realtime_control_request("forward_webrtc_signaling", code, &response)?;
+        Ok(true)
     }
 
     pub async fn write_voice_interactive_event(
@@ -5873,6 +5975,7 @@ impl MezonTransport {
         json_data: String,
         channel_id: i64,
         caller_id: i64,
+        call_setup: bool,
     ) -> Result<()> {
         let cid = self.generate_cid();
         tracing::debug!(target: "socket", "realtime_send: action=IncomingCallPush cid={} channel_id={channel_id}", i32::from(cid));
@@ -5887,9 +5990,26 @@ impl MezonTransport {
                 },
             )),
         };
-        self.send_realtime_control(cid, "make_call_push", envelope)
+        self.send_call_control(cid, "make_call_push", envelope, call_setup)
             .await
-            .map(|_| ())
+    }
+
+    async fn send_call_control(
+        &self,
+        cid: u16,
+        action: &'static str,
+        envelope: realtime::Envelope,
+        call_setup: bool,
+    ) -> Result<()> {
+        if call_setup {
+            let (code, response) = self
+                .send_call_setup(cid, encode_envelope_cid_last(envelope))
+                .await?;
+            complete_realtime_control_request(action, code, &response)?;
+        } else {
+            self.send_realtime_control(cid, action, envelope).await?;
+        }
+        Ok(())
     }
 
     /// Report the user's read position (cf. React `writeLastSeenMessage`).
@@ -13078,7 +13198,7 @@ mod tests {
     }
 
     struct MockAdapter {
-        send_ok: bool,
+        send: Box<dyn Fn() -> Result<()> + Send + Sync>,
     }
 
     #[async_trait::async_trait]
@@ -13087,11 +13207,7 @@ mod tests {
             Ok(())
         }
         async fn send(&self, _message: Vec<u8>) -> Result<()> {
-            if self.send_ok {
-                Ok(())
-            } else {
-                Err(anyhow::anyhow!("mock send failed"))
-            }
+            (self.send)()
         }
         async fn send_ping(&self, _cid: u16) -> Result<()> {
             Ok(())
@@ -13109,7 +13225,21 @@ mod tests {
     }
 
     fn transport(send_ok: bool) -> MezonTransport {
-        MezonTransport::new(Box::new(MockAdapter { send_ok }), String::new())
+        transport_with_send(move || {
+            anyhow::ensure!(send_ok, "mock send failed");
+            Ok(())
+        })
+    }
+
+    fn transport_with_send(
+        send: impl Fn() -> Result<()> + Send + Sync + 'static,
+    ) -> MezonTransport {
+        MezonTransport::new(
+            Box::new(MockAdapter {
+                send: Box::new(send),
+            }),
+            String::new(),
+        )
     }
 
     /// A `MockAdapter` that reports the socket as down, so the fallback branch is reachable.
@@ -13141,6 +13271,12 @@ mod tests {
     /// Minimal HTTP/1.1 origin that counts what the fallback asked for. Returns the port and the
     /// per-path hit counters.
     async fn fake_api() -> (u16, Arc<Mutex<HashMap<String, u32>>>) {
+        fake_api_with_call_setup_status("200 OK").await
+    }
+
+    async fn fake_api_with_call_setup_status(
+        call_setup_status: &'static str,
+    ) -> (u16, Arc<Mutex<HashMap<String, u32>>>) {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let port = listener.local_addr().unwrap().port();
         let hits: Arc<Mutex<HashMap<String, u32>>> = Arc::new(Mutex::new(HashMap::new()));
@@ -13193,6 +13329,13 @@ mod tests {
                         out.extend_from_slice(jwt.as_bytes());
                         out.extend_from_slice(&[0x1a, 0x03, b'n', b'e', b'w']);
                         out
+                    } else if path.ends_with("ForwardCallSetup") && call_setup_status == "200 OK" {
+                        let mut signal = realtime::WebrtcSignalingFwd::decode(
+                            &buf[head_end..head_end + body_len],
+                        )
+                        .unwrap();
+                        signal.json_data.clear();
+                        signal.encode_to_vec()
                     } else if path.ends_with("GenerateCDNSignature") {
                         let request =
                             api::GenerateCdnSignatureRequest::decode(&buf[head_end..]).unwrap();
@@ -13213,7 +13356,9 @@ mod tests {
                     let linked_twice = path.ends_with("LinkCDNFile")
                         && api::LinkCdnFileRequest::decode(&buf[head_end..])
                             .is_ok_and(|request| request.dst == LINKED_DST);
-                    let status = if linked_twice {
+                    let status = if path.ends_with("ForwardCallSetup") {
+                        call_setup_status
+                    } else if linked_twice {
                         "409 Conflict"
                     } else {
                         "200 OK"
@@ -13677,6 +13822,140 @@ mod tests {
         let cid = t.generate_cid();
         let err = t.send(cid, vec![1, 2, 3, 4]).await.unwrap_err();
         assert!(err.to_string().contains("mock send failed"));
+        assert!(t.pending_requests.lock().is_empty());
+    }
+
+    #[tokio::test]
+    async fn call_setup_retries_unsent_request_on_reconnect() {
+        let (attempt_tx, mut attempts) = tokio::sync::mpsc::unbounded_channel();
+        let count = std::sync::atomic::AtomicUsize::new(0);
+        let t = transport_with_send(move || {
+            let attempt = count.fetch_add(1, Ordering::Relaxed) + 1;
+            attempt_tx.send(attempt).unwrap();
+            if attempt == 1 {
+                Err(SocketUnavailable("socket closed before enqueue").into())
+            } else {
+                Ok(())
+            }
+        });
+        let cid = t.generate_cid();
+        let (result, ()) = tokio::time::timeout(Duration::from_secs(1), async {
+            tokio::join!(t.send_call_setup(cid, vec![1]), async {
+                assert!(attempts.try_recv().is_err());
+                t.connected_tx.send(true).unwrap();
+                assert_eq!(attempts.recv().await, Some(1));
+                assert!(t.pending_requests.lock().is_empty());
+                t.connected_tx.send(false).unwrap();
+                tokio::task::yield_now().await;
+                assert!(attempts.try_recv().is_err());
+                t.connected_tx.send(true).unwrap();
+                assert_eq!(attempts.recv().await, Some(2));
+                let pending = t.pending_requests.lock().remove(&cid).unwrap();
+                pending.sender.send((0, Vec::new())).unwrap();
+            })
+        })
+        .await
+        .unwrap();
+        assert_eq!(result.unwrap(), (0, Vec::new()));
+    }
+
+    #[tokio::test]
+    async fn call_setup_does_not_replay_when_ack_is_lost() {
+        let (attempt_tx, mut attempts) = tokio::sync::mpsc::unbounded_channel();
+        let mut t = transport_with_send(move || {
+            attempt_tx.send(()).unwrap();
+            Ok(())
+        });
+        t.send_timeout_ms = Duration::from_millis(20);
+        t.connected_tx.send(true).unwrap();
+        let cid = t.generate_cid();
+        let error = t.send_call_setup(cid, vec![1]).await.unwrap_err();
+        assert!(error.to_string().contains("Request timed out"));
+        assert_eq!(attempts.try_recv(), Ok(()));
+        assert!(attempts.try_recv().is_err());
+        assert!(t.pending_requests.lock().is_empty());
+    }
+
+    #[tokio::test]
+    async fn initial_call_setup_falls_back_only_before_the_frame_is_queued() {
+        let (port, hits) = fake_api().await;
+        let mut disconnected = MezonTransport::new(Box::new(ClosedAdapter), String::new());
+        disconnected.set_http_fallback(Some(expired_fallback(port)));
+        let mut closed_before_enqueue =
+            transport_with_send(|| Err(SocketUnavailable("socket closed before enqueue").into()));
+        let mut missing_ack = transport(true);
+        for transport in [&mut closed_before_enqueue, &mut missing_ack] {
+            transport.set_http_fallback(Some(expired_fallback(port)));
+            transport.connected_tx.send(true).unwrap();
+            transport.send_timeout_ms = Duration::from_millis(20);
+        }
+
+        for transport in [&mut disconnected, &mut closed_before_enqueue] {
+            let sent_over_socket = transport
+                .forward_webrtc_signaling(20, 1, "offer".into(), 30, 10, true)
+                .await
+                .unwrap();
+            assert!(!sent_over_socket);
+        }
+        let error = missing_ack
+            .forward_webrtc_signaling(20, 2, "answer".into(), 30, 10, true)
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("Request timed out"));
+        assert_eq!(
+            hits.lock().get("/mezon.api.Mezon/ForwardCallSetup"),
+            Some(&2)
+        );
+    }
+
+    #[tokio::test]
+    async fn initial_call_setup_returns_to_socket_when_http_route_is_missing() {
+        let (port, hits) = fake_api_with_call_setup_status("404 Not Found").await;
+        let (attempt_tx, mut attempts) = tokio::sync::mpsc::unbounded_channel();
+        let t = transport_with_send(move || {
+            attempt_tx.send(()).unwrap();
+            Ok(())
+        });
+        t.set_http_fallback(Some(expired_fallback(port)));
+
+        let (result, ()) = tokio::time::timeout(Duration::from_secs(3), async {
+            tokio::join!(
+                t.forward_webrtc_signaling(20, 1, "offer".into(), 30, 10, true),
+                async {
+                    while !hits
+                        .lock()
+                        .contains_key("/mezon.api.Mezon/ForwardCallSetup")
+                    {
+                        tokio::time::sleep(Duration::from_millis(1)).await;
+                    }
+                    assert!(attempts.try_recv().is_err());
+                    t.connected_tx.send(true).unwrap();
+                    assert_eq!(attempts.recv().await, Some(()));
+                    let (_, pending) = t.pending_requests.lock().drain().next().unwrap();
+                    pending.sender.send((0, Vec::new())).unwrap();
+                }
+            )
+        })
+        .await
+        .unwrap();
+
+        assert!(result.unwrap());
+        assert!(attempts.try_recv().is_err());
+        assert_eq!(
+            hits.lock().get("/mezon.api.Mezon/ForwardCallSetup"),
+            Some(&1)
+        );
+    }
+
+    #[tokio::test]
+    async fn dropping_call_setup_removes_pending_request() {
+        let t = transport(true);
+        t.connected_tx.send(true).unwrap();
+        let cid = t.generate_cid();
+        let mut send = Box::pin(t.send_call_setup(cid, vec![1]));
+        assert!(futures::poll!(&mut send).is_pending());
+        assert!(t.pending_requests.lock().contains_key(&cid));
+        drop(send);
         assert!(t.pending_requests.lock().is_empty());
     }
 

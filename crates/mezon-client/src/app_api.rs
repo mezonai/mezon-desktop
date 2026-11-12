@@ -3570,9 +3570,17 @@ impl AppApi {
         json_data: String,
         channel_id: i64,
         caller_id: i64,
-    ) -> Result<()> {
+        call_setup: bool,
+    ) -> Result<bool> {
         self.transport
-            .forward_webrtc_signaling(receiver_id, data_type, json_data, channel_id, caller_id)
+            .forward_webrtc_signaling(
+                receiver_id,
+                data_type,
+                json_data,
+                channel_id,
+                caller_id,
+                call_setup,
+            )
             .await
     }
 
@@ -3582,9 +3590,10 @@ impl AppApi {
         json_data: String,
         channel_id: i64,
         caller_id: i64,
+        call_setup: bool,
     ) -> Result<()> {
         self.transport
-            .make_call_push(receiver_id, json_data, channel_id, caller_id)
+            .make_call_push(receiver_id, json_data, channel_id, caller_id, call_setup)
             .await
     }
 
