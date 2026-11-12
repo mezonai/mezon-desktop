@@ -3635,10 +3635,15 @@ fn can_open_style(chars: &[char], pos: usize, run_end: usize, end: usize) -> boo
     if run_end >= end || chars[run_end].is_whitespace() {
         return false;
     }
-    if ch == '_' && pos > 0 && chars[pos - 1].is_alphanumeric() {
+    if is_intraword_marker(chars, pos, len) {
         return false;
     }
     true
+}
+
+fn is_intraword_marker(chars: &[char], pos: usize, len: usize) -> bool {
+    let ch = chars[pos];
+    (ch == '_' || (ch == '*' && len == 1)) && pos > 0 && chars[pos - 1].is_alphanumeric()
 }
 
 fn can_close_style(chars: &[char], open_end: usize, close: usize, close_end: usize) -> bool {
@@ -3648,7 +3653,8 @@ fn can_close_style(chars: &[char], open_end: usize, close: usize, close_end: usi
     if !chars[open_end..close].iter().any(|c| !c.is_whitespace()) {
         return false;
     }
-    if chars[close] == '_' && close_end < chars.len() && chars[close_end].is_alphanumeric() {
+    let closes_intraword = chars[close] == '_' || (chars[close] == '*' && close_end - close == 1);
+    if closes_intraword && close_end < chars.len() && chars[close_end].is_alphanumeric() {
         return false;
     }
     true
@@ -3686,6 +3692,8 @@ fn find_style_close(
             if can_open_style(chars, j, k_end, end) {
                 return None;
             }
+            j = k_end;
+        } else if ch == '*' && is_intraword_marker(chars, j, k_len) {
             j = k_end;
         } else if ch == '*'
             && can_open_style(chars, j, k_end, end)
@@ -12425,10 +12433,10 @@ mod tests {
     }
 
     #[test]
-    fn strip_markdown_leaves_bold_with_a_lone_star_inside() {
+    fn strip_markdown_keeps_a_lone_star_between_letters_inside_bold_as_text() {
         let out = strip_markdown("**a*b**");
-        assert_eq!(out.text, "**a*b**");
-        assert!(out.markdowns.is_empty());
+        assert_eq!(out.text, "a*b");
+        assert_eq!(out.markdowns, vec![md("b", 0, 3)]);
     }
 
     #[test]
@@ -12496,12 +12504,29 @@ mod tests {
     }
 
     #[test]
-    fn strip_markdown_handles_intraword_star_and_leaves_snake_case_untouched() {
-        let star = strip_markdown("mid*word*s");
-        assert_eq!(star.text, "midwords");
-        assert_eq!(star.markdowns, vec![md("i", 3, 7)]);
+    fn strip_markdown_keeps_a_single_star_between_letters_or_digits_and_snake_case_as_text() {
+        let bold = strip_markdown("mid**word**bold");
+        assert_eq!(bold.text, "midwordbold");
+        assert_eq!(bold.markdowns, vec![md("b", 3, 7)]);
 
-        for raw in ["snake_case_name", "a_b_c", "__x__", "___x___"] {
+        let bold_with_star = strip_markdown("**5*2=10**");
+        assert_eq!(bold_with_star.text, "5*2=10");
+        assert_eq!(bold_with_star.markdowns, vec![md("b", 0, 6)]);
+
+        let italic_then_product = strip_markdown("see *this* and 2*3");
+        assert_eq!(italic_then_product.text, "see this and 2*3");
+        assert_eq!(italic_then_product.markdowns, vec![md("i", 4, 8)]);
+
+        for raw in [
+            "mid*word*s",
+            "5*2=10, 3*4=12",
+            "foo*.rs, bar*.toml",
+            "a *b*c d",
+            "snake_case_name",
+            "a_b_c",
+            "__x__",
+            "___x___",
+        ] {
             let out = strip_markdown(raw);
             assert_eq!(out.text, raw);
             assert!(out.markdowns.is_empty());
