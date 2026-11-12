@@ -1083,6 +1083,7 @@ impl Drop for MacWindow {
             eprintln!("[gpui_window_lifecycle] MacWindow::drop");
         }
         let mut this = self.0.lock();
+        drop(this.accesskit_adapter.take());
         let layer = this.renderer.layer_ptr() as *mut Object;
         if !layer.is_null() {
             unsafe {
