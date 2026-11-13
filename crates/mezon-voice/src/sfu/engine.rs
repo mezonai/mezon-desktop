@@ -900,8 +900,16 @@ impl LocalTracks {
         role == SfuRole::Audience && self.ptt_requested
     }
 
+    fn screen_audio_unmutes(&self, role: SfuRole) -> bool {
+        role == SfuRole::Speaker && self.screen_audio
+    }
+
+    fn reported_mute(&self, role: SfuRole) -> bool {
+        self.muted && !self.screen_audio_unmutes(role)
+    }
+
     fn announced_mute(&self, role: SfuRole) -> bool {
-        self.muted && !self.resumes_push_to_talk(role)
+        self.reported_mute(role) && !self.resumes_push_to_talk(role)
     }
 
     fn apply_audio_gate(&self, pc: Option<&PeerConnection>, role: SfuRole) {
@@ -1641,7 +1649,7 @@ async fn session_loop(
                     ServerMessage::PeerUpdated { peer } => {
                         if let Some(peer) = peer {
                             if joined && peer.peer_id == membership.self_peer_id {
-                                mute_sync.observe_self(peer.is_mute, local.muted, Instant::now());
+                                mute_sync.observe_self(peer.is_mute, local.reported_mute(config.role), Instant::now());
                                 if !peer.is_sharing_screen() {
                                     screen_stop_attempts = 0;
                                     screen_stop_retry_at = None;
@@ -1890,7 +1898,8 @@ async fn session_loop(
                         mute_sync.cancel_inference();
                         local.muted = muted;
                         local.apply_audio_gate(pc.as_ref(), config.role);
-                        if joined && send_mute(&mut ws_tx, local, &mut mute_sync, muted).await.is_err() {
+                        let reported = local.reported_mute(config.role);
+                        if joined && send_mute(&mut ws_tx, local, &mut mute_sync, reported).await.is_err() {
                             return SessionOutcome::Dropped { joined, reason: "mute send failed".into() };
                         }
                     }
@@ -1907,8 +1916,16 @@ async fn session_loop(
                         }
                     }
                     EngineCommand::SetScreenAudio(active) => {
+                        let reported_before = local.reported_mute(config.role);
                         local.screen_audio = active;
                         local.apply_audio_gate(pc.as_ref(), config.role);
+                        let reported = local.reported_mute(config.role);
+                        if joined
+                            && reported != reported_before
+                            && send_mute(&mut ws_tx, local, &mut mute_sync, reported).await.is_err()
+                        {
+                            return SessionOutcome::Dropped { joined, reason: "mute send failed".into() };
+                        }
                     }
                     EngineCommand::ParticipantAction(token) => {
                         if !joined {
@@ -2227,9 +2244,10 @@ async fn session_loop(
                 }
             }
             () = tokio::time::sleep_until(mute_sync.deadline().map(tokio::time::Instant::from_std).unwrap_or_else(tokio::time::Instant::now)), if mute_sync.deadline().is_some() => {
-                if mute_sync.take_forced_mute(Instant::now()) && !local.muted {
+                if mute_sync.take_forced_mute(Instant::now()) && !local.reported_mute(config.role) {
                     tracing::info!("sfu moderator muted this device");
                     local.muted = true;
+                    local.screen_audio = false;
                     local.apply_audio_gate(pc.as_ref(), config.role);
                     let _ = evt_tx.send(SfuEvent::MutedByModerator);
                 }
