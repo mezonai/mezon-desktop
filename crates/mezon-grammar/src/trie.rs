@@ -1,6 +1,3 @@
-//! High-performance N-gram Prefix Trie for Vietnamese Autocomplete & Predictive Typing.
-//! Zero-allocation reads, instant startup with embedded default corpus transitions.
-
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
@@ -8,7 +5,7 @@ use std::collections::HashMap;
 pub struct WordSuggestion {
     pub word: String,
     pub probability: f32,
-    pub suggestion_type: String, // "completion" or "next_word"
+    pub suggestion_type: String,
 }
 
 #[derive(Default)]
@@ -72,14 +69,12 @@ impl WordTrie {
                 self.insert(w, 1);
             }
 
-            // Bigrams
             for i in 0..words.len().saturating_sub(1) {
                 let w1 = words[i].clone();
                 let w2 = words[i + 1].clone();
                 *self.bigrams.entry(w1).or_default().entry(w2).or_insert(0) += 1;
             }
 
-            // Trigrams
             for i in 0..words.len().saturating_sub(2) {
                 let key = (words[i].clone(), words[i + 1].clone());
                 let w3 = words[i + 2].clone();
@@ -88,7 +83,6 @@ impl WordTrie {
         }
     }
 
-    /// Completes a partially typed word prefix (e.g. "mu" -> ["muốn", "mua"]).
     pub fn complete_prefix(&self, prefix: &str, top_k: usize) -> Vec<WordSuggestion> {
         let clean = prefix.trim().to_lowercase();
         if clean.is_empty() {
@@ -138,7 +132,6 @@ impl WordTrie {
             .collect()
     }
 
-    /// Predicts the next word using Trigram -> Bigram -> Unigram backoff.
     pub fn predict_next_word(&self, context: &[&str], top_k: usize) -> Vec<WordSuggestion> {
         if context.is_empty() {
             let mut top_unis: Vec<(&String, &u32)> = self.unigrams.iter().collect();
@@ -159,7 +152,6 @@ impl WordTrie {
 
         let words: Vec<String> = context.iter().map(|w| w.to_lowercase()).collect();
 
-        // 1. Try Trigram
         if words.len() >= 2 {
             let w1 = &words[words.len() - 2];
             let w2 = &words[words.len() - 1];
@@ -182,7 +174,6 @@ impl WordTrie {
             }
         }
 
-        // 2. Try Bigram
         if let Some(last_word) = words.last() {
             if let Some(next_counts) = self.bigrams.get(last_word) {
                 let mut sorted: Vec<(&String, &u32)> = next_counts.iter().collect();
@@ -202,7 +193,6 @@ impl WordTrie {
             }
         }
 
-        // 3. Fallback to Unigram
         self.predict_next_word(&[], top_k)
     }
 

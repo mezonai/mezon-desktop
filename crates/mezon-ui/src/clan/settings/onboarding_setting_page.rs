@@ -925,7 +925,7 @@ impl OnboardingSettingPage {
                     .child(self.main_row(
                         mezon_i18n::t(locale, "onBoardingClan.questions.title").into(),
                         mezon_i18n::t(locale, "onBoardingClan.questions.description").into(),
-                        IconName::People,
+                        IconName::User,
                         "onboarding-setup-questions",
                         mezon_i18n::t(locale, "onBoardingClan.buttons.setup").into(),
                         true,
@@ -940,7 +940,7 @@ impl OnboardingSettingPage {
                     .child(self.main_row(
                         mezon_i18n::t(locale, "onBoardingClan.clanGuide.title").into(),
                         mezon_i18n::t(locale, "onBoardingClan.clanGuide.description").into(),
-                        IconName::GuideIcon,
+                        IconName::Guide,
                         "onboarding-edit-guide",
                         mezon_i18n::t(locale, "onBoardingClan.buttons.edit").into(),
                         false,
@@ -967,17 +967,10 @@ impl OnboardingSettingPage {
         theme: &Theme,
         on_click: impl Fn(&gpui::ClickEvent, &mut Window, &mut App) + 'static,
     ) -> gpui::AnyElement {
-        let row_icon = if icon == IconName::GuideIcon {
-            img(icon.path())
-                .size(px(26.0))
-                .flex_none()
-                .into_any_element()
-        } else {
-            Icon::new(icon)
-                .size(px(26.0))
-                .text_color(theme.text_secondary)
-                .into_any_element()
-        };
+        let row_icon = Icon::new(icon)
+            .size(px(26.0))
+            .text_color(theme.tokens.text_secondary)
+            .into_any_element();
 
         h_flex()
             .id(format!("{action_id}-row"))
@@ -1020,13 +1013,14 @@ impl OnboardingSettingPage {
                     .child(action)
                     .when(show_arrow, |button| {
                         button.child(
-                            Icon::new(IconName::LongArrowRight)
-                                .size_4()
+                            Icon::new(IconName::ArrowRight)
+                                .size(px(16.))
                                 .text_color(gpui::white()),
                         )
                     })
                     .on_click(on_click),
             )
+            .map(|element| Icon::motion_scope(element, true))
             .into_any_element()
     }
 
@@ -1136,9 +1130,9 @@ impl OnboardingSettingPage {
                                             ),
                                     )
                                     .child(
-                                        Icon::new(IconName::ArrowRight)
-                                            .size_4()
-                                            .text_color(theme.text_secondary)
+                                        Icon::new(IconName::ChevronRight)
+                                            .size(px(16.))
+                                            .selected(false)
                                             .when(self.channels_expanded, |icon| {
                                                 icon.with_transformation(
                                                     gpui::Transformation::rotate(gpui::radians(
@@ -1207,8 +1201,8 @@ impl OnboardingSettingPage {
                             .gap_2()
                             .font_weight(FontWeight::BOLD)
                             .child(
-                                Icon::new(IconName::CirclePlusFill)
-                                    .size_5()
+                                Icon::new(IconName::PlusCircle)
+                                    .size(px(20.0))
                                     .text_color(rgb(0x949cf7)),
                             )
                             .child(mezon_i18n::t(
@@ -1271,9 +1265,9 @@ impl OnboardingSettingPage {
                                     .text_color(theme.text_secondary)
                                     .hover(|style| style.text_color(theme.danger_text))
                                     .child(
-                                        Icon::new(IconName::TrashIcon)
-                                            .size_4()
-                                            .text_color(theme.text_secondary)
+                                        Icon::new(IconName::Trash)
+                                            .size(px(16.))
+                                            .selected(false)
                                             .group_hover(trash_group, |style| {
                                                 style.text_color(theme.danger_text)
                                             }),
@@ -1296,9 +1290,9 @@ impl OnboardingSettingPage {
                                     .cursor_pointer()
                                     .text_color(theme.text_secondary)
                                     .child(
-                                        Icon::new(IconName::ArrowRight)
-                                            .size_4()
-                                            .text_color(theme.text_secondary)
+                                        Icon::new(IconName::ChevronRight)
+                                            .size(px(16.))
+                                            .selected(false)
                                             .when(question.expanded, |icon| {
                                                 icon.with_transformation(
                                                     gpui::Transformation::rotate(gpui::radians(
@@ -1387,8 +1381,8 @@ impl OnboardingSettingPage {
                             h_flex()
                                 .gap_2()
                                 .child(
-                                    Icon::new(IconName::CirclePlusFill)
-                                        .size_5()
+                                    Icon::new(IconName::PlusCircle)
+                                        .size(px(20.0))
                                         .text_color(theme.text_primary),
                                 )
                                 .child(mezon_i18n::t(
@@ -1485,7 +1479,7 @@ impl OnboardingSettingPage {
                             mission.title.clone(),
                             this.task_label(mission.task_type, &mission_locale),
                             channel,
-                            Some(IconName::Hashtag),
+                            Some(IconName::Channel),
                             Some((edit, index, false)),
                             &mission_theme,
                         )
@@ -1517,7 +1511,7 @@ impl OnboardingSettingPage {
                             resource.title.clone(),
                             resource.description.clone(),
                             None,
-                            Some(IconName::RuleIcon),
+                            Some(IconName::Rules),
                             Some((edit, index, true)),
                             &resource_theme,
                         )
@@ -1599,8 +1593,8 @@ impl OnboardingSettingPage {
                                             .text_color(rgb(0xffffff))
                                             .child(owner_name)
                                             .child(
-                                                Icon::new(IconName::OwnerIcon)
-                                                    .size_4()
+                                                Icon::new(IconName::Owner)
+                                                    .size(px(16.))
                                                     .text_color(rgb(0xfacc15)),
                                             ),
                                     ),
@@ -1631,7 +1625,7 @@ impl OnboardingSettingPage {
                 mezon_i18n::t(locale, "onBoardingClan.clanGuideSetting.readTheRules"),
                 "",
                 None,
-                Some(IconName::RuleIcon),
+                Some(IconName::Rules),
                 None,
                 theme,
             ))
@@ -1653,8 +1647,8 @@ impl OnboardingSettingPage {
                             .gap_2()
                             .font_weight(FontWeight::BOLD)
                             .child(
-                                Icon::new(IconName::CirclePlusFill)
-                                    .size_5()
+                                Icon::new(IconName::PlusCircle)
+                                    .size(px(20.0))
                                     .text_color(rgb(0x949cf7)),
                             )
                             .child(mezon_i18n::t(
@@ -1726,8 +1720,8 @@ impl OnboardingSettingPage {
                             .gap_2()
                             .font_weight(FontWeight::BOLD)
                             .child(
-                                Icon::new(IconName::CirclePlusFill)
-                                    .size_5()
+                                Icon::new(IconName::PlusCircle)
+                                    .size(px(20.0))
                                     .text_color(rgb(0x949cf7)),
                             )
                             .child(mezon_i18n::t(
@@ -1830,8 +1824,8 @@ impl OnboardingSettingPage {
                         .bg(rgb(0x5865f2))
                         .hover(|style| style.bg(rgb(0x4752c4)))
                         .child(
-                            Icon::new(IconName::PenEdit)
-                                .size_5()
+                            Icon::new(IconName::Edit)
+                                .size(px(20.0))
                                 .text_color(rgb(0xffffff)),
                         )
                         .on_click(move |_, window, cx| {
@@ -1856,11 +1850,7 @@ impl OnboardingSettingPage {
             .border_2()
             .border_color(theme.border)
             .bg(theme.bg_secondary)
-            .child(
-                Icon::new(IconName::IconRemove)
-                    .size_5()
-                    .text_color(theme.text_secondary),
-            )
+            .child(Icon::new(IconName::Close).size(px(20.)).selected(false))
             .child(
                 v_flex()
                     .child(div().font_weight(FontWeight::BOLD).child(mezon_i18n::t(
@@ -2120,7 +2110,7 @@ impl OnboardingSettingPage {
                             .justify_between()
                             .cursor_pointer()
                             .child(selected)
-                            .child(Icon::new(IconName::ChevronDown).size_4())
+                            .child(Icon::new(IconName::ChevronDown).size(px(16.)))
                             .on_click(move |_, _, cx| {
                                 let _ = toggle.update(cx, |this, cx| {
                                     if let Some(Editor::Mission { channels_open, .. }) =

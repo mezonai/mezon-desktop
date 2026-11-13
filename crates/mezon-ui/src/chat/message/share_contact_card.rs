@@ -1,6 +1,6 @@
 use gpui::{
-    AnyElement, App, ClickEvent, ElementId, FontWeight, SharedString, Window, div, img, prelude::*,
-    px, rgba,
+    AnyElement, App, ClickEvent, ElementId, FontWeight, SharedString, Window, div, prelude::*, px,
+    rgba,
 };
 use mezon_store::{DirectMessageStore, Embed, FriendState, FriendStore, PresenceStore, UserId};
 
@@ -9,7 +9,7 @@ use super::context::RowCtx;
 use crate::app::shell::Shell;
 use crate::chat::call_actions::{CallTarget, call_user};
 use crate::chat::friends_page::dm_open_failure_message;
-use crate::components::primitives::{Avatar, IconName};
+use crate::components::primitives::{Avatar, Icon, IconName};
 use crate::router::{Route, navigate};
 
 const CARD_WIDTH: f32 = 280.0;
@@ -163,7 +163,7 @@ pub fn render_share_contact_card(
         .bg(theme.surfaces.primary)
         .child(contact_action_button(
             "share-contact-call",
-            IconName::IconPhoneDM,
+            IconName::Call,
             mezon_i18n::t(ctx.locale, "shareContact.card.call"),
             false,
             on_call,
@@ -226,7 +226,7 @@ fn contact_action_button(
             .border_color(theme.tokens.border_primary);
     }
     button
-        .child(img(icon.path()).size_4().flex_none())
+        .child(Icon::new(icon).size_4().flex_none())
         .child(label.into())
         .into_any_element()
 }

@@ -13,13 +13,13 @@ use mezon_audio::{AudioPlayer, decode_audio};
 use mezon_client::transport::{
     ApiActionRow, ApiAnimationComponent, ApiComponentPayload, ApiEmbed, ApiEmbedInputWrapper,
     ApiEmbedShapeWrapper, ApiMessage, ApiMessageComponent, ApiMessageContent, ApiMessageInput,
-    ApiRadioOption, ApiSelectComponent, ChannelLinkMeta, EPHEMERAL_MESSAGE_CODE, LOCATION_CODE,
-    MESSAGE_BUZZ_CODE, OutgoingEmoji as TransportEmoji, OutgoingHashtag as TransportHashtag,
-    OutgoingHashtags, OutgoingMention as TransportMention, OutgoingMessageFlags, OutgoingOgp,
-    OutgoingReply, PresignMarkers, SHARE_CONTACT_CODE, build_send_content,
-    build_send_content_with_code, build_share_contact_content_json, detect_markdown,
-    emoji_content_tokens, hashtag_content_tokens, is_here_user_id, markdown_content_tokens,
-    mention_content_tokens, with_create_time_seconds,
+    ApiRadioOption, ApiSelectComponent, ChannelLinkMeta, EPHEMERAL_MESSAGE_CODE, MESSAGE_BUZZ_CODE,
+    OutgoingEmoji as TransportEmoji, OutgoingHashtag as TransportHashtag, OutgoingHashtags,
+    OutgoingMention as TransportMention, OutgoingMessageFlags, OutgoingOgp, OutgoingReply,
+    PresignMarkers, SHARE_CONTACT_CODE, build_send_content, build_send_content_with_code,
+    build_share_contact_content_json, detect_markdown, emoji_content_tokens,
+    hashtag_content_tokens, is_here_user_id, markdown_content_tokens, mention_content_tokens,
+    strip_markdown, with_create_time_seconds,
 };
 use mezon_client::{
     ApiStatusError, AppApi, AttachmentUploadOutcome, ConnectionStatus, InboxCategory,
@@ -51,9 +51,10 @@ use crate::message::{
     MessageAttachment, MessageButton, MessageCode, MessageComponent, MessageComponentRow,
     MessageReference, MessageSelect, MessageSelectOption, MessageSpan, OgpPreview, PollAnswerView,
     PollData, PollDetail, PollLabelSegment, PollVoter, ViewerMedia, aggregate_reactions,
-    apply_reaction_event, compute_show_forwarded_label, message_combined_with_prev,
-    message_sort_key, parse_spans, reaction_key, recompute_message_grouping, rollback_reaction,
-    sort_messages, spans_only_emoji, viewer_highlight_direct,
+    apply_reaction_event, build_message_location, compute_show_forwarded_label,
+    message_combined_with_prev, message_sort_key, parse_spans, reaction_key,
+    recompute_message_grouping, rollback_reaction, sort_messages, spans_only_emoji,
+    viewer_highlight_direct,
 };
 use crate::message_time::{unix_now_millis, unix_now_seconds};
 use crate::ogp::is_clan_invite_url;
@@ -1115,6 +1116,10 @@ impl MessagesStore {
 
     pub fn try_global(cx: &App) -> Option<Entity<Self>> {
         cx.try_global::<GlobalMessagesStore>().map(|g| g.0.clone())
+    }
+
+    pub fn has_running_uploads(&self) -> bool {
+        !self.running_upload_jobs.is_empty()
     }
 
     pub fn reset(&mut self, cx: &mut Context<Self>) {
@@ -3264,41 +3269,6 @@ impl MessagesStore {
         );
     }
 
-    pub fn send_location_message(&mut self, latitude: f64, longitude: f64, cx: &mut Context<Self>) {
-        if self.is_anonymous_mode() {
-            return;
-        }
-        let Some(user_id) = viewer_user_id(cx) else {
-            return;
-        };
-        let sender_id = user_id.0.to_string();
-        let sender_name = AccountStore::global(cx)
-            .read(cx)
-            .account
-            .as_ref()
-            .map(|acct| {
-                if !acct.display_name.is_empty() {
-                    acct.display_name.clone()
-                } else {
-                    acct.username.clone()
-                }
-            })
-            .unwrap_or_else(|| sender_id.clone());
-        let link = mezon_client::transport::build_location_maps_link(latitude, longitude);
-        self.send_message_with_payload(
-            link,
-            sender_id,
-            sender_name,
-            OutgoingContent::default(),
-            Vec::new(),
-            None,
-            None,
-            false,
-            LOCATION_CODE,
-            cx,
-        );
-    }
-
     pub fn send_buzz_message(&mut self, content: String, cx: &mut Context<Self>) {
         let trimmed = content.trim();
         if trimmed.is_empty() {
@@ -3397,7 +3367,8 @@ impl MessagesStore {
         };
         let sender = sender_user.0.to_string();
         let (receiver, receiver_username) = {
-            let Some(message) = self.viewport_message_by_id(message_id) else {
+            let bucket = self.bucket_of(target);
+            let Some(message) = self.message_in_channel(bucket, message_id) else {
                 return;
             };
             (message.sender_id.clone(), message.sender_name.to_string())
@@ -6353,8 +6324,6 @@ impl MessagesStore {
         }
         if message_code == MESSAGE_BUZZ_CODE {
             optimistic.code = MessageCode::MessageBuzz;
-        } else if message_code == LOCATION_CODE {
-            optimistic.code = MessageCode::Location;
         }
         let appended = self.append_optimistic(channel_id, optimistic);
         if let Some(old_len) = appended {
@@ -9336,6 +9305,7 @@ fn merge_message_update(existing: &mut Message, incoming: &Message) {
     existing.embeds = incoming.embeds.clone();
     existing.components = incoming.components.clone();
     existing.call_log = incoming.call_log;
+    existing.location = incoming.location.clone();
     existing.invite = incoming.invite.clone();
     existing.is_card = incoming.is_card;
     existing.is_only_emoji = incoming.is_only_emoji;
@@ -9351,6 +9321,8 @@ fn merge_message_update(existing: &mut Message, incoming: &Message) {
     }
     if existing.poll.is_some() {
         existing.code = MessageCode::Poll;
+    } else if incoming.code == MessageCode::Location {
+        existing.code = MessageCode::Location;
     } else if !existing.code.is_user_timeline() {
         existing.code = MessageCode::Chat;
     }
@@ -10007,6 +9979,14 @@ fn merge_sparse_sender(prior: &Message, mut incoming: Message) -> Message {
         incoming.references = prior.references.clone();
     }
     carry_local_previews(prior, &mut incoming);
+    if incoming.location.is_none() {
+        incoming.location = prior.location.clone();
+    }
+    if incoming.code == MessageCode::Chat
+        && (prior.code == MessageCode::Location || prior.location.is_some())
+    {
+        incoming.code = MessageCode::Location;
+    }
     incoming
 }
 
@@ -10425,6 +10405,8 @@ fn message_from_api(m: ApiMessage, cfg: Option<&AppConfig>, viewer_id: Option<Us
     let code = MessageCode::from_raw(m.code);
     let poll = build_poll_data(&m.content_tokens, &m.content, cfg);
     let call_log = build_call_log(&m.content_tokens);
+    let location = build_message_location(code, &m.content)
+        .or_else(|| build_message_location(code, &m.content_raw));
     let token_transaction = (code == MessageCode::SendToken)
         .then(|| Box::new(crate::message::split_token_transaction(&m.content)));
     let embeds = build_embeds(&m.content_tokens, cfg);
@@ -10467,6 +10449,7 @@ fn message_from_api(m: ApiMessage, cfg: Option<&AppConfig>, viewer_id: Option<Us
     .with_ogp(ogp)
     .with_poll(poll)
     .with_call_log(call_log)
+    .with_location(location)
     .with_embeds(embeds)
     .with_components(components)
     .with_is_card(m.content_tokens.is_card)
@@ -10708,11 +10691,11 @@ fn text_to_spans(text: &str) -> Vec<MessageSpan> {
     if text.is_empty() {
         return Vec::new();
     }
-    let markdowns = detect_markdown(text);
+    let stripped = strip_markdown(text);
     // Embed bodies stay inline. React only runs its social-link classifier over message content,
     // so a YouTube URL in a description is a link there, not the block-level card the classified
     // kinds would render inside the embed's column.
-    let mk = markdown_content_tokens(&markdowns)
+    let mk = markdown_content_tokens(&stripped.markdowns)
         .into_iter()
         .map(|mut tok| {
             if tok
@@ -10726,7 +10709,7 @@ fn text_to_spans(text: &str) -> Vec<MessageSpan> {
         })
         .collect();
     parse_spans(&ApiMessageContent {
-        t: text.to_string(),
+        t: stripped.text,
         mk,
         ..Default::default()
     })
@@ -13679,6 +13662,39 @@ mod tests {
                 }
             )),
             "an embed description renders inline, so it must not classify a social card"
+        );
+    }
+
+    #[test]
+    fn text_to_spans_strips_inline_style_markers() {
+        let nested = text_to_spans("**a ~~b~~ c**");
+        assert_eq!(
+            nested,
+            vec![
+                MessageSpan::Bold("a ".into()),
+                MessageSpan::Styled {
+                    text: "b".into(),
+                    style: crate::message::InlineStyle {
+                        bold: true,
+                        italic: false,
+                        strike: true,
+                    },
+                },
+                MessageSpan::Bold(" c".into()),
+            ]
+        );
+
+        let italic = text_to_spans("*x*");
+        assert_eq!(
+            italic,
+            vec![MessageSpan::Styled {
+                text: "x".into(),
+                style: crate::message::InlineStyle {
+                    bold: false,
+                    italic: true,
+                    strike: false,
+                },
+            }]
         );
     }
 

@@ -92,14 +92,27 @@ pub enum FriendEvent {
     },
 }
 
-fn friend_from_api(f: ApiFriend) -> Friend {
+fn friend_from_api(f: ApiFriend, me: UserId) -> Friend {
+    let account_id = UserId(f.account.user_id);
+    let source_id = UserId(f.source_id);
+    let swapped = !me.is_zero() && source_id != me;
+    let id = if swapped { source_id } else { account_id };
+    let (username, display_name, avatar_url) = if swapped {
+        (String::new(), String::new(), String::new())
+    } else {
+        (
+            f.account.username,
+            f.account.display_name.unwrap_or_default(),
+            f.account.avatar_url.unwrap_or_default(),
+        )
+    };
     Friend {
-        id: UserId(f.account.user_id),
-        username: f.account.username,
-        display_name: f.account.display_name.unwrap_or_default(),
-        avatar_url: f.account.avatar_url.unwrap_or_default(),
+        id,
+        username,
+        display_name,
+        avatar_url,
         state: FriendState::from_i32(f.state),
-        source_id: UserId(f.source_id),
+        source_id,
     }
 }
 
@@ -142,29 +155,26 @@ fn is_blocked_by(list: &[Friend], target: UserId, me: UserId) -> bool {
         .any(|f| f.id == target && f.state == FriendState::Blocked && f.source_id == me)
 }
 
-fn apply_unblock_friend(list: &mut Vec<Friend>, e: &realtime::UnblockFriend, me: UserId) -> bool {
-    let id = UserId(e.user_id);
-    if let Some(existing) = list.iter_mut().find(|f| f.id == id) {
-        let mut changed = existing.state != FriendState::Friend;
-        existing.state = FriendState::Friend;
-        for (field, value) in [
-            (&mut existing.username, &e.username),
-            (&mut existing.display_name, &e.display_name),
-            (&mut existing.avatar_url, &e.avatar),
-        ] {
-            if !value.is_empty() && field != value {
-                field.clone_from(value);
-                changed = true;
-            }
+fn is_blocked_with(list: &[Friend], target: UserId) -> bool {
+    list.iter()
+        .any(|f| f.id == target && f.state == FriendState::Blocked)
+}
+
+fn apply_block_friend(list: &mut Vec<Friend>, friend_id: UserId, me: UserId) -> bool {
+    if let Some(friend) = list.iter_mut().find(|f| f.id == friend_id) {
+        if friend.state == FriendState::Blocked && friend.source_id == me {
+            return false;
         }
-        return changed;
+        friend.state = FriendState::Blocked;
+        friend.source_id = me;
+        return true;
     }
     list.push(Friend {
-        id,
-        username: e.username.clone(),
-        display_name: e.display_name.clone(),
-        avatar_url: e.avatar.clone(),
-        state: FriendState::Friend,
+        id: friend_id,
+        username: String::new(),
+        display_name: String::new(),
+        avatar_url: String::new(),
+        state: FriendState::Blocked,
         source_id: me,
     });
     true
@@ -290,6 +300,10 @@ impl FriendStore {
         is_blocked_by(&self.friends, user_id, self.current_user_id(cx))
     }
 
+    pub fn is_blocked_with(&self, user_id: UserId) -> bool {
+        is_blocked_with(&self.friends, user_id)
+    }
+
     /// Count of incoming friend requests awaiting the current user's response
     /// (React `quantityPendingRequest` = friends with state `MY_PENDING`).
     pub fn pending_incoming_count(&self) -> usize {
@@ -338,7 +352,8 @@ impl FriendStore {
                 this.loading = false;
                 match result {
                     Ok(list) => {
-                        this.friends = list.into_iter().map(friend_from_api).collect();
+                        let me = this.current_user_id(cx);
+                        this.friends = list.into_iter().map(|f| friend_from_api(f, me)).collect();
                         this.freshness.mark_fetched();
                         cx.emit(FriendEvent::Changed);
                         cx.notify();
@@ -368,13 +383,9 @@ impl FriendStore {
                 }
                 false
             }
-            RealtimeEvent::UnblockFriend(e) => {
-                if UserId(e.user_id) == me {
-                    self.refresh(cx);
-                    false
-                } else {
-                    apply_unblock_friend(&mut self.friends, e, me)
-                }
+            RealtimeEvent::UnblockFriend(_) => {
+                self.refresh(cx);
+                false
             }
             _ => false,
         };
@@ -601,17 +612,11 @@ impl FriendStore {
         .detach();
     }
 
-    /// Block a user. Optimistically marks the relationship blocked (initiated by the current user).
     pub fn block_friend(&mut self, friend_id: UserId, cx: &mut Context<Self>) {
         let me = self.current_user_id(cx);
-        let Some(friend) = self.friends.iter_mut().find(|f| f.id == friend_id) else {
-            return;
-        };
-        if friend.state == FriendState::Blocked {
+        if !apply_block_friend(&mut self.friends, friend_id, me) {
             return;
         }
-        friend.state = FriendState::Blocked;
-        friend.source_id = me;
         cx.emit(FriendEvent::Changed);
         cx.notify();
         let api = self.api.clone();
@@ -623,7 +628,11 @@ impl FriendStore {
                     return;
                 }
                 match result {
-                    Ok(()) => cx.emit(FriendEvent::BlockSucceeded),
+                    Ok(()) => {
+                        cx.emit(FriendEvent::BlockSucceeded);
+                        this.freshness.mark_stale();
+                        this.fetch(cx);
+                    }
                     Err(e) => {
                         tracing::error!("block_friend failed: {e}");
                         cx.emit(FriendEvent::BlockFailed);
@@ -688,6 +697,7 @@ mod tests {
 
     fn account(id: i64, username: &str, display: &str) -> ApiAccount {
         ApiAccount {
+            banner: None,
             user_id: id,
             username: username.to_string(),
             email: None,
@@ -736,23 +746,63 @@ mod tests {
 
     #[test]
     fn friend_from_api_maps_fields_and_label() {
-        let f = friend_from_api(ApiFriend {
-            account: account(7, "alice", ""),
-            state: 2,
-            source_id: 7,
-        });
+        let me = UserId(1);
+        let f = friend_from_api(
+            ApiFriend {
+                account: account(7, "alice", ""),
+                state: 2,
+                source_id: 1,
+            },
+            me,
+        );
         assert_eq!(f.id, UserId(7));
         assert_eq!(f.username, "alice");
         assert_eq!(f.state, FriendState::InviteReceived);
         assert_eq!(f.label(), "alice");
 
-        let f2 = friend_from_api(ApiFriend {
-            account: account(8, "bob", "Bobby"),
-            state: 0,
-            source_id: 9,
-        });
+        let f2 = friend_from_api(
+            ApiFriend {
+                account: account(8, "bob", "Bobby"),
+                state: 0,
+                source_id: 1,
+            },
+            me,
+        );
         assert_eq!(f2.label(), "Bobby");
-        assert_eq!(f2.source_id, UserId(9));
+        assert_eq!(f2.source_id, UserId(1));
+    }
+
+    #[test]
+    fn friend_from_api_uses_source_when_the_listed_user_is_me() {
+        let me = UserId(1);
+        let f = friend_from_api(
+            ApiFriend {
+                account: account(1, "me", ""),
+                state: 3,
+                source_id: 42,
+            },
+            me,
+        );
+        assert_eq!(f.id, UserId(42));
+        assert_eq!(f.source_id, UserId(42));
+        assert_eq!(f.state, FriendState::Blocked);
+        assert!(f.username.is_empty());
+        assert!(f.display_name.is_empty());
+        assert!(f.avatar_url.is_empty());
+    }
+
+    #[test]
+    fn blocked_with_covers_either_side() {
+        let me = UserId(1);
+        let them = UserId(42);
+        let i_blocked = vec![blocked_row(42, 1)];
+        assert!(is_blocked_by(&i_blocked, them, me));
+        assert!(is_blocked_with(&i_blocked, them));
+        assert!(!is_blocked_with(&i_blocked, UserId(7)));
+
+        let they_blocked = vec![blocked_row(42, 42)];
+        assert!(!is_blocked_by(&they_blocked, them, me));
+        assert!(is_blocked_with(&they_blocked, them));
     }
 
     #[test]
@@ -773,22 +823,6 @@ mod tests {
         assert_eq!(list.len(), 1);
     }
 
-    fn unblock_event(
-        user_id: i64,
-        username: &str,
-        display: &str,
-        avatar: &str,
-    ) -> realtime::UnblockFriend {
-        realtime::UnblockFriend {
-            user_id,
-            username: username.into(),
-            avatar: avatar.into(),
-            display_name: display.into(),
-            status: String::new(),
-            user_status: String::new(),
-        }
-    }
-
     fn blocked_row(id: i64, source: i64) -> Friend {
         Friend {
             id: UserId(id),
@@ -798,6 +832,30 @@ mod tests {
             state: FriendState::Blocked,
             source_id: UserId(source),
         }
+    }
+
+    #[test]
+    fn apply_block_friend_marks_existing_and_inserts_stranger() {
+        let me = UserId(1);
+        let mut list = vec![Friend {
+            id: UserId(42),
+            username: "carol".into(),
+            display_name: String::new(),
+            avatar_url: String::new(),
+            state: FriendState::Friend,
+            source_id: UserId(1),
+        }];
+        assert!(apply_block_friend(&mut list, UserId(42), me));
+        assert_eq!(list[0].state, FriendState::Blocked);
+        assert_eq!(list[0].source_id, me);
+        assert!(!apply_block_friend(&mut list, UserId(42), me));
+
+        let mut empty = Vec::new();
+        assert!(apply_block_friend(&mut empty, UserId(7), me));
+        assert_eq!(empty.len(), 1);
+        assert_eq!(empty[0].id, UserId(7));
+        assert_eq!(empty[0].state, FriendState::Blocked);
+        assert_eq!(empty[0].source_id, me);
     }
 
     #[test]
@@ -815,41 +873,6 @@ mod tests {
 
         let unknown: Vec<Friend> = Vec::new();
         assert!(!is_blocked_by(&unknown, UserId(42), me));
-    }
-
-    #[test]
-    fn unblock_event_restores_friend_and_refreshes_user_fields() {
-        let mut list = vec![blocked_row(42, 1)];
-        let e = unblock_event(42, "carol2", "Carol", "a.png");
-        assert!(apply_unblock_friend(&mut list, &e, UserId(1)));
-        assert_eq!(list[0].state, FriendState::Friend);
-        assert_eq!(list[0].username, "carol2");
-        assert_eq!(list[0].display_name, "Carol");
-        assert_eq!(list[0].avatar_url, "a.png");
-
-        assert!(!apply_unblock_friend(&mut list, &e, UserId(1)));
-    }
-
-    #[test]
-    fn unblock_event_keeps_existing_fields_when_event_omits_them() {
-        let mut list = vec![blocked_row(42, 1)];
-        list[0].display_name = "Carol".into();
-        let e = unblock_event(42, "", "", "");
-        assert!(apply_unblock_friend(&mut list, &e, UserId(1)));
-        assert_eq!(list[0].state, FriendState::Friend);
-        assert_eq!(list[0].username, "carol");
-        assert_eq!(list[0].display_name, "Carol");
-    }
-
-    #[test]
-    fn unblock_event_inserts_unknown_user_as_friend() {
-        let mut list = Vec::new();
-        let e = unblock_event(42, "carol", "Carol", "a.png");
-        assert!(apply_unblock_friend(&mut list, &e, UserId(1)));
-        assert_eq!(list.len(), 1);
-        assert_eq!(list[0].id, UserId(42));
-        assert_eq!(list[0].state, FriendState::Friend);
-        assert_eq!(list[0].source_id, UserId(1));
     }
 
     #[test]

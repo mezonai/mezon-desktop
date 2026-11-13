@@ -1,8 +1,8 @@
 use std::collections::HashSet;
 
 use gpui::{
-    App, Context, Entity, FontWeight, Hsla, ListSizingBehavior, Render, SharedString, Svg, Window,
-    div, img, prelude::*, px, rgb, size, uniform_list,
+    App, Context, Entity, FontWeight, Hsla, ListSizingBehavior, Render, SharedString, Window, div,
+    img, prelude::*, px, rgb, size, uniform_list,
 };
 
 use mezon_store::{ClanRoleDetail, DEFAULT_ROLE_COLOR, RoleId, RolesStore};
@@ -97,7 +97,7 @@ impl RoleSettingPage {
                     .cursor_pointer()
                     .child(
                         div().ml(px(-10.0)).child(
-                            Icon::new(IconName::ArrowLeft)
+                            Icon::new(IconName::ChevronLeft)
                                 .size(px(16.0))
                                 .text_color(theme.tokens.text_theme_primary),
                         ),
@@ -401,7 +401,7 @@ pub(super) fn role_glyph(
     cx: &App,
 ) -> gpui::AnyElement {
     if icon.is_empty() {
-        Icon::new(IconName::RoleIcon)
+        Icon::new(IconName::Role)
             .size(px(20.0))
             .flex_shrink_0()
             .text_color(role_tint(color))
@@ -416,9 +416,9 @@ pub(super) fn role_glyph(
     }
 }
 
-pub(super) fn role_lock_icon() -> Svg {
-    Icon::new(IconName::IconLock)
-        .size(px(12.0))
+pub(super) fn role_lock_icon() -> Icon {
+    Icon::new(IconName::Lock)
+        .size(px(16.0))
         .flex_shrink_0()
         .text_color(rgb(ROLE_LOCK_COLOR))
 }

@@ -670,7 +670,7 @@ impl ClanMembersPage {
             .child(label)
             .child(
                 Icon::new(IconName::ArrowDown)
-                    .size(px(14.))
+                    .size(px(16.))
                     .text_color(if active {
                         cx.theme().text_primary
                     } else {
@@ -822,7 +822,7 @@ impl ClanMembersPage {
                 .child(self.page_size.to_string())
                 .child(
                     Icon::new(IconName::ChevronDown)
-                        .size(px(14.))
+                        .size(px(16.))
                         .text_color(cx.theme().text_secondary)
                         .with_transformation(gpui::Transformation::rotate(gpui::radians(
                             chevron_angle,

@@ -4,10 +4,10 @@ use std::rc::Rc;
 use std::sync::Arc;
 
 use gpui::{
-    AnyElement, App, Bounds, DefiniteLength, DevicePixels, Entity, FontWeight, HighlightStyle,
-    Hsla, ImageSource, Img, InteractiveText, ObjectFit, Pixels, Resource, SharedString, Size,
-    StyledText, TextLayout, UnderlineStyle, canvas, div, fill, img, point, prelude::*, px,
-    relative, rems, rgb, rgba, size,
+    AnyElement, App, Bounds, DefiniteLength, DevicePixels, Entity, FontStyle, FontWeight,
+    HighlightStyle, Hsla, ImageSource, Img, InteractiveText, ObjectFit, Pixels, Resource,
+    SharedString, Size, StrikethroughStyle, StyledText, TextLayout, UnderlineStyle, canvas, div,
+    fill, img, point, prelude::*, px, relative, rems, rgb, rgba, size,
 };
 use mezon_store::{
     AppConfig, ChannelId, ChannelList, ChannelType, ClanId, ClanList, Embed, HashtagMeta, LinkKind,
@@ -350,6 +350,15 @@ pub(crate) fn rich_run_highlight(kind: RichRunKind, palette: &RichRunPalette) ->
             font_weight: Some(FontWeight::BOLD),
             ..Default::default()
         },
+        RichRunKind::Styled(style) => HighlightStyle {
+            font_weight: style.bold.then_some(FontWeight::BOLD),
+            font_style: style.italic.then_some(FontStyle::Italic),
+            strikethrough: style.strike.then_some(StrikethroughStyle {
+                thickness: px(1.),
+                color: None,
+            }),
+            ..Default::default()
+        },
         RichRunKind::Code => HighlightStyle {
             background_color: Some(palette.code_bg),
             ..Default::default()
@@ -435,7 +444,8 @@ pub(crate) fn render_rich_layout(
     body_color: gpui::Rgba,
 ) -> AnyElement {
     let theme = ctx.theme;
-    let palette = RichRunPalette::from_theme(theme);
+    let mut palette = RichRunPalette::from_theme(theme);
+    palette.link = link_color(body_color, theme).into();
     let colors = palette.memo_key(theme.text_muted.into());
     let cached = ctx.row_memo.borrow().rich_text.get(&msg.id).cloned();
     let plan = match cached {
@@ -855,6 +865,36 @@ fn render_selectable_segmented_spans(
                 }
                 base = end;
             }
+            MessageSpan::Styled { text, style } => {
+                let end = base + text.len();
+                for piece in memoized_selectable_text_pieces(text, ctx).iter() {
+                    match piece {
+                        CachedSelectableTextPiece::LineBreak => {
+                            row = row.child(div().w_full().h_0())
+                        }
+                        CachedSelectableTextPiece::EmptyLine => {
+                            row = row.child(div().w_full().child(SharedString::default()))
+                        }
+                        CachedSelectableTextPiece::Text { text, range } => {
+                            let start = base + range.start;
+                            let styled =
+                                selectable_segment_shared(text.clone(), start, selected.as_ref());
+                            segments.push(TextSegment::text(
+                                styled.layout().clone(),
+                                start..start + text.len(),
+                            ));
+                            row = row.child(
+                                div()
+                                    .when(style.bold, |d| d.font_weight(FontWeight::BOLD))
+                                    .when(style.italic, |d| d.italic())
+                                    .when(style.strike, |d| d.line_through())
+                                    .child(styled),
+                            );
+                        }
+                    }
+                }
+                base = end;
+            }
             MessageSpan::Code(text) => {
                 let end = base + text.len();
                 let styled = selectable_segment(text, base, selected.as_ref());
@@ -913,7 +953,7 @@ fn render_selectable_segmented_spans(
                             div()
                                 .id(("msg-link", link_key))
                                 .cursor_pointer()
-                                .text_color(ctx.theme.tokens.mention_color)
+                                .text_color(link_color(body_color, ctx.theme))
                                 .when(rich_style, |link| link.hover(|style| style.underline()))
                                 .on_mouse_down(
                                     gpui::MouseButton::Right,
@@ -940,7 +980,7 @@ fn render_selectable_segmented_spans(
                     .min_w_0()
                     .w_full()
                     .text_size(px(14.))
-                    .text_color(ctx.theme.tokens.mention_color)
+                    .text_color(link_color(body_color, ctx.theme))
                     .cursor(gpui::CursorStyle::IBeam);
                 let mut line_base = 0usize;
                 for line in text.split('\n') {
@@ -1216,9 +1256,10 @@ fn selectable_spans_walk(
     let mut text = String::new();
     for span in spans {
         match span {
-            MessageSpan::Text(value) | MessageSpan::Bold(value) | MessageSpan::Code(value) => {
-                text.push_str(value)
-            }
+            MessageSpan::Text(value)
+            | MessageSpan::Bold(value)
+            | MessageSpan::Styled { text: value, .. }
+            | MessageSpan::Code(value) => text.push_str(value),
             MessageSpan::CodeBlock { text: value, .. }
             | MessageSpan::Link { text: value, .. }
             | MessageSpan::Emoji { name: value, .. }
@@ -1518,6 +1559,12 @@ pub(crate) fn selectable_message_layout(
         super::token_transaction_card::selectable_token_transaction_text(msg)
     } else if let Some(poll) = msg.poll.as_ref() {
         super::poll_card::selectable_poll_text(poll)
+    } else if msg.shows_location_card() {
+        super::location_card::selectable_location_text(
+            msg,
+            msg.sender_id.as_str() == current_user_id,
+            locale,
+        )
     } else if matches!(
         msg.code,
         MessageCode::CreatePin | MessageCode::CreateThread | MessageCode::DeleteThread
@@ -1533,17 +1580,20 @@ pub(crate) fn selectable_message_layout(
 
     let mut text = String::new();
     let primary = append_layout_section(&mut text, &primary_text);
-    let invite =
-        if msg.call_log.is_none() && msg.code != MessageCode::SendToken && msg.poll.is_none() {
-            msg.invite.as_deref().and_then(|invite| {
-                append_layout_section(
-                    &mut text,
-                    &super::invite_card::selectable_invite_text(invite, locale),
-                )
-            })
-        } else {
-            None
-        };
+    let invite = if msg.call_log.is_none()
+        && !msg.shows_location_card()
+        && msg.code != MessageCode::SendToken
+        && msg.poll.is_none()
+    {
+        msg.invite.as_deref().and_then(|invite| {
+            append_layout_section(
+                &mut text,
+                &super::invite_card::selectable_invite_text(invite, locale),
+            )
+        })
+    } else {
+        None
+    };
     let ogp = msg.ogp.as_deref().and_then(|ogp| {
         append_layout_section(&mut text, &super::ogp_embed::selectable_ogp_text(ogp))
     });
@@ -1815,6 +1865,14 @@ fn is_inline_span(span: &MessageSpan) -> bool {
     }
 }
 
+fn link_color(body_color: gpui::Rgba, theme: &Theme) -> gpui::Rgba {
+    if body_color == rgb(BUZZ_RED) {
+        body_color
+    } else {
+        theme.tokens.mention_color
+    }
+}
+
 fn rich_content_row(body_color: gpui::Rgba, inline: bool) -> gpui::Div {
     let mut row = div()
         .flex()
@@ -1909,6 +1967,16 @@ fn append_span(
                 .text_color(body_color)
                 .child(text.clone()),
         ),
+        MessageSpan::Styled { text, style } => row.child(
+            div()
+                .max_w_full()
+                .min_w_0()
+                .when(style.bold, |d| d.font_weight(FontWeight::BOLD))
+                .when(style.italic, |d| d.italic())
+                .when(style.strike, |d| d.line_through())
+                .text_color(body_color)
+                .child(text.clone()),
+        ),
         MessageSpan::Code(text) => row.child(inline_code_chip(theme).child(text.clone())),
         MessageSpan::CodeBlock { text, .. } => row.child(
             div()
@@ -1944,7 +2012,7 @@ fn append_span(
             row.child(message_link_element(
                 text,
                 &resolve_link_url(url, text),
-                theme.tokens.mention_color,
+                link_color(body_color, theme),
                 ctx.selection.clone(),
                 key,
             ))
@@ -2065,8 +2133,8 @@ fn render_canvas_chip(title: SharedString) -> AnyElement {
                 .text_color(rgb(CANVAS_HOVER_TEXT))
         })
         .child(
-            Icon::new(IconName::CanvasIcon)
-                .size_4()
+            Icon::new(IconName::Canvas)
+                .size(px(16.))
                 .text_color(rgb(CANVAS_TEXT)),
         )
         .child(div().min_w_0().child(title))
@@ -2163,7 +2231,7 @@ fn render_social_poster(poster: SocialPoster, cache: Entity<LruImageCache>) -> A
                             a: 0.5,
                         })
                         .child(
-                            Icon::new(IconName::PlayButton)
+                            Icon::new(IconName::Play)
                                 .size(px(20.))
                                 .text_color(gpui::white()),
                         ),
@@ -2524,20 +2592,25 @@ struct ResolvedHashtag {
     icon: IconName,
 }
 
-fn hashtag_meta_visible(meta: &HashtagMeta, clan_loaded: bool, parent_visible: bool) -> bool {
+fn hashtag_meta_visible(
+    meta: &HashtagMeta,
+    in_clan: bool,
+    clan_loaded: bool,
+    parent_visible: bool,
+) -> bool {
     if meta.channel_type == ChannelType::Thread {
-        parent_visible && !meta.private
+        in_clan && parent_visible && !meta.private
     } else {
-        !clan_loaded
+        in_clan && !clan_loaded
     }
 }
 
-fn hashtag_meta_visible_in(store: &ChannelList, meta: &HashtagMeta) -> bool {
+fn hashtag_meta_visible_in(store: &ChannelList, meta: &HashtagMeta, in_clan: bool) -> bool {
     let clan_loaded = store.is_clan_cache_loaded(meta.clan_id);
     let parent_visible = meta
         .parent_id
         .is_some_and(|parent| store.linkable_channel(parent).is_some());
-    hashtag_meta_visible(meta, clan_loaded, parent_visible)
+    hashtag_meta_visible(meta, in_clan, clan_loaded, parent_visible)
 }
 
 fn thread_link_wants_detail(meta: &HashtagMeta, in_clan: bool, meta_visible: bool) -> bool {
@@ -2557,7 +2630,7 @@ pub(super) fn hashtag_chip(
         Some(meta) if resolved.is_none() => {
             let store = ChannelList::global(cx).read(cx);
             let in_clan = ClanList::global(cx).read(cx).clan(meta.clan_id).is_some();
-            (in_clan, hashtag_meta_visible_in(store, meta))
+            (in_clan, hashtag_meta_visible_in(store, meta, in_clan))
         }
         _ => (false, false),
     };
@@ -2607,7 +2680,7 @@ pub(crate) fn hidden_hashtag_label(
     cx: &App,
 ) -> Option<SharedString> {
     let chip = hashtag_chip(display, channel_id, meta, locale, cx);
-    matches!(chip.icon, IconName::LockedPrivate).then_some(chip.label)
+    matches!(chip.icon, IconName::Lock).then_some(chip.label)
 }
 
 fn private_channel_chip(
@@ -2617,7 +2690,7 @@ fn private_channel_chip(
 ) -> HashtagChip {
     HashtagChip {
         label: SharedString::new_static(mezon_i18n::t(locale, "message.privateChannel")),
-        icon: IconName::LockedPrivate,
+        icon: IconName::Lock,
         italic: false,
         channel_id,
         clan_hint,
@@ -2644,7 +2717,7 @@ fn hashtag_chip_for(
     if display.starts_with("http://") || display.starts_with("https://") {
         return HashtagChip {
             label: SharedString::new_static(mezon_i18n::t(locale, "message.unknown")),
-            icon: IconName::Hashtag,
+            icon: IconName::Channel,
             italic: true,
             channel_id: None,
             clan_hint: None,
@@ -2655,7 +2728,7 @@ fn hashtag_chip_for(
     }
     HashtagChip {
         label: hashtag_display_label(display),
-        icon: IconName::Hashtag,
+        icon: IconName::Channel,
         italic: false,
         channel_id: None,
         clan_hint: None,
@@ -2850,34 +2923,34 @@ fn hashtag_channel(channel_id: ChannelId, cx: &App) -> Option<ResolvedHashtag> {
 
 fn mention_channel_icon(kind: ChannelType, private: bool, age_restricted: i32) -> IconName {
     match kind {
-        ChannelType::Text if is_age_restricted(age_restricted) => IconName::HashtagWarning,
+        ChannelType::Text if is_age_restricted(age_restricted) => IconName::ChannelWarning,
         ChannelType::Voice => {
             if private {
-                IconName::SpeakerLocked
+                IconName::SpeakerLock
             } else {
                 IconName::Speaker
             }
         }
-        ChannelType::Stream => IconName::Stream,
+        ChannelType::Stream => IconName::Live,
         ChannelType::App => {
             if private {
-                IconName::PrivateAppChannelIcon
+                IconName::ChannelAppPrivate
             } else {
-                IconName::AppChannelIcon
+                IconName::ChannelApp
             }
         }
         ChannelType::Thread => {
             if private {
-                IconName::ThreadIconLocker
+                IconName::ThreadPrivate
             } else {
-                IconName::ThreadIcon
+                IconName::Thread
             }
         }
         _ => {
             if private {
-                IconName::HashtagLocked
+                IconName::ChannelPrivate
             } else {
-                IconName::Hashtag
+                IconName::Channel
             }
         }
     }
@@ -2890,62 +2963,72 @@ fn parse_channel_id(raw: &str) -> Option<ChannelId> {
         .filter(|id| !id.is_zero())
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LinkClick {
+    Navigate(ClanId),
+    AskServer,
+    NoAccess,
+    Nothing,
+}
+
+fn link_click(known: Option<ClanId>, hint: Option<ClanId>, member: bool) -> LinkClick {
+    if let Some(clan_id) = known {
+        return LinkClick::Navigate(clan_id);
+    }
+    match hint {
+        Some(_) if member => LinkClick::AskServer,
+        Some(_) => LinkClick::Nothing,
+        None => LinkClick::NoAccess,
+    }
+}
+
 fn navigate_to_channel(
     channel_id: ChannelId,
     clan_hint: Option<ClanId>,
     locale: &str,
     cx: &mut App,
 ) {
+    let known = clan_for_channel(channel_id, cx);
+    let member = known.is_none()
+        && clan_hint.is_some_and(|clan_id| ClanList::global(cx).read(cx).clan(clan_id).is_some());
     let no_access = mezon_i18n::t(locale, "message.noAccess");
-    if let Some(clan_id) = clan_for_channel(channel_id, cx) {
-        navigate(
+    match link_click(known, clan_hint, member) {
+        LinkClick::Navigate(clan_id) => navigate(
             cx,
             Route::Channel {
                 clan_id,
                 channel_id,
             },
-        );
-        return;
-    }
-    let Some(clan_id) = clan_hint else {
-        Shell::global(cx).update(cx, |shell, cx| {
-            shell.info(no_access, cx);
-        });
-        return;
-    };
-    if ChannelList::global(cx)
-        .read(cx)
-        .is_clan_cache_loaded(clan_id)
-    {
-        let task =
-            ChannelList::global(cx).update(cx, |c, cx| c.channel_link_detail(channel_id, cx));
-        cx.spawn(async move |cx| {
-            let resolved = task.await;
-            cx.update(|cx| match resolved {
-                Some(clan_id) => navigate(
-                    cx,
-                    Route::Channel {
-                        clan_id,
-                        channel_id,
-                    },
-                ),
-                None => {
-                    Shell::global(cx).update(cx, |shell, cx| {
-                        shell.info(no_access, cx);
-                    });
-                }
+        ),
+        LinkClick::Nothing => {}
+        LinkClick::NoAccess => {
+            Shell::global(cx).update(cx, |shell, cx| {
+                shell.info(no_access, cx);
             });
-        })
-        .detach();
-        return;
+        }
+        LinkClick::AskServer => {
+            let task =
+                ChannelList::global(cx).update(cx, |c, cx| c.channel_link_detail(channel_id, cx));
+            cx.spawn(async move |cx| {
+                let resolved = task.await;
+                cx.update(|cx| match resolved {
+                    Some(clan_id) => navigate(
+                        cx,
+                        Route::Channel {
+                            clan_id,
+                            channel_id,
+                        },
+                    ),
+                    None => {
+                        Shell::global(cx).update(cx, |shell, cx| {
+                            shell.info(no_access, cx);
+                        });
+                    }
+                });
+            })
+            .detach();
+        }
     }
-    navigate(
-        cx,
-        Route::Channel {
-            clan_id,
-            channel_id,
-        },
-    );
 }
 
 fn clan_for_channel(channel_id: ChannelId, cx: &App) -> Option<ClanId> {
@@ -3642,8 +3725,9 @@ mod tests {
 #[cfg(test)]
 mod hashtag_label_tests {
     use super::{
-        ChannelId, ChannelType, ClanId, HashtagChip, HashtagMeta, IconName, ResolvedHashtag,
-        hashtag_chip_for, hashtag_chip_from_meta, hashtag_meta_visible, thread_link_wants_detail,
+        ChannelId, ChannelType, ClanId, HashtagChip, HashtagMeta, IconName, LinkClick,
+        ResolvedHashtag, hashtag_chip_for, hashtag_chip_from_meta, hashtag_meta_visible,
+        link_click, thread_link_wants_detail,
     };
     use gpui::SharedString;
 
@@ -3652,7 +3736,7 @@ mod hashtag_label_tests {
     fn resolved(name: Option<&str>) -> Option<ResolvedHashtag> {
         Some(ResolvedHashtag {
             name: name.map(SharedString::from),
-            icon: IconName::Hashtag,
+            icon: IconName::Channel,
         })
     }
 
@@ -3678,7 +3762,7 @@ mod hashtag_label_tests {
 
         assert_eq!(chip.label, "unknown");
         assert!(chip.italic);
-        assert_eq!(chip.icon.path(), IconName::Hashtag.path());
+        assert_eq!(chip.icon.path(), IconName::Channel.path());
     }
 
     #[test]
@@ -3697,7 +3781,7 @@ mod hashtag_label_tests {
 
         assert_eq!(chip.label, "private-channel");
         assert!(!chip.italic);
-        assert_eq!(chip.icon.path(), IconName::LockedPrivate.path());
+        assert_eq!(chip.icon.path(), IconName::Lock.path());
     }
 
     #[test]
@@ -3727,31 +3811,46 @@ mod hashtag_label_tests {
     #[test]
     fn thread_meta_with_visible_parent_is_visible() {
         let meta = meta(ChannelType::Thread, Some(10), false);
-        assert!(hashtag_meta_visible(&meta, true, true));
+        assert!(hashtag_meta_visible(&meta, true, true, true));
     }
 
     #[test]
     fn thread_meta_without_parent_is_hidden() {
         let meta = meta(ChannelType::Thread, None, false);
-        assert!(!hashtag_meta_visible(&meta, true, false));
+        assert!(!hashtag_meta_visible(&meta, true, true, false));
     }
 
     #[test]
     fn private_thread_meta_with_visible_parent_is_hidden() {
         let meta = meta(ChannelType::Thread, Some(10), true);
-        assert!(!hashtag_meta_visible(&meta, true, true));
+        assert!(!hashtag_meta_visible(&meta, true, true, true));
     }
 
     #[test]
     fn channel_meta_in_loaded_clan_is_hidden() {
         let meta = meta(ChannelType::Text, None, false);
-        assert!(!hashtag_meta_visible(&meta, true, false));
+        assert!(!hashtag_meta_visible(&meta, true, true, false));
     }
 
     #[test]
     fn channel_meta_in_unloaded_clan_is_visible() {
         let meta = meta(ChannelType::Text, None, false);
-        assert!(hashtag_meta_visible(&meta, false, false));
+        assert!(hashtag_meta_visible(&meta, true, false, false));
+    }
+
+    #[test]
+    fn channel_meta_in_foreign_unloaded_clan_is_hidden() {
+        let meta = meta(ChannelType::Text, None, false);
+        assert!(!hashtag_meta_visible(&meta, false, false, false));
+    }
+
+    #[test]
+    fn thread_meta_in_foreign_clan_is_hidden() {
+        let with_parent = meta(ChannelType::Thread, Some(10), false);
+        let without_parent = meta(ChannelType::Thread, None, false);
+        assert!(!hashtag_meta_visible(&with_parent, false, false, true));
+        assert!(!hashtag_meta_visible(&with_parent, false, true, true));
+        assert!(!hashtag_meta_visible(&without_parent, false, false, false));
     }
 
     #[test]
@@ -3778,13 +3877,13 @@ mod hashtag_label_tests {
             None,
             Some(&thread),
             true,
-            hashtag_meta_visible(&thread, true, false),
+            hashtag_meta_visible(&thread, true, true, false),
             "en",
         );
 
         assert_eq!(chip.label, "private-channel");
         assert!(!chip.italic);
-        assert_eq!(chip.icon.path(), IconName::LockedPrivate.path());
+        assert_eq!(chip.icon.path(), IconName::Lock.path());
         assert_eq!(chip.channel_id, Some(ChannelId(2)));
         assert_eq!(chip.clan_hint, Some(ClanId(1)));
     }
@@ -3798,14 +3897,66 @@ mod hashtag_label_tests {
             None,
             Some(&channel),
             true,
-            hashtag_meta_visible(&channel, true, false),
+            hashtag_meta_visible(&channel, true, true, false),
             "en",
         );
 
         assert_eq!(chip.label, "private-channel");
         assert!(!chip.italic);
-        assert_eq!(chip.icon.path(), IconName::LockedPrivate.path());
+        assert_eq!(chip.icon.path(), IconName::Lock.path());
         assert_eq!(chip.channel_id, None);
+    }
+
+    #[test]
+    fn foreign_clan_channel_and_thread_links_build_non_clickable_private_chips() {
+        let channel = meta(ChannelType::Text, None, false);
+        let channel_chip = hashtag_chip_from_meta(
+            "#general",
+            Some(ChannelId(2)),
+            None,
+            Some(&channel),
+            false,
+            hashtag_meta_visible(&channel, false, false, false),
+            "en",
+        );
+        assert_eq!(channel_chip.label, "private-channel");
+        assert!(!channel_chip.italic);
+        assert_eq!(channel_chip.icon.path(), IconName::Lock.path());
+        assert_eq!(channel_chip.channel_id, None);
+
+        let thread = meta(ChannelType::Thread, Some(10), false);
+        let thread_chip = hashtag_chip_from_meta(
+            "#zz-1091-anon",
+            Some(ChannelId(3)),
+            None,
+            Some(&thread),
+            false,
+            hashtag_meta_visible(&thread, false, false, true),
+            "en",
+        );
+        assert_eq!(thread_chip.label, "private-channel");
+        assert!(!thread_chip.italic);
+        assert_eq!(thread_chip.icon.path(), IconName::Lock.path());
+        assert_eq!(thread_chip.channel_id, None);
+    }
+
+    #[test]
+    fn link_click_routes_by_known_clan_and_membership() {
+        assert_eq!(
+            link_click(Some(ClanId(1)), None, false),
+            LinkClick::Navigate(ClanId(1))
+        );
+        assert_eq!(
+            link_click(Some(ClanId(1)), Some(ClanId(2)), false),
+            LinkClick::Navigate(ClanId(1))
+        );
+        assert_eq!(
+            link_click(None, Some(ClanId(1)), true),
+            LinkClick::AskServer
+        );
+        assert_eq!(link_click(None, Some(ClanId(1)), false), LinkClick::Nothing);
+        assert_eq!(link_click(None, None, false), LinkClick::NoAccess);
+        assert_eq!(link_click(None, None, true), LinkClick::NoAccess);
     }
 }
 

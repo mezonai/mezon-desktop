@@ -675,9 +675,18 @@ impl Render for SettingsScreen {
                 div()
                     .mt(px(4.0))
                     .px(px(10.0))
+                    .flex()
+                    .items_center()
+                    .gap_2()
                     .text_xs()
                     .text_color(theme.text_muted)
-                    .child(format!("v{}", env!("CARGO_PKG_VERSION"))),
+                    .child(
+                        Icon::new(IconName::AppVersion)
+                            .size(px(16.0))
+                            .text_color(theme.text_muted),
+                    )
+                    .child(format!("v{}", env!("CARGO_PKG_VERSION")))
+                    .map(|row| Icon::motion_scope(row, true)),
             );
 
         h_flex()
@@ -821,8 +830,8 @@ impl Render for SettingsScreen {
                                             .bg(theme.bg_secondary)
                                             .child(
                                                 Icon::new(IconName::Close)
-                                                    .size(px(18.0))
-                                                    .text_color(theme.text_secondary),
+                                                    .size(px(20.))
+                                                    .selected(false),
                                             ),
                                     )
                                     .child(

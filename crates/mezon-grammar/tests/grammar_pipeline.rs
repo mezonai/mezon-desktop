@@ -278,7 +278,6 @@ fn test_keeps_dotted_and_at_tokens() {
 fn test_model1_100_percent_correct_rule_and_noise_suppression() {
     let client = MezonGrammarClient::new();
 
-    // 1. Standalone acknowledgements / closing phrases -> empty
     assert!(
         client
             .suggest_quick_replies_with_model("OK bạn nhé", None, 4)
@@ -310,7 +309,6 @@ fn test_model1_100_percent_correct_rule_and_noise_suppression() {
             .is_empty()
     );
 
-    // 2. Emojis, laughter, mentions -> empty
     assert!(
         client
             .suggest_quick_replies_with_model(": ))", None, 4)
@@ -332,7 +330,6 @@ fn test_model1_100_percent_correct_rule_and_noise_suppression() {
             .is_empty()
     );
 
-    // 3. Arbitrary chatter without directive/question -> empty
     assert!(
         client
             .suggest_quick_replies_with_model("Hôm nay trời đẹp quá", None, 4)
@@ -344,7 +341,6 @@ fn test_model1_100_percent_correct_rule_and_noise_suppression() {
             .is_empty()
     );
 
-    // 4. Confident prompts with verified pronouns -> suggest replies
     let r1 = client.suggest_quick_replies_with_model("Sáng mai anh nghỉ làm nhé", None, 4);
     assert!(!r1.is_empty());
     assert!(r1.iter().any(|r| r == "Dạ vâng anh."));
@@ -362,25 +358,44 @@ fn test_model1_100_percent_correct_rule_and_noise_suppression() {
 fn test_mentioned_pronoun_syntactic_extraction_and_masking() {
     use mezon_grammar::extract_mentioned_pronoun;
 
-    // 1. Non-pronoun homophones must NOT match false pronouns
-    assert_eq!(extract_mentioned_pronoun("Địa chỉ công ty ở đâu vậy bạn?"), "bạn");
-    assert_eq!(extract_mentioned_pronoun("Gió mùa đông bắc lạnh quá bạn ơi"), "bạn");
+    assert_eq!(
+        extract_mentioned_pronoun("Địa chỉ công ty ở đâu vậy bạn?"),
+        "bạn"
+    );
+    assert_eq!(
+        extract_mentioned_pronoun("Gió mùa đông bắc lạnh quá bạn ơi"),
+        "bạn"
+    );
     assert_eq!(extract_mentioned_pronoun("Đi xe ô tô không bạn?"), "bạn");
     assert_eq!(extract_mentioned_pronoun("Chú ý nhé bạn"), "bạn");
     assert_eq!(extract_mentioned_pronoun("Bác sĩ bảo sao rồi bạn?"), "bạn");
-    assert_eq!(extract_mentioned_pronoun("Cầu Long Biên đẹp lắm bạn"), "bạn");
-    assert_eq!(extract_mentioned_pronoun("Bà con lối xóm chúc mừng bạn"), "bạn");
+    assert_eq!(
+        extract_mentioned_pronoun("Cầu Long Biên đẹp lắm bạn"),
+        "bạn"
+    );
+    assert_eq!(
+        extract_mentioned_pronoun("Bà con lối xóm chúc mừng bạn"),
+        "bạn"
+    );
 
-    // 2. Relational pairs: accurately identifies WHO IS MENTIONED
     assert_eq!(extract_mentioned_pronoun("Chị cảm ơn em nhé"), "em");
     assert_eq!(extract_mentioned_pronoun("Em cảm ơn chị nhé"), "chị");
-    assert_eq!(extract_mentioned_pronoun("Anh review pull request giúp em"), "anh");
-    assert_eq!(extract_mentioned_pronoun("Em review pull request giúp anh"), "em");
+    assert_eq!(
+        extract_mentioned_pronoun("Anh review pull request giúp em"),
+        "anh"
+    );
+    assert_eq!(
+        extract_mentioned_pronoun("Em review pull request giúp anh"),
+        "em"
+    );
     assert_eq!(extract_mentioned_pronoun("Anh chào em nhé"), "em");
     assert_eq!(extract_mentioned_pronoun("Em chào anh nhé"), "anh");
     assert_eq!(extract_mentioned_pronoun("Bác chào cháu nhé"), "cháu");
     assert_eq!(extract_mentioned_pronoun("Cháu chào bác ạ"), "bác");
-    assert_eq!(extract_mentioned_pronoun("Cậu ơi tớ gửi file rồi nhé"), "cậu");
+    assert_eq!(
+        extract_mentioned_pronoun("Cậu ơi tớ gửi file rồi nhé"),
+        "cậu"
+    );
     assert_eq!(extract_mentioned_pronoun("Tớ gửi cậu file rồi nhé"), "cậu");
 }
 

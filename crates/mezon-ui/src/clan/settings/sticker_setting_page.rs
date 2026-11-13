@@ -471,7 +471,7 @@ fn render_sticker_card(
     if sticker.is_for_sale {
         card = card.child(
             div().absolute().top_1().left_1().child(
-                Icon::new(IconName::MarketIcons)
+                Icon::new(IconName::Shop)
                     .size(px(16.0))
                     .text_color(gpui::rgb(0xfacc15)),
             ),
@@ -511,7 +511,7 @@ fn render_sticker_card(
                         })
                         .child(
                             Icon::new(IconName::Close)
-                                .size(px(12.0))
+                                .size(px(16.0))
                                 .text_color(theme.danger_text),
                         ),
                 ),
@@ -554,8 +554,8 @@ fn render_add_card(theme: &Theme, entity: Entity<StickerSettingPage>) -> impl In
                         .bg(theme.text_secondary)
                         .child(
                             div().absolute().top(px(3.0)).left(px(3.0)).child(
-                                Icon::new(IconName::EmojiCatStar)
-                                    .size(px(15.0))
+                                Icon::new(IconName::Star)
+                                    .size(px(16.0))
                                     .text_color(gpui::white()),
                             ),
                         ),
@@ -575,7 +575,7 @@ fn render_add_card(theme: &Theme, entity: Entity<StickerSettingPage>) -> impl In
                         .justify_center()
                         .child(
                             Icon::new(IconName::Plus)
-                                .size(px(11.0))
+                                .size(px(16.0))
                                 .text_color(gpui::white()),
                         ),
                 ),

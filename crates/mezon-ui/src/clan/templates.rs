@@ -19,17 +19,17 @@ pub(crate) struct TemplateEntry {
 pub(crate) const TEMPLATES: &[TemplateEntry] = &[
     TemplateEntry {
         id: TemplateId::Gaming,
-        icon: IconName::GamingConsoleIcon,
+        icon: IconName::Gamepad,
         key: "clan.clanTemplateModal.gamingTemplate",
     },
     TemplateEntry {
         id: TemplateId::Friends,
-        icon: IconName::IconFriends,
+        icon: IconName::Friends,
         key: "clan.clanTemplateModal.friendsTemplate",
     },
     TemplateEntry {
         id: TemplateId::StudyGroup,
-        icon: IconName::MemberList,
+        icon: IconName::Members,
         key: "clan.clanTemplateModal.studyGroupTemplate",
     },
     TemplateEntry {
@@ -44,7 +44,7 @@ pub(crate) const TEMPLATES: &[TemplateEntry] = &[
     },
     TemplateEntry {
         id: TemplateId::ArtistsCreators,
-        icon: IconName::PaintTray,
+        icon: IconName::Palette,
         key: "clan.clanTemplateModal.artistsCreatorsTemplate",
     },
 ];

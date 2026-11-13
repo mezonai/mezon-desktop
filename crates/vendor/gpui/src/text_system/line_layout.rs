@@ -1,4 +1,6 @@
-use crate::{FontId, GlyphId, Pixels, PlatformTextSystem, Point, SharedString, Size, point, px};
+use crate::{
+    FontId, GlyphId, Pixels, PlatformTextSystem, Point, SharedString, Size, font, point, px,
+};
 use collections::FxHashMap;
 use parking_lot::{Mutex, RwLock, RwLockUpgradableReadGuard};
 use smallvec::SmallVec;
@@ -6,8 +8,9 @@ use std::{
     borrow::Borrow,
     hash::{Hash, Hasher},
     ops::Range,
-    sync::Arc,
+    sync::{Arc, OnceLock},
 };
+use unicode_segmentation::UnicodeSegmentation;
 
 use super::LineWrapper;
 
@@ -393,6 +396,7 @@ pub(crate) struct LineLayoutCache {
     previous_frame: Mutex<FrameCache>,
     current_frame: RwLock<FrameCache>,
     platform_text_system: Arc<dyn PlatformTextSystem>,
+    emoji_font: OnceLock<Option<FontId>>,
 }
 
 #[derive(Default)]
@@ -428,7 +432,26 @@ impl LineLayoutCache {
             previous_frame: Mutex::default(),
             current_frame: RwLock::default(),
             platform_text_system,
+            emoji_font: OnceLock::new(),
         }
+    }
+
+    fn emoji_font(&self) -> Option<FontId> {
+        *self.emoji_font.get_or_init(|| {
+            #[cfg(target_os = "windows")]
+            let family = Some("Segoe UI Emoji");
+            #[cfg(any(target_os = "linux", target_os = "freebsd"))]
+            let family = Some("Noto Color Emoji");
+            #[cfg(not(any(target_os = "windows", target_os = "linux", target_os = "freebsd")))]
+            let family: Option<&str> = None;
+
+            let family = family?;
+            let id = self.platform_text_system.font_id(&font(family)).ok()?;
+            self.platform_text_system
+                .glyph_for_char(id, '\u{20E3}')
+                .is_some_and(|glyph| glyph.0 != 0)
+                .then_some(id)
+        })
     }
 
     pub fn layout_index(&self) -> LineLayoutIndex {
@@ -605,9 +628,19 @@ impl LineLayoutCache {
             layout
         } else {
             let text = SharedString::from(text);
+            let emoji_runs;
+            let layout_runs = if !text.is_ascii()
+                && text.contains(['\u{FE0F}', '\u{20E3}'])
+                && let Some(emoji_font) = self.emoji_font()
+            {
+                emoji_runs = emoji_presentation_runs(&text, runs, emoji_font);
+                emoji_runs.as_slice()
+            } else {
+                runs
+            };
             let mut layout = self
                 .platform_text_system
-                .layout_line(&text, font_size, runs);
+                .layout_line(&text, font_size, layout_runs);
 
             if let Some(force_width) = force_width {
                 apply_force_width_to_layout(&mut layout, force_width);
@@ -754,9 +787,19 @@ impl LineLayoutCache {
         }
 
         let text = materialize_text();
+        let emoji_runs;
+        let layout_runs = if !text.is_ascii()
+            && text.contains(['\u{FE0F}', '\u{20E3}'])
+            && let Some(emoji_font) = self.emoji_font()
+        {
+            emoji_runs = emoji_presentation_runs(&text, runs, emoji_font);
+            emoji_runs.as_slice()
+        } else {
+            runs
+        };
         let mut layout = self
             .platform_text_system
-            .layout_line(&text, font_size, runs);
+            .layout_line(&text, font_size, layout_runs);
 
         if let Some(force_width) = force_width {
             apply_force_width_to_layout(&mut layout, force_width);
@@ -777,6 +820,42 @@ impl LineLayoutCache {
         current_frame.used_lines_by_hash.push(key);
         layout
     }
+}
+
+// mezon vendor edit: route U+FE0F / U+20E3 grapheme clusters to the platform emoji font (MEZON-661)
+fn emoji_presentation_runs(
+    text: &str,
+    runs: &[FontRun],
+    emoji_font: FontId,
+) -> SmallVec<[FontRun; 4]> {
+    if text.is_ascii() || !text.contains(['\u{FE0F}', '\u{20E3}']) {
+        return SmallVec::from_slice(runs);
+    }
+
+    let mut result = SmallVec::<[FontRun; 4]>::with_capacity(runs.len());
+    let mut offset = 0;
+    for run in runs {
+        let slice = &text[offset..offset + run.len];
+        offset += run.len;
+        for (_, grapheme) in slice.grapheme_indices(true) {
+            let font_id = if grapheme.contains(['\u{FE0F}', '\u{20E3}']) {
+                emoji_font
+            } else {
+                run.font_id
+            };
+            if let Some(last) = result.last_mut()
+                && last.font_id == font_id
+            {
+                last.len += grapheme.len();
+            } else {
+                result.push(FontRun {
+                    len: grapheme.len(),
+                    font_id,
+                });
+            }
+        }
+    }
+    result
 }
 
 // Combining marks (e.g. Thai vowel signs, Arabic diacritics) are shaped by

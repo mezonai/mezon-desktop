@@ -1,4 +1,4 @@
-use crate::components::primitives::{Avatar, Icon, IconName, Label, h_flex, v_flex};
+use crate::components::primitives::{Avatar, Icon, IconName, Label, Switch, h_flex, v_flex};
 use crate::image_cache::LruImageCache;
 use crate::theme::{ActiveTheme, Theme, preview_surface, resolve_theme, set_theme};
 use gpui::{Context, Entity, FontWeight, Rgba, Window, div, prelude::*, px};
@@ -25,6 +25,7 @@ pub struct AppearancePage {
 
 impl AppearancePage {
     pub fn new(settings: Entity<Settings>, cx: &mut Context<Self>) -> Self {
+        cx.observe(&settings, |_, _, cx| cx.notify()).detach();
         let account_store = AccountStore::global(cx);
         cx.observe(&account_store, |_, _, cx| cx.notify()).detach();
         account_store.update(cx, |store, cx| store.ensure_account(cx));
@@ -141,7 +142,7 @@ fn theme_swatch(
                     .p(px(2.0))
                     .child(
                         Icon::new(IconName::Check)
-                            .size_3()
+                            .size(px(16.))
                             .text_color(rgba(255, 255, 255, 1.0)),
                     ),
             )
@@ -154,6 +155,8 @@ impl Render for AppearancePage {
         let locale = self.settings.read(cx).language.clone();
         let theme = cx.theme();
         let settings = self.settings.clone();
+        let motion_settings = self.settings.clone();
+        let icon_motion = self.settings.read(cx).icon_motion;
 
         let account = self.account_store.read(cx).account.as_ref();
         let display_name = account
@@ -254,6 +257,43 @@ impl Render for AppearancePage {
                                 },
                             )),
                     ),
+            )
+            .child(
+                h_flex()
+                    .mt_4()
+                    .p_4()
+                    .gap_4()
+                    .items_center()
+                    .justify_between()
+                    .rounded_lg()
+                    .bg(theme.tokens.theme_setting_nav)
+                    .child(
+                        v_flex()
+                            .min_w_0()
+                            .gap_1()
+                            .child(Label::new(mezon_i18n::t(
+                                &locale,
+                                "setting.appearance.iconAnimations",
+                            )))
+                            .child(
+                                Label::new(mezon_i18n::t(
+                                    &locale,
+                                    "setting.appearance.iconAnimationsDescription",
+                                ))
+                                .text_sm()
+                                .text_color(theme.tokens.text_theme_primary),
+                            ),
+                    )
+                    .child(Switch::new("icon-motion").checked(icon_motion).on_click(
+                        move |_, _, cx| {
+                            motion_settings.update(cx, |settings, cx| {
+                                settings.icon_motion = !settings.icon_motion;
+                                cx.notify();
+                            });
+                            mezon_store::schedule_settings_save(&motion_settings, cx);
+                            cx.refresh_windows();
+                        },
+                    )),
             )
     }
 }

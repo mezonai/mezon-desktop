@@ -1,35 +1,41 @@
 use gpui::{
-    App, ClipboardItem, Context, Entity, Focusable, FontWeight, PathPromptOptions, SharedString,
-    Subscription, Task, Window, div, img, prelude::*, px,
+    AnyElement, App, Context, Entity, Focusable, FontWeight, PathPromptOptions, SharedString,
+    Subscription, Task, Window, div, img, prelude::*, px, relative, rgb,
 };
 use mezon_store::{
-    AppConfig, ClanId, ClanImageMimeType, ClanList, CommunityDraft, CommunityInfo,
-    MAX_COMMUNITY_ABOUT_CHARS, MAX_COMMUNITY_BANNER_BYTES, MAX_COMMUNITY_DESCRIPTION_CHARS,
-    MAX_COMMUNITY_SHORT_URL_CHARS, Settings, sanitize_community_short_url, truncate_chars,
+    AppConfig, ClanId, ClanImageMimeType, ClanList, CommunityDraft, CommunityFieldIssues,
+    CommunityInfo, MAX_COMMUNITY_ABOUT_CHARS, MAX_COMMUNITY_BANNER_BYTES,
+    MAX_COMMUNITY_DESCRIPTION_CHARS, MAX_COMMUNITY_SHORT_URL_CHARS, Settings,
+    sanitize_community_short_url, truncate_chars,
 };
-use std::time::Duration;
 
 use crate::app::shell::Shell;
 use crate::components::primitives::{
-    Button, ButtonVariants, FocusCycle, Icon, IconName, Input, InputEvent, InputState, Sizable,
-    Size, TextArea, TextAreaEvent, TextAreaField, h_flex, v_flex,
+    Button, ButtonVariants, InputEvent, InputState, TextArea, TextAreaEvent, h_flex, v_flex,
 };
 use crate::theme::{ActiveTheme, Theme};
 use crate::util::assets::MEZON_COMMUNITY;
-use crate::util::imgproxy;
+
+mod community_enable_modal;
+mod community_overview_card;
 
 const ABOUT_MAX_LEN: usize = MAX_COMMUNITY_ABOUT_CHARS;
 const DESCRIPTION_MAX_LEN: usize = MAX_COMMUNITY_DESCRIPTION_CHARS;
 const VANITY_URL_MAX_LEN: usize = MAX_COMMUNITY_SHORT_URL_CHARS;
-const COMMUNITY_BANNER_PREVIEW_W: u32 = 700;
-const COMMUNITY_BANNER_PREVIEW_H: u32 = 200;
+const COMMUNITY_BANNER_PREVIEW_W: u32 = 1280;
+const COMMUNITY_BANNER_PREVIEW_H: u32 = 720;
+const ENABLE_CARD_BG: u32 = 0x4752c4;
+const ENABLE_CARD_BUTTON_TEXT: u32 = 0x5865f2;
+const ENABLE_CARD_BUTTON_HOVER_BG: u32 = 0xf9fafb;
+const ENABLE_CARD_MIN_HEIGHT: f32 = 500.0;
+const ENABLE_CARD_IMAGE_WIDTH: f32 = 350.0;
+const TEXTAREA_MIN_HEIGHT: f32 = 120.0;
+const TEXTAREA_MAX_VISIBLE_LINES: usize = 8;
 
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-struct FieldErrors {
-    banner: bool,
-    about: bool,
-    description: bool,
-    vanity_url: bool,
+fn without_url_scheme(url: &str) -> &str {
+    url.strip_prefix("https://")
+        .or_else(|| url.strip_prefix("http://"))
+        .unwrap_or(url)
 }
 
 pub struct CommunitySettingPage {
@@ -43,7 +49,7 @@ pub struct CommunitySettingPage {
     saved_draft: CommunityDraft,
     saving: bool,
     banner_uploading: bool,
-    field_errors: FieldErrors,
+    field_errors: CommunityFieldIssues,
     about_input: Option<Entity<TextArea>>,
     description_input: Option<Entity<TextArea>>,
     vanity_input: Option<Entity<InputState>>,
@@ -52,8 +58,7 @@ pub struct CommunitySettingPage {
     _vanity_sub: Option<Subscription>,
     _fetch_task: Option<Task<()>>,
     _banner_upload_task: Option<Task<()>>,
-    _copy_reset_task: Option<Task<()>>,
-    url_copied: bool,
+    banner_hovered: Option<bool>,
 }
 
 impl CommunitySettingPage {
@@ -74,7 +79,7 @@ impl CommunitySettingPage {
             saved_draft: CommunityDraft::default(),
             saving: false,
             banner_uploading: false,
-            field_errors: FieldErrors::default(),
+            field_errors: CommunityFieldIssues::default(),
             about_input: None,
             description_input: None,
             vanity_input: None,
@@ -83,8 +88,7 @@ impl CommunitySettingPage {
             _vanity_sub: None,
             _fetch_task: None,
             _banner_upload_task: None,
-            _copy_reset_task: None,
-            url_copied: false,
+            banner_hovered: None,
         };
         this.fetch_community_info(cx);
         this
@@ -93,14 +97,12 @@ impl CommunitySettingPage {
     pub fn release(&mut self, _cx: &mut Context<Self>) {
         self._fetch_task.take();
         self._banner_upload_task.take();
-        self._copy_reset_task.take();
         self._about_sub.take();
         self._description_sub.take();
         self._vanity_sub.take();
         self.about_input = None;
         self.description_input = None;
         self.vanity_input = None;
-        self.url_copied = false;
     }
 
     pub fn should_show_save_bar(&self, _cx: &App) -> bool {
@@ -141,7 +143,7 @@ impl CommunitySettingPage {
         self.draft = CommunityDraft::from_info(&info);
         self.saved_draft = self.draft.clone();
         self.setup_mode = false;
-        self.field_errors = FieldErrors::default();
+        self.field_errors = CommunityFieldIssues::default();
     }
 
     fn reset_inputs(&mut self) {
@@ -168,8 +170,8 @@ impl CommunitySettingPage {
             let about_input = cx.new(|cx| {
                 TextArea::new(window, cx)
                     .placeholder(placeholder)
-                    .min_height(px(96.0))
-                    .max_visible_lines(6)
+                    .min_height(px(TEXTAREA_MIN_HEIGHT))
+                    .max_visible_lines(TEXTAREA_MAX_VISIBLE_LINES)
                     .bg(input_bg)
                     .text_color(theme.text_primary)
                     .radius(px(8.0))
@@ -196,8 +198,8 @@ impl CommunitySettingPage {
             let description_input = cx.new(|cx| {
                 TextArea::new(window, cx)
                     .placeholder(placeholder)
-                    .min_height(px(120.0))
-                    .max_visible_lines(8)
+                    .min_height(px(TEXTAREA_MIN_HEIGHT))
+                    .max_visible_lines(TEXTAREA_MAX_VISIBLE_LINES)
                     .bg(input_bg)
                     .text_color(theme.text_primary)
                     .radius(px(8.0))
@@ -243,8 +245,6 @@ impl CommunitySettingPage {
                     }
                     this.draft.short_url = value;
                     this.field_errors.vanity_url = false;
-                    this.url_copied = false;
-                    this._copy_reset_task.take();
                     cx.notify();
                 }
             });
@@ -297,8 +297,9 @@ impl CommunitySettingPage {
                 self.saved_draft = restored;
             }
         }
+        self.draft.ensure_default_hashtag();
         self.setup_mode = true;
-        self.field_errors = FieldErrors::default();
+        self.field_errors = CommunityFieldIssues::default();
         self.reset_inputs();
         cx.notify();
     }
@@ -306,38 +307,36 @@ impl CommunitySettingPage {
     fn cancel_setup(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
         self.setup_mode = false;
         self.draft = self.saved_draft.clone();
-        self.field_errors = FieldErrors::default();
+        self.field_errors = CommunityFieldIssues::default();
         self.reset_inputs();
         cx.notify();
     }
 
     fn reset(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
         self.draft = self.saved_draft.clone();
-        self.field_errors = FieldErrors::default();
+        self.field_errors = CommunityFieldIssues::default();
         self.reset_inputs();
         cx.notify();
     }
 
     fn validate(&mut self) -> bool {
-        let draft = self.draft.clone().sanitized();
-        let mut errors = FieldErrors::default();
-        if draft.community_banner.is_empty() {
-            errors.banner = true;
+        self.field_errors = self.draft.missing_fields();
+        self.field_errors.is_empty()
+    }
+
+    pub fn fills_content_height(&self) -> bool {
+        !self.loading && self.is_community
+    }
+
+    pub fn is_setup_open(&self) -> bool {
+        self.setup_mode && !self.is_community
+    }
+
+    fn toggle_hashtag(&mut self, tag: &str, cx: &mut Context<Self>) {
+        if self.draft.toggle_hashtag(tag) {
+            self.field_errors.hashtags = false;
+            cx.notify();
         }
-        if draft.about.is_empty() {
-            errors.about = true;
-        }
-        if draft.description.is_empty() {
-            errors.description = true;
-        }
-        if draft.short_url.is_empty() {
-            errors.vanity_url = true;
-        }
-        self.field_errors = errors;
-        !self.field_errors.banner
-            && !self.field_errors.about
-            && !self.field_errors.description
-            && !self.field_errors.vanity_url
     }
 
     fn save(&mut self, enable: bool, cx: &mut Context<Self>) {
@@ -429,7 +428,7 @@ impl CommunitySettingPage {
                 let _ = this.update(cx, |this, cx| {
                     this.is_community = false;
                     this.setup_mode = false;
-                    this.field_errors = FieldErrors::default();
+                    this.field_errors = CommunityFieldIssues::default();
                     this.reset_inputs();
                     this.saving = false;
                     cx.notify();
@@ -604,34 +603,18 @@ impl CommunitySettingPage {
 
     fn remove_banner(&mut self, cx: &mut Context<Self>) {
         self.draft.community_banner.clear();
+        self.banner_hovered = None;
         self.field_errors.banner = false;
         cx.notify();
     }
 
     fn preview_url(&self, cx: &App) -> String {
-        AppConfig::global(cx).community_clan_url(&self.draft.short_url)
+        without_url_scheme(&AppConfig::global(cx).community_clan_url(&self.draft.short_url))
+            .to_string()
     }
 
     fn vanity_url_prefix(&self, cx: &App) -> String {
-        AppConfig::global(cx).community_clan_url_prefix()
-    }
-
-    fn copy_preview_url(&mut self, cx: &mut Context<Self>) {
-        if self.draft.short_url.is_empty() {
-            return;
-        }
-        cx.write_to_clipboard(ClipboardItem::new_string(self.preview_url(cx)));
-        self.url_copied = true;
-        cx.notify();
-        let executor = cx.background_executor().clone();
-        self._copy_reset_task = Some(cx.spawn(async move |this, cx| {
-            executor.timer(Duration::from_millis(1500)).await;
-            let _ = this.update(cx, |this, cx| {
-                this.url_copied = false;
-                this._copy_reset_task = None;
-                cx.notify();
-            });
-        }));
+        without_url_scheme(&AppConfig::global(cx).community_clan_url_prefix()).to_string()
     }
 
     fn render_loading(locale: &str, theme: &Theme) -> impl IntoElement {
@@ -652,99 +635,139 @@ impl CommunitySettingPage {
             )
     }
 
-    fn render_enable_landing(
-        &self,
-        locale: &str,
-        theme: &Theme,
-        cx: &mut Context<Self>,
-    ) -> impl IntoElement {
-        v_flex().w_full().gap_6().child(
-            div()
-                .w_full()
-                .p_6()
-                .rounded_lg()
-                .bg(theme.surfaces.secondary)
-                .border_1()
-                .border_color(theme.border)
-                .child(
-                    v_flex()
-                        .items_center()
-                        .gap_5()
-                        .child(
-                            div()
-                                .p_4()
-                                .rounded_lg()
-                                .bg(theme.tokens.bg_tertiary)
-                                .child(img(MEZON_COMMUNITY).max_w(px(320.0)).rounded_md()),
-                        )
-                        .child(
-                            div()
-                                .text_xl()
-                                .font_weight(FontWeight::SEMIBOLD)
-                                .text_color(theme.text_primary)
-                                .child(mezon_i18n::t(
-                                    locale,
-                                    "onBoardingClan.enableCommunity.title",
-                                )),
-                        )
-                        .child(
-                            div()
-                                .max_w(px(520.0))
-                                .text_center()
-                                .text_sm()
-                                .text_color(theme.text_secondary)
-                                .child(mezon_i18n::t(
-                                    locale,
-                                    "onBoardingClan.enableCommunity.description",
-                                )),
-                        )
-                        .child(
-                            div()
-                                .text_sm()
-                                .text_color(theme.text_muted)
-                                .child(mezon_i18n::t(
-                                    locale,
-                                    "onBoardingClan.enableCommunity.subtitle",
-                                )),
-                        )
-                        .child(
-                            Button::new("community-enable-start")
-                                .label(mezon_i18n::t(
-                                    locale,
-                                    "onBoardingClan.enableCommunity.button",
-                                ))
-                                .primary()
-                                .on_click(cx.listener(|this, _, _, cx| {
-                                    this.start_setup(cx);
-                                })),
-                        )
-                        .child(
-                            div()
-                                .text_xs()
-                                .text_color(theme.text_muted)
-                                .child(mezon_i18n::t(
-                                    locale,
-                                    "onBoardingClan.enableCommunity.note",
-                                )),
-                        ),
-                ),
-        )
-    }
-
-    fn render_field_label(text: SharedString, required: bool, theme: &Theme) -> impl IntoElement {
-        h_flex()
-            .gap_1()
+    fn render_enable_card(page: Entity<Self>, locale: &str) -> AnyElement {
+        let page = page.downgrade();
+        v_flex()
+            .relative()
+            .overflow_hidden()
             .items_center()
+            .justify_center()
+            .min_h(px(ENABLE_CARD_MIN_HEIGHT))
+            .p_8()
+            .rounded(px(16.0))
+            .bg(rgb(ENABLE_CARD_BG))
+            .text_color(gpui::white())
+            .shadow_lg()
             .child(
                 div()
-                    .text_sm()
-                    .font_weight(FontWeight::SEMIBOLD)
-                    .text_color(theme.text_primary)
-                    .child(text),
+                    .absolute()
+                    .top(px(-64.0))
+                    .left(px(-64.0))
+                    .size(px(128.0))
+                    .rounded_full()
+                    .bg(gpui::white().alpha(0.05)),
             )
-            .when(required, |el| {
-                el.child(div().text_sm().text_color(theme.status_dnd).child("*"))
-            })
+            .child(
+                div()
+                    .absolute()
+                    .bottom(px(-96.0))
+                    .right(px(-96.0))
+                    .size(px(192.0))
+                    .rounded_full()
+                    .bg(gpui::white().alpha(0.05)),
+            )
+            .child(
+                div()
+                    .absolute()
+                    .top(relative(0.5))
+                    .left(px(-48.0))
+                    .size(px(96.0))
+                    .rounded_full()
+                    .bg(gpui::white().alpha(0.1)),
+            )
+            .child(
+                v_flex()
+                    .relative()
+                    .items_center()
+                    .w_full()
+                    .child(
+                        div()
+                            .mb_8()
+                            .p_4()
+                            .rounded(px(16.0))
+                            .bg(gpui::white().alpha(0.1))
+                            .shadow_lg()
+                            .child(
+                                img(MEZON_COMMUNITY)
+                                    .w(px(ENABLE_CARD_IMAGE_WIDTH))
+                                    .max_w_full()
+                                    .rounded(px(8.0)),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .text_size(px(36.0))
+                            .font_weight(FontWeight::BOLD)
+                            .text_center()
+                            .child(mezon_i18n::t(
+                                locale,
+                                "onBoardingClan.enableCommunity.title",
+                            )),
+                    )
+                    .child(
+                        div()
+                            .w(px(64.0))
+                            .h(px(4.0))
+                            .mt_2()
+                            .mb_6()
+                            .rounded_full()
+                            .bg(gpui::white().alpha(0.3)),
+                    )
+                    .child(
+                        div()
+                            .px_4()
+                            .text_lg()
+                            .text_center()
+                            .text_color(gpui::white().alpha(0.9))
+                            .child(mezon_i18n::t(
+                                locale,
+                                "onBoardingClan.enableCommunity.description",
+                            )),
+                    )
+                    .child(
+                        div()
+                            .mt_2()
+                            .px_4()
+                            .text_base()
+                            .text_center()
+                            .text_color(gpui::white().alpha(0.8))
+                            .child(mezon_i18n::t(
+                                locale,
+                                "onBoardingClan.enableCommunity.subtitle",
+                            )),
+                    )
+                    .child(
+                        div()
+                            .id("community-enable-start")
+                            .mt_8()
+                            .px(px(40.0))
+                            .py(px(16.0))
+                            .rounded(px(12.0))
+                            .bg(gpui::white())
+                            .text_lg()
+                            .font_weight(FontWeight::BOLD)
+                            .text_color(rgb(ENABLE_CARD_BUTTON_TEXT))
+                            .shadow_lg()
+                            .cursor_pointer()
+                            .hover(|style| style.bg(rgb(ENABLE_CARD_BUTTON_HOVER_BG)))
+                            .child(mezon_i18n::t(
+                                locale,
+                                "onBoardingClan.enableCommunity.button",
+                            ))
+                            .on_click(move |_, _, cx| {
+                                let _ = page.update(cx, |this, cx| this.start_setup(cx));
+                            }),
+                    )
+                    .child(
+                        div()
+                            .mt_6()
+                            .text_sm()
+                            .text_center()
+                            .text_color(gpui::white().alpha(0.6))
+                            .child(mezon_i18n::t(locale, "onBoardingClan.enableCommunity.note")),
+                    ),
+            )
+            .into_any_element()
     }
 
     fn render_char_counter(current: usize, max: usize, theme: &Theme) -> impl IntoElement {
@@ -758,535 +781,13 @@ impl CommunitySettingPage {
             .child(format!("{current}/{max}"))
     }
 
-    fn render_banner_preview(
-        &self,
-        locale: &str,
-        theme: &Theme,
-        banner_error: bool,
-        cx: &mut Context<Self>,
-    ) -> impl IntoElement {
-        let banner = self.draft.community_banner.clone();
-        let has_banner = !banner.is_empty();
-        let banner_src = if has_banner {
-            imgproxy::proxied(
-                cx,
-                &banner,
-                COMMUNITY_BANNER_PREVIEW_W,
-                COMMUNITY_BANNER_PREVIEW_H,
-                "force",
-            )
-        } else {
-            String::new()
-        };
-        let uploading = self.banner_uploading;
-        let radius = px(8.0);
-
-        div()
-            .relative()
-            .w_full()
-            .h(px(200.0))
-            .rounded(radius)
-            .border_1()
-            .border_color(if banner_error {
-                theme.status_dnd
-            } else {
-                theme.border
-            })
-            .bg(theme.tokens.theme_setting_nav)
-            .overflow_hidden()
-            .when(has_banner, |el| {
-                el.child(
-                    img(banner_src)
-                        .absolute()
-                        .inset_0()
-                        .w_full()
-                        .h_full()
-                        .rounded(radius)
-                        .object_fit(gpui::ObjectFit::Cover),
-                )
-            })
-            .when(!has_banner, |el| {
-                el.flex().items_center().justify_center().child(
-                    Icon::new(IconName::UploadImage)
-                        .size(px(32.0))
-                        .text_color(theme.text_secondary),
-                )
-            })
-            .child(
-                div()
-                    .id("community-banner-action")
-                    .absolute()
-                    .top(px(16.0))
-                    .right(px(16.0))
-                    .size(px(28.0))
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .rounded_full()
-                    .border_1()
-                    .border_color(theme.border)
-                    .bg(theme.bg_floating)
-                    .cursor_pointer()
-                    .occlude()
-                    .when(has_banner, |el| {
-                        el.on_click(cx.listener(|this, _, _, cx| this.remove_banner(cx)))
-                    })
-                    .when(!has_banner, |el| {
-                        el.on_click(cx.listener(|this, _, _, cx| {
-                            if !this.banner_uploading {
-                                this.pick_banner(cx);
-                            }
-                        }))
-                    })
-                    .child(
-                        Icon::new(if has_banner {
-                            IconName::Close
-                        } else {
-                            IconName::SelectFileIcon
-                        })
-                        .size(px(16.0))
-                        .text_color(if has_banner {
-                            theme.status_dnd
-                        } else {
-                            theme.text_secondary
-                        }),
-                    ),
-            )
-            .when(uploading, |el| {
-                el.child(
-                    div()
-                        .absolute()
-                        .inset_0()
-                        .rounded(radius)
-                        .flex()
-                        .items_center()
-                        .justify_center()
-                        .bg(gpui::hsla(0., 0., 0., 0.45))
-                        .child(
-                            div()
-                                .text_sm()
-                                .text_color(gpui::white())
-                                .child(mezon_i18n::t(
-                                    locale,
-                                    "onBoardingClan.communitySettings.buttons.saving",
-                                )),
-                        ),
-                )
-            })
-    }
-
-    fn render_banner_section(
-        &self,
-        locale: &str,
-        theme: &Theme,
-        cx: &mut Context<Self>,
-    ) -> impl IntoElement {
-        let banner_error = self.field_errors.banner;
-
-        h_flex()
-            .gap(px(20.0))
-            .items_start()
-            .w_full()
-            .min_w(px(0.0))
-            .child(
-                div().flex_1().min_w(px(0.0)).overflow_hidden().child(
-                    v_flex()
-                        .w_full()
-                        .child(
-                            h_flex()
-                                .gap_1()
-                                .items_center()
-                                .mb(px(8.0))
-                                .child(
-                                    div()
-                                        .text_xs()
-                                        .font_weight(FontWeight::BOLD)
-                                        .text_color(theme.text_primary)
-                                        .child(mezon_i18n::t(
-                                            locale,
-                                            "onBoardingClan.communitySettings.banner.title",
-                                        )),
-                                )
-                                .child(div().text_xs().text_color(theme.status_dnd).child("*")),
-                        )
-                        .child(
-                            div()
-                                .text_sm()
-                                .font_weight(FontWeight::NORMAL)
-                                .text_color(theme.text_secondary)
-                                .mb(px(8.0))
-                                .child(mezon_i18n::t(
-                                    locale,
-                                    "onBoardingClan.communitySettings.banner.uploadDescription",
-                                )),
-                        )
-                        .child(
-                            div()
-                                .text_sm()
-                                .font_weight(FontWeight::NORMAL)
-                                .text_color(theme.text_secondary)
-                                .child(mezon_i18n::t(
-                                    locale,
-                                    "clanSettings.clanBanner.recommendedSize",
-                                )),
-                        )
-                        .child(
-                            div().mt(px(16.0)).child(
-                                Button::new("community-banner-upload")
-                                    .label(mezon_i18n::t(
-                                        locale,
-                                        "onBoardingClan.communitySettings.banner.uploadTitle",
-                                    ))
-                                    .primary()
-                                    .with_size(Size::Large)
-                                    .disabled(self.banner_uploading)
-                                    .on_click(cx.listener(|this, _, _, cx| {
-                                        this.pick_banner(cx);
-                                    })),
-                            ),
-                        ),
-                ),
-            )
-            .child(
-                div()
-                    .flex_1()
-                    .min_w(px(0.0))
-                    .child(self.render_banner_preview(locale, theme, banner_error, cx)),
-            )
-    }
-
-    fn render_form(
-        &self,
-        locale: &str,
-        theme: &Theme,
-        setup_mode: bool,
-        cx: &mut Context<Self>,
-    ) -> impl IntoElement {
-        let about_len = self.draft.about.chars().count();
-        let description_len = self.draft.description.chars().count();
-        let vanity_len = self.draft.short_url.chars().count();
-        let show_preview = !self.draft.short_url.is_empty();
-        let saving = self.saving;
-        let vanity_prefix = self.vanity_url_prefix(cx);
-        let preview_url = self.preview_url(cx);
-
-        v_flex()
-            .w_full()
-            .focus_cycle(
-                self.description_input
-                    .iter()
-                    .chain(&self.about_input)
-                    .map(|input| input.focus_handle(cx))
-                    .chain(self.vanity_input.iter().map(|input| input.focus_handle(cx))),
-            )
-            .min_w(px(0.0))
-            .gap_8()
-            .when(self.is_community && !setup_mode, |el| {
-                el.child(
-                    div()
-                        .text_base()
-                        .text_color(theme.text_secondary)
-                        .child(mezon_i18n::t(
-                            locale,
-                            "onBoardingClan.communitySettings.subtitle",
-                        )),
-                )
-            })
-            .when(setup_mode, |el| {
-                el.child(
-                    v_flex()
-                        .gap_1()
-                        .child(
-                            div()
-                                .text_lg()
-                                .font_weight(FontWeight::SEMIBOLD)
-                                .text_color(theme.text_primary)
-                                .child(mezon_i18n::t(
-                                    locale,
-                                    "onBoardingClan.communitySettings.enableTitle",
-                                )),
-                        )
-                        .child(
-                            div()
-                                .text_sm()
-                                .text_color(theme.text_secondary)
-                                .child(mezon_i18n::t(
-                                    locale,
-                                    "onBoardingClan.communitySettings.enableSubtitle",
-                                )),
-                        ),
-                )
-            })
-            .child(self.render_banner_section(locale, theme, cx))
-            .child(
-                v_flex()
-                    .gap_2()
-                    .child(Self::render_field_label(
-                        mezon_i18n::t(
-                            locale,
-                            "onBoardingClan.communitySettings.description.title",
-                        )
-                        .into(),
-                        true,
-                        theme,
-                    ))
-                    .child(
-                        div()
-                            .w_full()
-                            .when(self.field_errors.description, |el| {
-                                el.border_2().border_color(theme.status_dnd).rounded_lg()
-                            })
-                            .when_some(self.description_input.as_ref(), |el, input| {
-                                el.child(TextAreaField::new(input))
-                            }),
-                    )
-                    .child(h_flex().justify_end().child(Self::render_char_counter(
-                        description_len,
-                        DESCRIPTION_MAX_LEN,
-                        theme,
-                    ))),
-            )
-            .child(
-                v_flex()
-                    .gap_2()
-                    .child(Self::render_field_label(
-                        mezon_i18n::t(
-                            locale,
-                            "onBoardingClan.communitySettings.about.title",
-                        )
-                        .into(),
-                        true,
-                        theme,
-                    ))
-                    .child(
-                        div()
-                            .w_full()
-                            .when(self.field_errors.about, |el| {
-                                el.border_2().border_color(theme.status_dnd).rounded_lg()
-                            })
-                            .when_some(self.about_input.as_ref(), |el, input| {
-                                el.child(TextAreaField::new(input))
-                            }),
-                    )
-                    .child(h_flex().justify_end().child(Self::render_char_counter(
-                        about_len,
-                        ABOUT_MAX_LEN,
-                        theme,
-                    ))),
-            )
-            .child(
-                v_flex()
-                    .gap_2()
-                    .child(Self::render_field_label(
-                        mezon_i18n::t(
-                            locale,
-                            "onBoardingClan.communitySettings.vanityUrl.title",
-                        )
-                        .into(),
-                        true,
-                        theme,
-                    ))
-                    .child(
-                        div()
-                            .text_xs()
-                            .text_color(theme.text_secondary)
-                            .child(mezon_i18n::t(
-                                locale,
-                                "onBoardingClan.communitySettings.vanityUrl.description",
-                            )),
-                    )
-                    .child(
-                        h_flex()
-                            .w_full()
-                            .rounded_lg()
-                            .border_1()
-                            .when(self.field_errors.vanity_url, |el| {
-                                el.border_color(theme.status_dnd)
-                            })
-                            .when(!self.field_errors.vanity_url, |el| {
-                                el.border_color(theme.border)
-                            })
-                            .overflow_hidden()
-                            .bg(theme.tokens.bg_tertiary)
-                            .child(
-                                div()
-                                    .flex_shrink_0()
-                                    .px_3()
-                                    .h(px(40.0))
-                                    .flex()
-                                    .items_center()
-                                    .border_r_1()
-                                    .border_color(theme.border)
-                                    .text_xs()
-                                    .text_color(theme.text_muted)
-                                    .child(vanity_prefix),
-                            )
-                            .child(
-                                div()
-                                    .flex_1()
-                                    .min_w(px(0.0))
-                                    .when_some(self.vanity_input.as_ref(), |el, input| {
-                                        el.child(Input::new(input))
-                                    }),
-                            ),
-                    )
-                    .child(h_flex().justify_end().child(Self::render_char_counter(
-                        vanity_len,
-                        VANITY_URL_MAX_LEN,
-                        theme,
-                    )))
-                    .when(show_preview, |el| {
-                        let copied = self.url_copied;
-                        el.child(
-                            div()
-                                .p_3()
-                                .rounded_md()
-                                .border_1()
-                                .border_color(theme.border)
-                                .bg(theme.surfaces.secondary)
-                                .child(
-                                    h_flex()
-                                        .items_center()
-                                        .justify_between()
-                                        .gap_3()
-                                        .child(
-                                            v_flex()
-                                                .flex_1()
-                                                .min_w(px(0.0))
-                                                .gap_1()
-                                                .child(
-                                                    div()
-                                                        .text_xs()
-                                                        .font_weight(FontWeight::MEDIUM)
-                                                        .text_color(theme.text_secondary)
-                                                        .child(mezon_i18n::t(
-                                                            locale,
-                                                            "onBoardingClan.communitySettings.vanityUrl.previewLabel",
-                                                        )),
-                                                )
-                                                .child(
-                                                    div()
-                                                        .text_sm()
-                                                        .text_color(theme.text_primary)
-                                                        .overflow_hidden()
-                                                        .text_ellipsis()
-                                                        .child(preview_url),
-                                                ),
-                                        )
-                                        .child(
-                                            div()
-                                                .id("community-preview-url-copy")
-                                                .flex_shrink_0()
-                                                .flex()
-                                                .items_center()
-                                                .justify_center()
-                                                .size(px(28.0))
-                                                .rounded_md()
-                                                .cursor_pointer()
-                                                .hover(|s| s.bg(theme.bg_hover))
-                                                .on_click(cx.listener(|this, _, _, cx| {
-                                                    this.copy_preview_url(cx);
-                                                }))
-                                                .child(
-                                                    Icon::new(if copied {
-                                                        IconName::Check
-                                                    } else {
-                                                        IconName::CopyIcon
-                                                    })
-                                                    .size(px(16.0))
-                                                    .text_color(if copied {
-                                                        theme.status_online
-                                                    } else {
-                                                        theme.text_secondary
-                                                    }),
-                                                ),
-                                        ),
-                                ),
-                        )
-                    }),
-            )
-            .when(setup_mode, |el| {
-                el.child(
-                    h_flex()
-                        .justify_end()
-                        .gap_3()
-                        .pt_4()
-                        .border_t_1()
-                        .border_color(theme.border)
-                        .child(
-                            Button::new("community-setup-cancel")
-                                .label(mezon_i18n::t(
-                                    locale,
-                                    "onBoardingClan.buttons.cancel",
-                                ))
-                                .ghost()
-                                .on_click(cx.listener(|this, _, window, cx| {
-                                    this.cancel_setup(window, cx);
-                                })),
-                        )
-                        .child(
-                            Button::new("community-setup-save")
-                                .label(mezon_i18n::t(
-                                    locale,
-                                    "onBoardingClan.communitySettings.buttons.enableAndSave",
-                                ))
-                                .primary()
-                                .disabled(saving)
-                                .on_click(cx.listener(|this, _, _, cx| {
-                                    this.save(true, cx);
-                                })),
-                        ),
-                )
-            })
-            .when(self.is_community && !setup_mode, |el| {
-                el.child(
-                    v_flex()
-                        .gap_3()
-                        .pt_4()
-                        .border_t_1()
-                        .border_color(theme.border)
-                        .child(
-                            div()
-                                .text_xs()
-                                .font_weight(FontWeight::BOLD)
-                                .text_color(theme.status_dnd)
-                                .child(
-                                    mezon_i18n::t(
-                                        locale,
-                                        "onBoardingClan.communitySettings.dangerZone",
-                                    )
-                                    .to_uppercase(),
-                                ),
-                        )
-                        .child(
-                            h_flex()
-                                .items_center()
-                                .justify_between()
-                                .gap_4()
-                                .child(
-                                    div()
-                                        .text_sm()
-                                        .text_color(theme.text_secondary)
-                                        .child(mezon_i18n::t(
-                                            locale,
-                                            "onBoardingClan.communitySettings.buttons.disable",
-                                        )),
-                                )
-                                .child(
-                                    Button::new("community-disable")
-                                        .label(mezon_i18n::t(
-                                            locale,
-                                            "onBoardingClan.communitySettings.buttons.disable",
-                                        ))
-                                        .danger()
-                                        .disabled(saving || self.draft.has_changes(&self.saved_draft))
-                                        .on_click(cx.listener(|this, _, window, cx| {
-                                            this.request_disable_community(window, cx);
-                                        })),
-                                ),
-                        ),
-                )
-            })
+    fn input_focus_handles(&self, cx: &App) -> Vec<gpui::FocusHandle> {
+        self.description_input
+            .iter()
+            .chain(&self.about_input)
+            .map(|input| input.focus_handle(cx))
+            .chain(self.vanity_input.iter().map(|input| input.focus_handle(cx)))
+            .collect()
     }
 }
 
@@ -1300,14 +801,14 @@ impl Render for CommunitySettingPage {
         }
 
         if !self.is_community && !self.setup_mode {
-            return self
-                .render_enable_landing(&locale, &theme, cx)
-                .into_any_element();
+            return Self::render_enable_card(cx.entity(), &locale);
         }
 
         self.ensure_inputs(window, cx);
-        self.render_form(&locale, &theme, self.setup_mode, cx)
-            .into_any_element()
+        if self.is_setup_open() {
+            return self.render_enable_modal(&locale, &theme, cx);
+        }
+        self.render_overview_card(&locale, &theme, cx)
     }
 }
 
@@ -1392,4 +893,126 @@ pub fn render_community_save_bar(
                         ),
                 ),
         )
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use gpui::{TestAppContext, VisualTestContext};
+    use mezon_client::transport::ApiClanDesc;
+    use mezon_store::{Clan, DEFAULT_COMMUNITY_HASHTAG};
+
+    use super::*;
+
+    fn open_page(
+        desc: ApiClanDesc,
+        cx: &mut TestAppContext,
+    ) -> (Entity<CommunitySettingPage>, &mut VisualTestContext) {
+        let clan_id = ClanId(desc.clan_id);
+        let (clan_list, settings) = cx.update(|cx| {
+            mezon_theme::set_theme(mezon_theme::resolve_theme("dark"), cx);
+            AppConfig::init_global(Arc::new(AppConfig::default()), cx);
+            let api = Arc::new(mezon_client::AppApi::new(
+                Arc::new(mezon_client::TransportClient::new(String::new())),
+                String::new(),
+            ));
+            mezon_store::RealtimeDispatch::init(api.clone(), cx);
+            let clan_list = ClanList::init(api, cx);
+            clan_list.update(cx, |list, cx| list.update_clans(vec![Clan::from(desc)], cx));
+            (clan_list, cx.new(|_| Settings::default()))
+        });
+        let (page, cx) =
+            cx.add_window_view(|_, cx| CommunitySettingPage::new(clan_id, clan_list, settings, cx));
+        cx.run_until_parked();
+        (page, cx)
+    }
+
+    #[gpui::test]
+    fn enabling_opens_the_modal_with_the_default_hashtag_and_cancel_restores(
+        cx: &mut TestAppContext,
+    ) {
+        let (page, cx) = open_page(
+            ApiClanDesc {
+                clan_id: 1,
+                ..Default::default()
+            },
+            cx,
+        );
+        page.read_with(cx, |page, _| {
+            assert!(!page.loading);
+            assert!(!page.is_setup_open());
+            assert!(page.draft.hashtags.is_empty());
+        });
+
+        page.update(cx, |page, cx| page.start_setup(cx));
+        cx.run_until_parked();
+        page.read_with(cx, |page, cx| {
+            assert!(page.is_setup_open());
+            assert!(!page.should_show_save_bar(cx));
+            assert_eq!(page.draft.hashtags, vec![DEFAULT_COMMUNITY_HASHTAG]);
+            assert!(page.description_input.is_some());
+            assert!(page.about_input.is_some());
+            assert!(page.vanity_input.is_some());
+        });
+
+        page.update(cx, |page, cx| {
+            assert!(!page.validate());
+            assert!(page.field_errors.banner && page.field_errors.about);
+            assert!(page.field_errors.description && page.field_errors.vanity_url);
+            assert!(!page.field_errors.hashtags);
+
+            page.toggle_hashtag(DEFAULT_COMMUNITY_HASHTAG, cx);
+            assert_eq!(page.draft.hashtags, vec![DEFAULT_COMMUNITY_HASHTAG]);
+            page.toggle_hashtag("Gaming", cx);
+            page.toggle_hashtag(DEFAULT_COMMUNITY_HASHTAG, cx);
+            assert_eq!(page.draft.hashtags, vec!["Gaming"]);
+        });
+
+        cx.update(|window, cx| page.update(cx, |page, cx| page.cancel_setup(window, cx)));
+        cx.run_until_parked();
+        page.read_with(cx, |page, _| {
+            assert!(!page.is_setup_open());
+            assert!(page.draft.hashtags.is_empty());
+            assert_eq!(page.field_errors, CommunityFieldIssues::default());
+        });
+    }
+
+    #[gpui::test]
+    fn enabled_community_loads_its_hashtags_and_flags_unsaved_hashtag_edits(
+        cx: &mut TestAppContext,
+    ) {
+        let (page, cx) = open_page(
+            ApiClanDesc {
+                clan_id: 2,
+                is_community: true,
+                community_banner: "https://cdn.example/b.png".into(),
+                about: "about".into(),
+                description: "desc".into(),
+                short_url: "vanity".into(),
+                hashtags: "Music".into(),
+                ..Default::default()
+            },
+            cx,
+        );
+        page.read_with(cx, |page, cx| {
+            assert!(page.is_community);
+            assert!(!page.is_setup_open());
+            assert_eq!(page.draft.hashtags, vec!["Music"]);
+            assert!(!page.should_show_save_bar(cx));
+        });
+
+        page.update(cx, |page, cx| page.toggle_hashtag("Gaming", cx));
+        cx.run_until_parked();
+        page.read_with(cx, |page, cx| {
+            assert_eq!(page.draft.hashtags, vec!["Music", "Gaming"]);
+            assert!(page.should_show_save_bar(cx));
+        });
+
+        cx.update(|window, cx| page.update(cx, |page, cx| page.reset(window, cx)));
+        page.read_with(cx, |page, cx| {
+            assert_eq!(page.draft.hashtags, vec!["Music"]);
+            assert!(!page.should_show_save_bar(cx));
+        });
+    }
 }

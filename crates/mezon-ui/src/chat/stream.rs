@@ -317,7 +317,7 @@ pub fn render_stream_connected_bar(
                                     .items_center()
                                     .gap_1()
                                     .child(
-                                        Icon::new(IconName::NetworkStatus)
+                                        Icon::new(IconName::Wifi)
                                             .size(px(16.))
                                             .text_color(theme.status_online),
                                     )
@@ -358,7 +358,7 @@ pub fn render_stream_connected_bar(
                             .opacity(80.)
                             .hover(move |s| s.bg(leave_hover_bg))
                             .child(
-                                Icon::new(IconName::EndCall)
+                                Icon::new(IconName::CallEnd)
                                     .size(px(20.))
                                     .text_color(leave_icon_color),
                             )
@@ -410,7 +410,7 @@ fn stream_header(
                 .items_center()
                 .gap_2()
                 .child(
-                    Icon::new(IconName::Stream)
+                    Icon::new(IconName::Live)
                         .size(px(20.))
                         .text_color(stream_icon_color),
                 )
@@ -435,13 +435,16 @@ fn stream_header(
                 .hover(|s| s.bg(theme.bg_tertiary))
                 .when(show_chat, |el| el.bg(theme.bg_tertiary))
                 .tooltip(Tooltip::text(chat_label))
-                .child(crate::chat::voice::chat_toggle_icon(
-                    if show_chat {
-                        theme.tokens.bg_icon_theme_active
-                    } else {
-                        theme.tokens.bg_icon_theme
-                    },
-                    px(20.),
+                .child(Icon::motion_scope(
+                    crate::chat::voice::chat_toggle_icon(
+                        if show_chat {
+                            theme.tokens.bg_icon_theme_active
+                        } else {
+                            theme.tokens.bg_icon_theme
+                        },
+                        px(20.),
+                    ),
+                    true,
                 ))
                 .on_click(move |_, _, cx| {
                     stream_toggle.update(cx, |store, cx| store.toggle_chat(cx));
@@ -591,7 +594,7 @@ fn render_pre_join(
             .justify_center()
             .bg(circle_bg)
             .child(
-                Icon::new(IconName::Stream)
+                Icon::new(IconName::Live)
                     .size(px(40.))
                     .text_color(theme.text_primary),
             )
@@ -782,7 +785,7 @@ fn render_members_toggle_button(
     stream: Entity<StreamStore>,
 ) -> AnyElement {
     let stream_toggle = stream;
-    let mut chevron = Icon::new(IconName::ChevronDownIcon)
+    let mut chevron = Icon::new(IconName::ChevronDown)
         .size(px(24.))
         .text_color(gpui::rgb(0xffffff));
     if !show_members {
@@ -805,7 +808,7 @@ fn render_members_toggle_button(
         .tooltip(Tooltip::text(tooltip))
         .child(chevron)
         .child(
-            Icon::new(IconName::MemberList)
+            Icon::new(IconName::Members)
                 .size(px(24.))
                 .text_color(gpui::rgb(0xffffff)),
         )
@@ -968,7 +971,7 @@ fn render_viewer_count(locale: &str, count: u32, color: Hsla) -> AnyElement {
         .gap_1()
         .text_sm()
         .text_color(color)
-        .child(Icon::new(IconName::EyeOpen).size(px(16.)).text_color(color))
+        .child(Icon::new(IconName::Eye).size(px(16.)).text_color(color))
         .child(text)
         .into_any_element()
 }
@@ -1085,8 +1088,8 @@ fn render_controls_bar(
                 .cursor_pointer()
                 .hover(|s| s.bg(gpui::rgb(0xa12829)))
                 .child(
-                    Icon::new(IconName::EndCall)
-                        .size(px(22.))
+                    Icon::new(IconName::CallEnd)
+                        .size(px(24.))
                         .text_color(gpui::rgb(0xffffff)),
                 )
                 .on_click(move |_, _, cx| {
@@ -1112,9 +1115,9 @@ fn render_controls_bar(
                     .tooltip(Tooltip::text(fullscreen_tooltip))
                     .child(
                         Icon::new(if fullscreen {
-                            IconName::ExitFullScreen
+                            IconName::FullscreenExit
                         } else {
-                            IconName::FullScreen
+                            IconName::Fullscreen
                         })
                         .size(px(18.))
                         .text_color(icon_color),
@@ -1279,7 +1282,7 @@ impl Render for StreamQualityMenu {
                     .justify_center()
                     .child(
                         Icon::new(IconName::Check)
-                            .size(px(14.))
+                            .size(px(16.))
                             .text_color(check_color),
                     )
                     .into_any_element()
@@ -1423,7 +1426,7 @@ impl RenderOnce for StreamOutputTrigger {
             .when(!self.open, |el| el.tooltip(Tooltip::text(self.label)))
             .child(
                 Icon::new(IconName::Settings)
-                    .size(px(18.))
+                    .size(px(20.))
                     .text_color(self.icon_color),
             );
         match self.on_click {
@@ -1539,11 +1542,11 @@ impl Render for StreamOutputMenu {
 
 fn volume_icon(volume: f32, muted: bool) -> IconName {
     if muted || volume <= 0.0 {
-        IconName::MutedVolume
+        IconName::SpeakerOff
     } else if volume < 0.5 {
-        IconName::LowVolume
+        IconName::SpeakerLow
     } else {
-        IconName::LoudVolume
+        IconName::Speaker
     }
 }
 

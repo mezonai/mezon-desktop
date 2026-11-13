@@ -340,7 +340,7 @@ impl Render for CreatePollModal {
                 .aspect_square()
                 .flex_none()
                 .into_any_element(),
-                None => Icon::new(IconName::Smile)
+                None => Icon::new(IconName::Emoji)
                     .size(px(20.))
                     .flex_none()
                     .text_color(theme.tokens.text_theme_primary)
@@ -409,8 +409,8 @@ impl Render for CreatePollModal {
                             this.remove_answer(index, cx);
                         }))
                         .child(
-                            Icon::new(IconName::TrashIcon)
-                                .size(px(18.))
+                            Icon::new(IconName::Trash)
+                                .size(px(20.))
                                 .text_color(theme.tokens.text_theme_primary),
                         ),
                 );
@@ -447,7 +447,7 @@ impl Render for CreatePollModal {
                         this.add_answer(window, cx);
                     }))
                     .child(
-                        Icon::new(IconName::AddIcon)
+                        Icon::new(IconName::PlusCircle)
                             .size(px(16.))
                             .flex_none()
                             .text_color(theme.tokens.text_theme_primary)
@@ -487,7 +487,7 @@ impl Render for CreatePollModal {
                     .child(t(self.duration_label()))
                     .child(
                         Icon::new(IconName::ArrowDown)
-                            .size(px(18.))
+                            .size(px(20.))
                             .text_color(theme.tokens.text_theme_primary),
                     ),
             );
@@ -585,8 +585,8 @@ impl Render for CreatePollModal {
                     .when(allow_multiple, |d| {
                         d.child(
                             Icon::new(IconName::Check)
-                                .size(px(14.))
-                                .text_color(theme.tokens.text_secondary),
+                                .size(px(16.))
+                                .color(gpui::white()),
                         )
                     }),
             )

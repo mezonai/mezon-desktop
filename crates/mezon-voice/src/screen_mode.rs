@@ -33,7 +33,7 @@ impl ScreenShareMode {
     }
 
     pub fn max_bitrate_bps(self) -> u64 {
-        3_500_000
+        5_000_000
     }
 
     pub(crate) fn degradation(self) -> DegradationPreference {
@@ -94,7 +94,7 @@ mod tests {
     #[test]
     fn both_modes_publish_at_the_sfu_screen_cap() {
         for mode in [ScreenShareMode::Text, ScreenShareMode::Video] {
-            assert_eq!(mode.max_bitrate_bps(), 3_500_000);
+            assert_eq!(mode.max_bitrate_bps(), 5_000_000);
         }
     }
 

@@ -33,7 +33,12 @@ pub fn hide_window(window: &Window) {
 }
 
 pub fn hide_active_window(cx: &mut App) {
+    let main_active =
+        cx.active_window().is_some() && cx.active_window() == crate::app::main_window::handle(cx);
     update_active_window(cx, |window| hide_window(window));
+    if main_active {
+        super::note_main_window_hidden(cx);
+    }
 }
 
 pub fn minimize_active_window(cx: &mut App) {
@@ -100,9 +105,15 @@ unsafe fn handle_shortcut(event: *mut Object, async_app: &gpui::AsyncApp) -> boo
 
     match key.to_ascii_lowercase() {
         b'w' => {
+            let ns_window = unsafe { key_window() };
             unsafe {
-                order_out(key_window());
+                order_out(ns_window);
             }
+            async_app.update(|cx| {
+                if is_main_ns_window(ns_window, cx) {
+                    super::note_main_window_hidden(cx);
+                }
+            });
             true
         }
         b'm' => {
@@ -122,6 +133,24 @@ unsafe fn handle_shortcut(event: *mut Object, async_app: &gpui::AsyncApp) -> boo
         }
         _ => false,
     }
+}
+
+fn is_main_ns_window(ns_window: *mut Object, cx: &mut App) -> bool {
+    if ns_window.is_null() {
+        return false;
+    }
+    let Some(handle) = crate::app::main_window::handle(cx) else {
+        return false;
+    };
+    handle
+        .update(cx, |_, window, _| {
+            let mut found = false;
+            if let Some(view) = appkit_view(window) {
+                with_ns_window(view, |main| found = main == ns_window);
+            }
+            found
+        })
+        .unwrap_or(false)
 }
 
 fn update_active_window(cx: &mut App, f: impl FnOnce(&mut Window)) {

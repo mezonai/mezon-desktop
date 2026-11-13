@@ -547,7 +547,7 @@ impl QrProfileModal {
                 row(
                     "choose-qr-logo",
                     self.tr("setting.account.qrProfile.chooseFromDevice"),
-                    Icon::new(IconName::UploadImage)
+                    Icon::new(IconName::Camera)
                         .size(px(16.))
                         .text_color(theme.brand)
                         .into_any_element(),
@@ -700,9 +700,9 @@ impl QrProfileModal {
                 .background_executor()
                 .spawn(async move {
                     let brand = ProfileCardImage::asset(MEZON_LOGO, &renderer)?;
-                    let tick = ProfileCardImage::asset(IconName::Tick.path(), &renderer)?;
+                    let tick = ProfileCardImage::asset(IconName::Check.path(), &renderer)?;
                     let default_avatar =
-                        ProfileCardImage::asset("icons/avatar-user.svg", &renderer)?;
+                        ProfileCardImage::asset(IconName::UserCircle.path(), &renderer)?;
                     let avatar = match avatar {
                         Some(load) => load.await,
                         None => None,
@@ -942,7 +942,7 @@ impl Render for QrProfileModal {
                                             move |style| style.bg(hover)
                                         })
                                     })
-                                    .child(Icon::new(IconName::PenEdit).size(px(16.)).text_color(
+                                    .child(Icon::new(IconName::Edit).size(px(16.)).text_color(
                                         if self.menu_open {
                                             gpui::white()
                                         } else {
@@ -1112,7 +1112,7 @@ impl Render for QrProfileModal {
                                     .border_t_1()
                                     .border_color(paper.border)
                                     .child(
-                                        Icon::new(IconName::Tick)
+                                        Icon::new(IconName::Check)
                                             .size(px(14.))
                                             .text_color(theme.brand),
                                     )
@@ -1141,11 +1141,11 @@ impl Render for QrProfileModal {
                         Self::action_button(
                             "copy-profile-qr",
                             if self.loading || (self.exporting && !self.downloading) {
-                                IconName::LoadingSpinner.path()
+                                IconName::Spinner.path()
                             } else if self.copied {
-                                IconName::Tick.path()
+                                IconName::Check.path()
                             } else {
-                                IconName::CopyIcon.path()
+                                IconName::Copy.path()
                             },
                             if self.copied {
                                 self.tr("invitation.buttons.copied")
@@ -1164,7 +1164,7 @@ impl Render for QrProfileModal {
                         Self::action_button(
                             "download-profile-qr",
                             if self.downloading || self.loading {
-                                IconName::LoadingSpinner.path()
+                                IconName::Spinner.path()
                             } else {
                                 IconName::Download.path()
                             },
@@ -1181,7 +1181,7 @@ impl Render for QrProfileModal {
                         Self::action_button(
                             "copy-profile-link",
                             if self.copied_link {
-                                IconName::Tick.path()
+                                IconName::Check.path()
                             } else {
                                 PROFILE_LINK_ICON
                             },
@@ -1313,7 +1313,9 @@ mod tests {
         let renderer = gpui::SvgRenderer::new(std::sync::Arc::new(crate::util::assets::Assets));
         for path in [
             IconName::Close.path(),
-            IconName::PenEdit.path(),
+            IconName::Edit.path(),
+            IconName::UserCircle.path(),
+            IconName::Check.path(),
             PROFILE_LINK_ICON,
             MEZON_LOGO,
         ] {
@@ -1348,7 +1350,7 @@ mod tests {
                 );
                 let mut copied = QrProfileModal::action_button(
                     id,
-                    IconName::Tick.path(),
+                    IconName::Check.path(),
                     "Copied",
                     foreground,
                     &palette,
@@ -1458,7 +1460,7 @@ mod tests {
             logo: Some(avatar.clone()),
             avatar,
             brand: asset(MEZON_LOGO),
-            tick: asset(IconName::Tick.path()),
+            tick: asset(IconName::Check.path()),
         }
     }
 

@@ -451,7 +451,7 @@ impl Render for EventDetailView {
                     .hover(|el| el.bg(theme.bg_hover))
                     .on_click(move |_, window, cx| on_back(window, cx))
                     .child(
-                        Icon::new(IconName::ArrowLeft)
+                        Icon::new(IconName::ChevronLeft)
                             .size(px(20.))
                             .text_color(theme.text_primary),
                     ),
@@ -507,9 +507,7 @@ impl Render for EventDetailView {
                                     .gap_1()
                                     .items_center()
                                     .child(
-                                        Icon::new(IconName::History)
-                                            .size(px(14.))
-                                            .text_color(theme.text_secondary),
+                                        Icon::new(IconName::History).size(px(16.)).selected(false),
                                     )
                                     .child(
                                         div()
@@ -534,7 +532,7 @@ impl Render for EventDetailView {
                             this.pick_files(window, cx);
                         }))
                         .child(
-                            Icon::new(IconName::ImageThumbnail)
+                            Icon::new(IconName::FileImage)
                                 .size(px(20.))
                                 .text_color(theme.text_primary),
                         ),
@@ -738,11 +736,7 @@ fn render_detail_top(
                             .ok();
                     }
                 })
-                .child(
-                    Icon::new(IconName::PenEdit)
-                        .size(px(16.))
-                        .text_color(theme.text_secondary),
-                )
+                .child(Icon::new(IconName::Edit).size(px(16.)).selected(false))
                 .child(
                     div()
                         .text_sm()
@@ -795,9 +789,9 @@ fn render_detail_top(
                                 }
                             })
                             .child(
-                                Icon::new(IconName::CloseIcon)
+                                Icon::new(IconName::CloseCircle)
                                     .size(px(16.))
-                                    .text_color(theme.text_secondary),
+                                    .selected(false),
                             )
                             .child(mezon_i18n::t(
                                 locale,
@@ -838,7 +832,7 @@ fn render_detail_top(
                             .child(if saving {
                                 Spinner::new().into_any_element()
                             } else {
-                                Icon::new(IconName::CheckIcon)
+                                Icon::new(IconName::Check)
                                     .size(px(16.))
                                     .text_color(rgb(0xffffff))
                                     .into_any_element()
@@ -942,9 +936,9 @@ fn render_add_media_tile(theme: &Theme, view: WeakEntity<EventDetailView>) -> im
                 view.update(cx, |this, cx| this.pick_files(window, cx)).ok();
             })
             .child(
-                Icon::new(IconName::PlusIcon)
+                Icon::new(IconName::PlusCircle)
                     .size(px(32.))
-                    .text_color(theme.text_secondary),
+                    .selected(false),
             ),
     )
 }

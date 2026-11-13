@@ -9831,6 +9831,7 @@ mod tests {
             about: String::new(),
             description: String::new(),
             short_url: String::new(),
+            hashtags: Vec::new(),
         }
     }
 
@@ -10128,6 +10129,7 @@ mod tests {
             about: String::new(),
             description: String::new(),
             short_url: String::new(),
+            hashtags: Vec::new(),
         }
     }
 

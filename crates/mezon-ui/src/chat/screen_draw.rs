@@ -106,15 +106,15 @@ pub(crate) fn draw_preview_background(color: u32) -> Rgba {
 
 fn tool_icon(tool: DrawTool) -> IconName {
     match tool {
-        DrawTool::Pointer => IconName::AnnotatePointer,
-        DrawTool::Select => IconName::AnnotateSelect,
-        DrawTool::Pen => IconName::PenEdit,
-        DrawTool::Highlighter => IconName::AnnotateHighlighter,
-        DrawTool::Laser => IconName::AnnotateLaser,
-        DrawTool::Arrow => IconName::AnnotateArrow,
-        DrawTool::Rectangle => IconName::AnnotateRectangle,
-        DrawTool::Ellipse => IconName::AnnotateEllipse,
-        DrawTool::Text => IconName::TextTool,
+        DrawTool::Pointer => IconName::Cursor,
+        DrawTool::Select => IconName::Move,
+        DrawTool::Pen => IconName::Edit,
+        DrawTool::Highlighter => IconName::Highlighter,
+        DrawTool::Laser => IconName::Laser,
+        DrawTool::Arrow => IconName::ArrowUpRight,
+        DrawTool::Rectangle => IconName::Square,
+        DrawTool::Ellipse => IconName::Circle,
+        DrawTool::Text => IconName::Text,
         DrawTool::Eraser => IconName::Eraser,
     }
 }
@@ -192,7 +192,7 @@ pub(crate) fn render_draw_toolbar(
         let target = target.clone();
         action_button(
             "draw-action-undo",
-            IconName::RotateLeftIcon,
+            IconName::RotateLeft,
             "Undo",
             can_undo,
             tooltips,
@@ -205,7 +205,7 @@ pub(crate) fn render_draw_toolbar(
         let target = target.clone();
         action_button(
             "draw-action-redo",
-            IconName::RotateRightIcon,
+            IconName::RotateRight,
             "Redo",
             can_redo,
             tooltips,
@@ -218,7 +218,7 @@ pub(crate) fn render_draw_toolbar(
         let target = target.clone();
         action_button(
             "draw-action-clear",
-            IconName::TrashIcon,
+            IconName::Trash,
             "Clear all drawings",
             can_clear,
             tooltips,

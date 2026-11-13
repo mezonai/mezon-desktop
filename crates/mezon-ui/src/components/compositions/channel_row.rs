@@ -17,29 +17,36 @@ pub(crate) fn channel_type_icon(
     age_restricted: i32,
 ) -> IconName {
     match channel_type {
-        ChannelType::Text if is_age_restricted(age_restricted) => IconName::HashtagWarning,
-        ChannelType::Text if private => IconName::HashtagLocked,
-        ChannelType::Text => IconName::Hashtag,
-        ChannelType::Voice if private => IconName::SpeakerLocked,
+        ChannelType::Text if is_age_restricted(age_restricted) => IconName::ChannelWarning,
+        ChannelType::Text if private => IconName::ChannelPrivate,
+        ChannelType::Text => IconName::Channel,
+        ChannelType::Voice if private => IconName::SpeakerLock,
         ChannelType::Voice => IconName::Speaker,
-        ChannelType::Stream => IconName::Stream,
-        ChannelType::Thread if private => IconName::ThreadIconLocker,
-        ChannelType::Thread => IconName::ThreadIcon,
+        ChannelType::Stream => IconName::Live,
+        ChannelType::Thread if private => IconName::ThreadPrivate,
+        ChannelType::Thread => IconName::Thread,
         ChannelType::Forum => IconName::Forum,
         ChannelType::Announcement => IconName::Announcement,
-        ChannelType::App if private => IconName::PrivateAppChannelIcon,
-        ChannelType::App => IconName::AppChannelIcon,
-        ChannelType::Unknown(_) => IconName::Hashtag,
+        ChannelType::App if private => IconName::ChannelAppPrivate,
+        ChannelType::App => IconName::ChannelApp,
+        ChannelType::Unknown(_) => IconName::Channel,
     }
 }
 
-/// React draws the padlock of a private channel in `--bg-icon-theme-active`, one
-/// shade brighter than the glyph under it. GPUI tints a whole SVG a single
-/// colour, so the padlock has to be a second element stacked on the glyph.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub struct ChannelIcon {
     pub base: IconName,
     pub lock: Option<IconName>,
+}
+
+impl ChannelIcon {
+    fn combined_glyph(self) -> IconName {
+        match (self.base, self.lock) {
+            (IconName::Channel, Some(IconName::Lock)) => IconName::ChannelPrivate,
+            (IconName::Thread, Some(IconName::Lock)) => IconName::ThreadPrivate,
+            _ => self.base,
+        }
+    }
 }
 
 pub(crate) fn channel_icon(
@@ -49,16 +56,16 @@ pub(crate) fn channel_icon(
 ) -> ChannelIcon {
     match (channel_type, private, is_age_restricted(age_restricted)) {
         (ChannelType::Text, _, true) => ChannelIcon {
-            base: IconName::HashtagWarning,
+            base: IconName::ChannelWarning,
             lock: None,
         },
         (ChannelType::Thread, true, _) => ChannelIcon {
-            base: IconName::ThreadIcon,
-            lock: Some(IconName::ThreadLock),
+            base: IconName::Thread,
+            lock: Some(IconName::Lock),
         },
         (ChannelType::Text, true, false) => ChannelIcon {
-            base: IconName::Hashtag,
-            lock: Some(IconName::HashtagLock),
+            base: IconName::Channel,
+            lock: Some(IconName::Lock),
         },
         _ => ChannelIcon {
             base: channel_type_icon(channel_type, private, age_restricted),
@@ -71,26 +78,11 @@ pub(crate) fn render_channel_icon(
     icon: ChannelIcon,
     size: Pixels,
     color: Hsla,
-    lock_color: Hsla,
+    _lock_color: Hsla,
 ) -> AnyElement {
-    let Some(lock) = icon.lock else {
-        return Icon::new(icon.base)
-            .size(size)
-            .text_color(color)
-            .into_any_element();
-    };
-    div()
-        .relative()
+    Icon::new(icon.combined_glyph())
         .size(size)
-        .flex_shrink_0()
-        .child(Icon::new(icon.base).size(size).text_color(color))
-        .child(
-            div()
-                .absolute()
-                .top_0()
-                .left_0()
-                .child(Icon::new(lock).size(size).text_color(lock_color)),
-        )
+        .text_color(color)
         .into_any_element()
 }
 
@@ -107,6 +99,26 @@ pub(crate) fn voice_busy_tag(theme: &Theme) -> AnyElement {
 mod tests {
     use super::*;
 
+    #[test]
+    fn combined_private_glyph_has_no_extra_lock_layer() {
+        assert_eq!(
+            channel_icon(ChannelType::Text, true, 0).combined_glyph(),
+            IconName::ChannelPrivate
+        );
+        assert_eq!(
+            channel_icon(ChannelType::Thread, true, 0).combined_glyph(),
+            IconName::ThreadPrivate
+        );
+        assert_eq!(
+            channel_icon(ChannelType::Text, false, 0).combined_glyph(),
+            IconName::Channel
+        );
+        assert_eq!(
+            channel_icon(ChannelType::Text, true, 1).combined_glyph(),
+            IconName::ChannelWarning
+        );
+    }
+
     fn icon_path(channel_type: ChannelType, private: bool, age_restricted: i32) -> &'static str {
         channel_type_icon(channel_type, private, age_restricted).path()
     }
@@ -115,19 +127,19 @@ mod tests {
     fn private_channels_get_the_locked_variant() {
         assert_eq!(
             icon_path(ChannelType::Thread, true, 0),
-            IconName::ThreadIconLocker.path()
+            IconName::ThreadPrivate.path()
         );
         assert_eq!(
             icon_path(ChannelType::Text, true, 0),
-            IconName::HashtagLocked.path()
+            IconName::ChannelPrivate.path()
         );
         assert_eq!(
             icon_path(ChannelType::Voice, true, 0),
-            IconName::SpeakerLocked.path()
+            IconName::SpeakerLock.path()
         );
         assert_eq!(
             icon_path(ChannelType::App, true, 0),
-            IconName::PrivateAppChannelIcon.path()
+            IconName::ChannelAppPrivate.path()
         );
     }
 
@@ -135,11 +147,11 @@ mod tests {
     fn public_channels_get_the_plain_variant() {
         assert_eq!(
             icon_path(ChannelType::Thread, false, 0),
-            IconName::ThreadIcon.path()
+            IconName::Thread.path()
         );
         assert_eq!(
             icon_path(ChannelType::Text, false, 0),
-            IconName::Hashtag.path()
+            IconName::Channel.path()
         );
         assert_eq!(
             icon_path(ChannelType::Voice, false, 0),
@@ -151,32 +163,26 @@ mod tests {
     fn age_restricted_text_channels_use_the_warning_glyph() {
         assert_eq!(
             icon_path(ChannelType::Text, false, 1),
-            IconName::HashtagWarning.path()
+            IconName::ChannelWarning.path()
         );
         assert_eq!(
             icon_path(ChannelType::Text, true, 1),
-            IconName::HashtagWarning.path()
+            IconName::ChannelWarning.path()
         );
         let icon = channel_icon(ChannelType::Text, true, 1);
-        assert_eq!(icon.base.path(), IconName::HashtagWarning.path());
+        assert_eq!(icon.base.path(), IconName::ChannelWarning.path());
         assert!(icon.lock.is_none());
     }
 
     #[test]
     fn private_threads_and_channels_stack_a_separate_lock() {
         let thread = channel_icon(ChannelType::Thread, true, 0);
-        assert_eq!(thread.base.path(), IconName::ThreadIcon.path());
-        assert_eq!(
-            thread.lock.map(IconName::path),
-            Some(IconName::ThreadLock.path())
-        );
+        assert_eq!(thread.base.path(), IconName::Thread.path());
+        assert_eq!(thread.lock.map(IconName::path), Some(IconName::Lock.path()));
 
         let text = channel_icon(ChannelType::Text, true, 0);
-        assert_eq!(text.base.path(), IconName::Hashtag.path());
-        assert_eq!(
-            text.lock.map(IconName::path),
-            Some(IconName::HashtagLock.path())
-        );
+        assert_eq!(text.base.path(), IconName::Channel.path());
+        assert_eq!(text.lock.map(IconName::path), Some(IconName::Lock.path()));
     }
 
     #[test]
@@ -194,11 +200,11 @@ mod tests {
     #[test]
     fn types_with_a_combined_locked_glyph_keep_it() {
         let voice = channel_icon(ChannelType::Voice, true, 0);
-        assert_eq!(voice.base.path(), IconName::SpeakerLocked.path());
+        assert_eq!(voice.base.path(), IconName::SpeakerLock.path());
         assert!(voice.lock.is_none());
 
         let app = channel_icon(ChannelType::App, true, 0);
-        assert_eq!(app.base.path(), IconName::PrivateAppChannelIcon.path());
+        assert_eq!(app.base.path(), IconName::ChannelAppPrivate.path());
         assert!(app.lock.is_none());
     }
 
@@ -206,11 +212,11 @@ mod tests {
     fn streams_ignore_the_private_flag() {
         assert_eq!(
             icon_path(ChannelType::Stream, true, 0),
-            IconName::Stream.path()
+            IconName::Live.path()
         );
         assert_eq!(
             icon_path(ChannelType::Stream, false, 0),
-            IconName::Stream.path()
+            IconName::Live.path()
         );
     }
 }

@@ -39,6 +39,7 @@ windows.workspace = true
 zbus = "4"
 futures-lite = { workspace = true }
 ksni = { version = "0.3", default-features = false, features = ["blocking", "async-io"] }
+x11rb = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }
