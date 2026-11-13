@@ -24,7 +24,7 @@ const HEALTH_POLL_INTERVAL: Duration = Duration::from_secs(1);
 const STALL_STEP_DOWN: Duration = Duration::from_secs(4);
 const STALL_TIMEOUT: Duration = Duration::from_secs(15);
 const MAX_RECONNECTS: u32 = 3;
-const STREAM_LIVE_OFFSET_SECS: f64 = 2.0;
+const STREAM_LIVE_OFFSET_SECS: f64 = 4.0;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
