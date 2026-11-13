@@ -563,6 +563,7 @@ impl Render for ClanSidebar {
                                     .flex_none()
                                     .child(
                                         img(home_logo)
+                                            .id("dm-icon-image")
                                             .size(px(40.))
                                             .rounded(px(8.))
                                             .object_fit(gpui::ObjectFit::Cover),

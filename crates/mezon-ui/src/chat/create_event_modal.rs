@@ -1654,6 +1654,7 @@ impl CreateEventModal {
                                 .overflow_hidden()
                                 .child(
                                     img(url)
+                                        .id("event-info-cover-image")
                                         .absolute()
                                         .inset_0()
                                         .size_full()
@@ -1726,6 +1727,7 @@ impl CreateEventModal {
                                 .overflow_hidden()
                                 .child(
                                     img(url)
+                                        .id("event-review-cover-image")
                                         .absolute()
                                         .inset_0()
                                         .size_full()

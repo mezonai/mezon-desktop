@@ -28,7 +28,7 @@ pub fn render_media_image_rounded_top(
     width: Pixels,
     height: Pixels,
     radius: Pixels,
-) -> impl IntoElement {
+) -> gpui::Img {
     img(url)
         .w(width)
         .h(height)
