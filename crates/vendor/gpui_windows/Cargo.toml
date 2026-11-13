@@ -30,6 +30,7 @@ parking_lot.workspace = true
 rand.workspace = true
 raw-window-handle = "0.6"
 smallvec.workspace = true
+unicode-properties = { version = "0.1.4", default-features = false, features = ["emoji"] }
 util.workspace = true
 uuid.workspace = true
 windows.workspace = true

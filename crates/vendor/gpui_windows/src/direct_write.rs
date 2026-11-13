@@ -2,6 +2,7 @@ use std::{
     borrow::Cow,
     ffi::{c_uint, c_void},
     mem::ManuallyDrop,
+    sync::OnceLock,
 };
 
 use ::util::{ResultExt, maybe};
@@ -25,6 +26,36 @@ use windows_numerics::Vector2;
 
 use crate::*;
 use gpui::*;
+
+const TEXT_SYMBOL_FONT_FAMILY: &str = "Segoe UI Symbol";
+
+fn is_text_presentation_emoji(c: char) -> bool {
+    use unicode_properties::{EmojiStatus, UnicodeEmoji};
+    matches!(
+        c.emoji_status(),
+        EmojiStatus::EmojiOther | EmojiStatus::EmojiModifierBase
+    )
+}
+
+fn text_presentation_emoji_ranges() -> &'static [DWRITE_UNICODE_RANGE] {
+    static RANGES: OnceLock<Vec<DWRITE_UNICODE_RANGE>> = OnceLock::new();
+    RANGES.get_or_init(|| {
+        let mut ranges: Vec<DWRITE_UNICODE_RANGE> = Vec::new();
+        for code in ('\u{80}'..='\u{1FFFF}')
+            .filter(|c| is_text_presentation_emoji(*c))
+            .map(u32::from)
+        {
+            match ranges.last_mut() {
+                Some(range) if range.last + 1 == code => range.last = code,
+                _ => ranges.push(DWRITE_UNICODE_RANGE {
+                    first: code,
+                    last: code,
+                }),
+            }
+        }
+        ranges
+    })
+}
 
 #[derive(Debug)]
 struct FontInfo {
@@ -388,14 +419,11 @@ impl DirectWriteState {
     }
 
     fn generate_font_fallbacks(
-        fallbacks: &FontFallbacks,
+        fallbacks: Option<&FontFallbacks>,
         factory: &IDWriteFactory5,
         system_font_collection: &IDWriteFontCollection1,
-    ) -> Result<Option<IDWriteFontFallback>> {
-        let fallback_list = fallbacks.fallback_list();
-        if fallback_list.is_empty() {
-            return Ok(None);
-        }
+    ) -> Result<IDWriteFontFallback> {
+        let fallback_list = fallbacks.map_or(&[][..], |fallbacks| fallbacks.fallback_list());
         unsafe {
             let builder = factory.CreateFontFallbackBuilder()?;
             let font_set = &system_font_collection.GetFontSet()?;
@@ -439,9 +467,18 @@ impl DirectWriteState {
                     1.0,
                 )?;
             }
+            let text_symbol_family = HSTRING::from(TEXT_SYMBOL_FONT_FAMILY);
+            builder.AddMapping(
+                text_presentation_emoji_ranges(),
+                &[text_symbol_family.as_ptr()],
+                None,
+                None,
+                None,
+                1.0,
+            )?;
             let system_fallbacks = factory.GetSystemFontFallback()?;
             builder.AddMappings(&system_fallbacks)?;
-            Ok(Some(builder.CreateFontFallback()?))
+            Ok(builder.CreateFontFallback()?)
         }
     }
 
@@ -492,11 +529,12 @@ impl DirectWriteState {
                 let font_face = unsafe { font_face_ref.CreateFontFace().log_err()? };
                 let direct_write_features =
                     unsafe { Self::generate_font_features(factory, features).log_err()? };
-                let fallbacks = fallbacks.as_ref().and_then(|fallbacks| {
-                    Self::generate_font_fallbacks(fallbacks, factory, system_font_collection)
-                        .log_err()
-                        .flatten()
-                });
+                let fallbacks = Self::generate_font_fallbacks(
+                    fallbacks.as_ref(),
+                    factory,
+                    system_font_collection,
+                )
+                .log_err();
                 let font_info = FontInfo {
                     font_family_h: font_family_h.clone(),
                     font_face,

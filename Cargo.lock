@@ -3965,6 +3965,7 @@ dependencies = [
  "rand 0.9.4",
  "raw-window-handle",
  "smallvec 1.15.2",
+ "unicode-properties",
  "util",
  "uuid",
  "windows 0.61.3",
