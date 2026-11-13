@@ -1605,7 +1605,8 @@ impl CreateEventModal {
                         )
                         .child(self.co_host_select.clone())
                         .when(
-                            self.can_change_co_host(cx)
+                            self.original_event.is_none()
+                                && self.can_change_co_host(cx)
                                 && self.co_host_select.read(cx).selected().is_some(),
                             |d| {
                                 d.child(
