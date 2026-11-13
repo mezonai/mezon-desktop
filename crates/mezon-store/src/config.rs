@@ -148,11 +148,11 @@ impl AppConfig {
             logo_mezon: "https://cdn.komu.vn/images/mezon_logo.png".into(),
             base_img_url: "https://cdn.komu.vn".into(),
             upload_img_url: "https://cdn-api.mezon.ai".into(),
-            profile_img_url: "https://profile.mezon.ai".into(),
-            imgproxy_base_url: "https://imgproxy.komu.vn".into(),
+            profile_img_url: "https://cdn-dev-profile.nccsoft.vn".into(),
+            imgproxy_base_url: "https://dev-imgproxy.nccsoft.vn".into(),
             imgproxy_key: "_AEhOrrckkG-NjqIdVLtzc-dtLFuE4u6ClM0P46ICEY".into(),
-            mezon_cdn_url: "https://cdn.mezon.ai".into(),
-            cloudflare_cdn_url: "https://cdn.komu.vn".into(),
+            mezon_cdn_url: "https://cdn-dev.nccsoft.vn".into(),
+            cloudflare_cdn_url: "https://cdn-dev.tx8.vn".into(),
             file_ingest: String::new(),
 
             klipy_key: String::new(),
@@ -1051,6 +1051,10 @@ mod tests {
         let cfg = AppConfig::dev_defaults();
         assert_eq!(cfg.tcp_port, Some(7349));
         assert_eq!(cfg.client_host(), "dev-mezon.nccsoft.vn");
+        assert_eq!(cfg.profile_img_url, "https://cdn-dev-profile.nccsoft.vn");
+        assert_eq!(cfg.imgproxy_base_url, "https://dev-imgproxy.nccsoft.vn");
+        assert_eq!(cfg.mezon_cdn_url, "https://cdn-dev.nccsoft.vn");
+        assert_eq!(cfg.cloudflare_cdn_url, "https://cdn-dev.tx8.vn");
     }
 
     #[test]

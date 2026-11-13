@@ -552,7 +552,7 @@ impl CommunitySettingPage {
             };
             if file_size > MAX_COMMUNITY_BANNER_BYTES {
                 let message =
-                    mezon_i18n::t(&locale, "clanSoundSetting.toast.errorSizeLimit").to_string();
+                    mezon_i18n::t(&locale, "common.maxFileSize").replace("{{sizeLimit}}", "10 MB");
                 let _ = this.update(cx, |this, cx| {
                     finish(this);
                     cx.notify();
@@ -585,11 +585,15 @@ impl CommunitySettingPage {
                 }
                 Err(err) => {
                     tracing::error!("community banner upload failed: {err}");
-                    let message = mezon_i18n::t(
-                        &locale,
-                        "onBoardingClan.communitySettings.messages.bannerUpdateFailed",
-                    )
-                    .to_string();
+                    let message = if err == "Unsupported image file type" {
+                        mezon_i18n::t(&locale, "clanSettings.clanBanner.modal.content").to_string()
+                    } else {
+                        mezon_i18n::t(
+                            &locale,
+                            "onBoardingClan.communitySettings.messages.bannerUpdateFailed",
+                        )
+                        .to_string()
+                    };
                     let _ = this.update(cx, |this, cx| {
                         finish(this);
                         cx.notify();

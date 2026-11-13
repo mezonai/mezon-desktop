@@ -161,7 +161,7 @@ fn clan_image_extension(path: &Path) -> Option<String> {
 pub fn validate_clan_image_file(path: &Path, max_bytes: u64) -> Result<ClanImageMimeType, String> {
     let ext =
         clan_image_extension(path).ok_or_else(|| "Unsupported image file type".to_string())?;
-    let mime_type = ClanImageMimeType::from_extension(&ext)
+    let declared = ClanImageMimeType::from_extension(&ext)
         .ok_or_else(|| "Unsupported image file type".to_string())?;
     let len = std::fs::metadata(path).map_err(|e| e.to_string())?.len();
     if len == 0 {
@@ -170,7 +170,24 @@ pub fn validate_clan_image_file(path: &Path, max_bytes: u64) -> Result<ClanImage
     if len > max_bytes {
         return Err(format!("File exceeds {max_bytes}-byte limit ({len} bytes)"));
     }
-    Ok(mime_type)
+    let bytes = std::fs::read(path).map_err(|e| e.to_string())?;
+    let sniffed = sniffed_clan_image_type(&bytes)?;
+    if sniffed != declared {
+        return Err("Unsupported image file type".into());
+    }
+    Ok(sniffed)
+}
+
+fn sniffed_clan_image_type(bytes: &[u8]) -> Result<ClanImageMimeType, String> {
+    let format =
+        image::guess_format(bytes).map_err(|_| "Unsupported image file type".to_string())?;
+    match format {
+        image::ImageFormat::Jpeg => Ok(ClanImageMimeType::Jpeg),
+        image::ImageFormat::Png => Ok(ClanImageMimeType::Png),
+        image::ImageFormat::Gif => Ok(ClanImageMimeType::Gif),
+        image::ImageFormat::WebP => Ok(ClanImageMimeType::Webp),
+        _ => Err("Unsupported image file type".into()),
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -1605,13 +1622,7 @@ fn timestamped_upload_filename(original: &str) -> String {
 }
 
 fn read_clan_image_file(path: &Path, max_bytes: u64) -> Result<Vec<u8>, String> {
-    let len = std::fs::metadata(path).map_err(|e| e.to_string())?.len();
-    if len == 0 {
-        return Err("File is empty".into());
-    }
-    if len > max_bytes {
-        return Err(format!("File exceeds {max_bytes}-byte limit ({len} bytes)"));
-    }
+    validate_clan_image_file(path, max_bytes)?;
     std::fs::read(path).map_err(|e| e.to_string())
 }
 
@@ -2244,6 +2255,39 @@ mod tests {
         std::fs::write(&path, vec![0_u8; 32]).expect("write temp file");
         let err = validate_clan_image_file(&path, 16).expect_err("size limit must fail");
         assert!(err.contains("byte limit"));
+        let _ = std::fs::remove_file(path);
+        let _ = std::fs::remove_dir(dir);
+    }
+
+    #[test]
+    fn validate_clan_image_file_rejects_a_renamed_non_image() {
+        let dir =
+            std::env::temp_dir().join(format!("mezon-clan-image-fake-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("notes.png");
+        std::fs::write(&path, b"this is not a png").expect("write temp file");
+        let err = validate_clan_image_file(&path, MAX_CLAN_BANNER_BYTES)
+            .expect_err("non-image bytes must fail");
+        assert_eq!(err, "Unsupported image file type");
+        let _ = std::fs::remove_file(path);
+        let _ = std::fs::remove_dir(dir);
+    }
+
+    #[test]
+    fn validate_clan_image_file_accepts_a_real_png() {
+        let dir = std::env::temp_dir().join(format!("mezon-clan-image-png-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("dot.png");
+        let image = image::DynamicImage::ImageRgba8(image::RgbaImage::from_pixel(
+            1,
+            1,
+            image::Rgba([255, 0, 0, 255]),
+        ));
+        image.save(&path).expect("write png");
+        assert_eq!(
+            validate_clan_image_file(&path, MAX_CLAN_BANNER_BYTES).expect("png"),
+            ClanImageMimeType::Png
+        );
         let _ = std::fs::remove_file(path);
         let _ = std::fs::remove_dir(dir);
     }
