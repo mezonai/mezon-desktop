@@ -5884,21 +5884,19 @@ impl MezonTransport {
                     complete_realtime_control_request("forward_webrtc_signaling", code, &response)?;
                     return Ok(true);
                 }
-                // A closed queue did not accept the frame. A write or ACK failure is ambiguous.
                 Err(error) if error.is::<SocketUnavailable>() => {}
                 Err(error) => return Err(error),
             }
         }
 
         if self.http_fallback.read().is_some() {
-            let result = tokio::time::timeout(
+            match tokio::time::timeout(
                 Duration::from_secs(5),
                 self.send_api_request_over_http("ForwardCallSetup", http_body),
             )
             .await
-            .context("call setup HTTP request timed out")?;
-            match result {
-                Ok(bytes) => {
+            {
+                Ok(Ok(bytes)) => {
                     let ack = realtime::WebrtcSignalingFwd::decode(bytes.as_slice())?;
                     anyhow::ensure!(
                         ack.receiver_id == receiver_id
@@ -5909,11 +5907,14 @@ impl MezonTransport {
                     );
                     return Ok(false);
                 }
-                Err(error)
-                    if error
-                        .downcast_ref::<HttpFallbackStatus>()
-                        .is_some_and(|status| matches!(status.status, 401 | 404 | 405 | 501)) => {}
-                Err(error) => return Err(error),
+                Ok(Err(error)) => tracing::warn!(
+                    target: "socket",
+                    "call setup HTTP fallback failed, waiting for the socket: {error:#}"
+                ),
+                Err(_) => tracing::warn!(
+                    target: "socket",
+                    "call setup HTTP fallback timed out, waiting for the socket"
+                ),
             }
         }
 
