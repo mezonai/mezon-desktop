@@ -6358,8 +6358,7 @@ impl MessagesStore {
             }
         });
         cx.spawn(async move |this, cx| {
-            ensure_public_archived_thread_reactivated(&api, &this, channel_id, clan_id, mode, cx)
-                .await;
+            ensure_archived_thread_reactivated(&api, &this, channel_id, clan_id, mode, cx).await;
             ensure_thread_membership_for_send(
                 &api,
                 &this,
@@ -6820,8 +6819,7 @@ impl MessagesStore {
         }
         let api = self.api.clone();
         cx.spawn(async move |this, cx| {
-            ensure_public_archived_thread_reactivated(&api, &this, channel_id, clan_id, mode, cx)
-                .await;
+            ensure_archived_thread_reactivated(&api, &this, channel_id, clan_id, mode, cx).await;
             let result = api
                 .send_message_with_attachment_urls_reply(
                     clan_id.get(),
@@ -8096,7 +8094,7 @@ impl MessagesStore {
     }
 }
 
-async fn ensure_public_archived_thread_reactivated(
+async fn ensure_archived_thread_reactivated(
     api: &AppApi,
     this: &WeakEntity<MessagesStore>,
     channel_id: ChannelId,
@@ -8107,7 +8105,7 @@ async fn ensure_public_archived_thread_reactivated(
     let needs = this
         .update(cx, |_this, cx| {
             ChannelList::global(cx).update(cx, |list, cx| {
-                list.begin_public_pre_send_reactivate(channel_id, clan_id, mode, cx)
+                list.begin_reactivate_for_send(channel_id, clan_id, mode, cx)
             })
         })
         .ok()
@@ -8170,12 +8168,12 @@ fn note_own_send_and_maybe_reactivate(
     message_id: MessageId,
     cx: &mut AsyncApp,
 ) {
+    maybe_reactivate_archived_thread(this, channel_id, clan_id, mode, cx);
     let _ = this.update(cx, |_this, cx| {
         ChannelList::global(cx).update(cx, |list, cx| {
             list.note_own_send_confirmed(clan_id, channel_id, create_time.max(0), message_id, cx);
         });
     });
-    maybe_reactivate_archived_thread(this, channel_id, clan_id, mode, cx);
 }
 
 pub(crate) fn plan_thread_membership(

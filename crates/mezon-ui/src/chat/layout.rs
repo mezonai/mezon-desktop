@@ -2161,19 +2161,35 @@ impl ChatLayout {
         let parent = parent_id.parse::<ChannelId>().ok();
         let channel_key = channel_id.to_string();
         let threads = ThreadsStore::global(cx).read(cx);
-        let (active, active_confirmed) = match threads.thread_active(&channel_key) {
-            Some(status) => (
-                if status == THREAD_STATUS_ARCHIVED {
-                    CHANNEL_ACTIVE_ARCHIVED
-                } else {
-                    CHANNEL_ACTIVE_JOINED
-                },
-                true,
-            ),
-            None => (CHANNEL_ACTIVE_JOINED, false),
-        };
+        let known_active = threads.thread_active(&channel_key);
         let private =
             private.or_else(|| threads.thread_channel_private(&channel_key).map(|p| p != 0));
+        if known_active.is_none() {
+            self.channel_list.update(cx, |list, cx| {
+                if list.channel_in_clan(clan_id, channel_id) {
+                    list.refresh_thread_active_from_server(clan_id, channel_id, cx);
+                } else {
+                    list.allow_archived_thread(channel_id);
+                    list.ensure_channel_in_clan(clan_id, channel_id, cx);
+                }
+            });
+            crate::router::navigate(
+                cx,
+                Route::Channel {
+                    clan_id,
+                    channel_id,
+                },
+            );
+            return;
+        }
+        let (active, active_confirmed) = (
+            if known_active == Some(THREAD_STATUS_ARCHIVED) {
+                CHANNEL_ACTIVE_ARCHIVED
+            } else {
+                CHANNEL_ACTIVE_JOINED
+            },
+            true,
+        );
         self.channel_list.update(cx, |list, cx| {
             if let Some(parent) = parent {
                 list.ensure_thread_with_parent_active(
