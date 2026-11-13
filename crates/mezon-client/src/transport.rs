@@ -579,6 +579,156 @@ pub fn build_location_content_json(latitude: f64, longitude: f64) -> String {
     .to_string()
 }
 
+#[derive(Debug, Clone, PartialEq)]
+pub struct ParsedLocation {
+    pub latitude: f64,
+    pub longitude: f64,
+    pub maps_url: String,
+}
+
+pub fn location_message_plain_text(content: &str) -> String {
+    let trimmed = content.trim();
+    if !trimmed.starts_with('{') {
+        return trimmed.to_string();
+    }
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(trimmed) else {
+        return trimmed.to_string();
+    };
+    value
+        .get("t")
+        .and_then(|t| t.as_str())
+        .filter(|t| !t.is_empty())
+        .map(str::to_string)
+        .unwrap_or_else(|| trimmed.to_string())
+}
+
+pub fn parse_google_maps_coordinates(text: &str) -> Option<(f64, f64)> {
+    let q_idx = text.find("q=")?;
+    let rest = &text[q_idx + 2..];
+    let end = rest
+        .find('&')
+        .or_else(|| rest.find(' '))
+        .unwrap_or(rest.len());
+    let coords = &rest[..end];
+    let (lat_s, lon_s) = coords.split_once(',')?;
+    let lat = lat_s.parse::<f64>().ok()?;
+    let lon = lon_s.parse::<f64>().ok()?;
+    (lat.is_finite() && lon.is_finite()).then_some((lat, lon))
+}
+
+pub fn is_standalone_google_maps_content(content: &str) -> bool {
+    let text = location_message_plain_text(content);
+    let text = text.trim();
+    !text.is_empty()
+        && !text.contains(char::is_whitespace)
+        && is_google_maps_url(text)
+        && parse_google_maps_coordinates(text).is_some()
+}
+
+fn is_google_maps_url(text: &str) -> bool {
+    let Some(rest) = text.strip_prefix("https://") else {
+        return false;
+    };
+    let host_end = rest.find(['/', '?', '#']).unwrap_or(rest.len());
+    let authority = &rest[..host_end];
+    let host = authority.rsplit('@').next().unwrap_or(authority);
+    let host = host.split(':').next().unwrap_or(host);
+    let path = &rest[host_end..];
+    if host.eq_ignore_ascii_case("maps.google.com") {
+        return true;
+    }
+    (host.eq_ignore_ascii_case("www.google.com") || host.eq_ignore_ascii_case("google.com"))
+        && path.starts_with("/maps")
+}
+
+pub fn parse_location_from_text(code: i32, content: &str) -> Option<ParsedLocation> {
+    if code != LOCATION_CODE {
+        return None;
+    }
+    let text = location_message_plain_text(content);
+    if text.is_empty() {
+        return None;
+    }
+    let (latitude, longitude) = parse_google_maps_coordinates(&text)?;
+    Some(ParsedLocation {
+        latitude,
+        longitude,
+        maps_url: build_location_maps_link(latitude, longitude),
+    })
+}
+
+pub fn lat_lon_map_tile(latitude: f64, longitude: f64, zoom: u32) -> (u32, u32) {
+    let zoom = zoom.clamp(1, 19);
+    let scale = 2_f64.powi(zoom as i32);
+    let x = ((longitude + 180.0) / 360.0 * scale).floor() as u32;
+    let lat_rad = latitude.to_radians();
+    let y = ((1.0 - (lat_rad.tan() + 1.0 / lat_rad.cos()).ln() / std::f64::consts::PI) / 2.0
+        * scale)
+        .floor() as u32;
+    (x, y)
+}
+
+pub const LOCATION_MAP_PREVIEW_ZOOM: u32 = 15;
+
+pub const LOCATION_MAP_TILE_ROOT: &str = "https://tile.openstreetmap.org";
+
+pub fn location_map_tile_url(tile_base: &str, zoom: u32, x: u32, y: u32) -> String {
+    let base = tile_base.trim().trim_end_matches('/');
+    let base = if base.is_empty() {
+        LOCATION_MAP_TILE_ROOT
+    } else {
+        base
+    };
+    format!("{base}/{zoom}/{x}/{y}.png")
+}
+
+const MAP_TILE_PX: f64 = 256.0;
+
+pub fn location_map_world_pixel(latitude: f64, longitude: f64, zoom: u32) -> (f64, f64) {
+    let zoom = zoom.clamp(1, 19);
+    let scale = 2_f64.powi(zoom as i32);
+    let x = (longitude + 180.0) / 360.0 * scale * MAP_TILE_PX;
+    let lat_rad = latitude.to_radians();
+    let y = (1.0 - (lat_rad.tan() + 1.0 / lat_rad.cos()).ln() / std::f64::consts::PI) / 2.0
+        * scale
+        * MAP_TILE_PX;
+    (x, y)
+}
+
+pub struct LocationMapPreview {
+    pub tile_urls: [[String; 3]; 3],
+    pub origin_left_px: f32,
+    pub origin_top_px: f32,
+}
+
+pub fn location_map_preview(
+    latitude: f64,
+    longitude: f64,
+    viewport_width: f32,
+    viewport_height: f32,
+    tile_base: &str,
+) -> LocationMapPreview {
+    let zoom = LOCATION_MAP_PREVIEW_ZOOM;
+    let (world_x, world_y) = location_map_world_pixel(latitude, longitude, zoom);
+    let (center_x, center_y) = lat_lon_map_tile(latitude, longitude, zoom);
+    let origin_x = center_x.saturating_sub(1);
+    let origin_y = center_y.saturating_sub(1);
+    let origin_world_x = origin_x as f64 * MAP_TILE_PX;
+    let origin_world_y = origin_y as f64 * MAP_TILE_PX;
+    let tile_urls = [0, 1, 2].map(|row| {
+        let y = origin_y.saturating_add(row);
+        [0, 1, 2].map(|col| {
+            let x = origin_x.saturating_add(col);
+            location_map_tile_url(tile_base, zoom, x, y)
+        })
+    });
+    LocationMapPreview {
+        tile_urls,
+        origin_left_px: viewport_width * 0.5 - (world_x - origin_world_x) as f32,
+        origin_top_px: viewport_height * 0.5 - (world_y - origin_world_y) as f32,
+    }
+}
+
 pub const QUICK_MENU_TYPE_FLASH: i32 = 1;
 pub const QUICK_MENU_TYPE_QUICK: i32 = 2;
 const CHANNEL_TYPE_MEZON_VOICE: i32 = 10;
@@ -1195,6 +1345,8 @@ pub struct ApiClanDesc {
     pub about: String,
     #[serde(default)]
     pub short_url: String,
+    #[serde(default)]
+    pub hashtags: String,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -3608,7 +3760,179 @@ fn url_body_len_without_unbalanced_close_parens(body: &[char]) -> usize {
     len
 }
 
-fn scan_markdown(chars: &[char]) -> Vec<MarkdownMatch> {
+fn style_run_end(chars: &[char], pos: usize, end: usize, prot_end: &[usize]) -> usize {
+    let ch = chars[pos];
+    let mut k = pos;
+    while k < end && chars[k] == ch && prot_end[k] == 0 {
+        k += 1;
+    }
+    k
+}
+
+fn valid_style_marker(ch: char, len: usize) -> bool {
+    match ch {
+        '*' => (1..=3).contains(&len),
+        '_' => len == 1,
+        '~' => len == 2,
+        _ => false,
+    }
+}
+
+fn can_open_style(chars: &[char], pos: usize, run_end: usize, end: usize) -> bool {
+    let ch = chars[pos];
+    let len = run_end - pos;
+    if !valid_style_marker(ch, len) {
+        return false;
+    }
+    if run_end >= end || chars[run_end].is_whitespace() {
+        return false;
+    }
+    if is_intraword_marker(chars, pos, len) {
+        return false;
+    }
+    true
+}
+
+fn is_intraword_marker(chars: &[char], pos: usize, len: usize) -> bool {
+    let ch = chars[pos];
+    (ch == '_' || (ch == '*' && len == 1)) && pos > 0 && chars[pos - 1].is_alphanumeric()
+}
+
+fn can_close_style(chars: &[char], open_end: usize, close: usize, close_end: usize) -> bool {
+    if close <= open_end || chars[close - 1].is_whitespace() {
+        return false;
+    }
+    if !chars[open_end..close].iter().any(|c| !c.is_whitespace()) {
+        return false;
+    }
+    let closes_intraword = chars[close] == '_' || (chars[close] == '*' && close_end - close == 1);
+    if closes_intraword && close_end < chars.len() && chars[close_end].is_alphanumeric() {
+        return false;
+    }
+    true
+}
+
+fn find_style_close(
+    chars: &[char],
+    open: usize,
+    len: usize,
+    end: usize,
+    prot_end: &[usize],
+    depth: u8,
+) -> Option<usize> {
+    if depth >= 16 {
+        return None;
+    }
+    let ch = chars[open];
+    let open_end = open + len;
+    let mut j = open_end;
+    while j < end {
+        if prot_end[j] != 0 {
+            j = prot_end[j].min(end);
+            continue;
+        }
+        if chars[j] != ch {
+            j += 1;
+            continue;
+        }
+        let k_end = style_run_end(chars, j, end, prot_end);
+        let k_len = k_end - j;
+        if k_len == len {
+            if can_close_style(chars, open_end, j, k_end) {
+                return Some(j);
+            }
+            if can_open_style(chars, j, k_end, end) {
+                return None;
+            }
+            j = k_end;
+        } else if ch == '*' && is_intraword_marker(chars, j, k_len) {
+            j = k_end;
+        } else if ch == '*'
+            && can_open_style(chars, j, k_end, end)
+            && let Some(nested_close) = find_style_close(chars, j, k_len, end, prot_end, depth + 1)
+        {
+            j = nested_close + k_len;
+        } else if ch == '*' {
+            return None;
+        } else {
+            j = k_end;
+        }
+    }
+    None
+}
+
+fn scan_styles(
+    chars: &[char],
+    start: usize,
+    end: usize,
+    prot_end: &[usize],
+    depth: u8,
+    out: &mut Vec<MarkdownMatch>,
+) {
+    if depth >= 16 {
+        return;
+    }
+    let mut i = start;
+    while i < end {
+        if prot_end[i] != 0 {
+            i = prot_end[i].min(end);
+            continue;
+        }
+        let ch = chars[i];
+        if !matches!(ch, '*' | '_' | '~') {
+            i += 1;
+            continue;
+        }
+        let run_end = style_run_end(chars, i, end, prot_end);
+        let len = run_end - i;
+        if can_open_style(chars, i, run_end, end)
+            && let Some(close) = find_style_close(chars, i, len, end, prot_end, depth)
+        {
+            let match_end = close + len;
+            match (ch, len) {
+                ('*', 3) => {
+                    out.push(MarkdownMatch {
+                        kind: "b",
+                        start: i,
+                        end: match_end,
+                        marker: 3,
+                    });
+                    out.push(MarkdownMatch {
+                        kind: "i",
+                        start: i,
+                        end: match_end,
+                        marker: 3,
+                    });
+                }
+                ('*', 2) => out.push(MarkdownMatch {
+                    kind: "b",
+                    start: i,
+                    end: match_end,
+                    marker: 2,
+                }),
+                ('*', 1) | ('_', 1) => out.push(MarkdownMatch {
+                    kind: "i",
+                    start: i,
+                    end: match_end,
+                    marker: 1,
+                }),
+                ('~', 2) => out.push(MarkdownMatch {
+                    kind: "st",
+                    start: i,
+                    end: match_end,
+                    marker: 2,
+                }),
+                _ => {}
+            }
+            scan_styles(chars, run_end, close, prot_end, depth + 1, out);
+            i = match_end;
+            continue;
+        }
+        i = run_end;
+    }
+}
+
+fn scan_markdown(chars: &[char], extra_protected: &[(usize, usize)]) -> Vec<MarkdownMatch> {
     let n = chars.len();
     let is_triple =
         |k: usize| k + 2 < n && chars[k] == '`' && chars[k + 1] == '`' && chars[k + 2] == '`';
@@ -3621,88 +3945,104 @@ fn scan_markdown(chars: &[char]) -> Vec<MarkdownMatch> {
         true
     };
     let non_blank = |a: usize, b: usize| chars[a..b].iter().any(|c| !c.is_whitespace());
-
-    let mut out = Vec::new();
-    let mut i = 0;
-    while i < n {
-        if is_triple(i) {
-            let mut j = i + 3;
+    let match_non_style = |k: usize| -> Option<MarkdownMatch> {
+        if is_triple(k) {
+            let mut j = k + 3;
             while j < n && !is_triple(j) {
                 j += 1;
             }
-            if is_triple(j) && non_blank(i + 3, j) {
-                out.push(MarkdownMatch {
+            if is_triple(j) && non_blank(k + 3, j) {
+                return Some(MarkdownMatch {
                     kind: "pre",
-                    start: i,
+                    start: k,
                     end: j + 3,
                     marker: 3,
                 });
-                i = j + 3;
-                continue;
             }
         }
 
-        if starts_with(i, "http://") || starts_with(i, "https://") {
-            let scheme = if starts_with(i, "https://") { 8 } else { 7 };
-            let mut j = i + scheme;
+        if starts_with(k, "http://") || starts_with(k, "https://") {
+            let scheme = if starts_with(k, "https://") { 8 } else { 7 };
+            let mut j = k + scheme;
             while j < n && !matches!(chars[j], ' ' | '\n' | '\r' | '\t') {
                 j += 1;
             }
             let j =
-                i + scheme + url_body_len_without_unbalanced_close_parens(&chars[i + scheme..j]);
-            if j > i + scheme {
-                let raw: String = chars[i..j].iter().collect();
+                k + scheme + url_body_len_without_unbalanced_close_parens(&chars[k + scheme..j]);
+            if j > k + scheme {
+                let raw: String = chars[k..j].iter().collect();
                 let url = trim_trailing_url_punctuation(&raw);
-                let j = i + url.chars().count();
-                if j > i + scheme {
-                    out.push(MarkdownMatch {
+                let j = k + url.chars().count();
+                if j > k + scheme {
+                    return Some(MarkdownMatch {
                         kind: link_markdown_kind(url),
-                        start: i,
+                        start: k,
                         end: j,
                         marker: 0,
                     });
-                    i = j;
-                    continue;
                 }
             }
         }
 
-        if chars[i] == '`' && !is_triple(i) {
-            let mut j = i + 1;
+        if chars[k] == '`' && !is_triple(k) {
+            let mut j = k + 1;
             while j < n && chars[j] != '`' && chars[j] != '\n' {
                 j += 1;
             }
-            if j < n && chars[j] == '`' && non_blank(i + 1, j) {
-                out.push(MarkdownMatch {
+            if j < n && chars[j] == '`' && non_blank(k + 1, j) {
+                return Some(MarkdownMatch {
                     kind: "c",
-                    start: i,
+                    start: k,
                     end: j + 1,
                     marker: 1,
                 });
-                i = j + 1;
-                continue;
             }
         }
 
-        if i + 1 < n && chars[i] == '*' && chars[i + 1] == '*' {
-            let mut j = i + 2;
-            while j < n && chars[j] != '*' && chars[j] != '\n' {
-                j += 1;
-            }
-            if j + 1 < n && chars[j] == '*' && chars[j + 1] == '*' && non_blank(i + 2, j) {
-                out.push(MarkdownMatch {
-                    kind: "b",
-                    start: i,
-                    end: j + 2,
-                    marker: 2,
-                });
-                i = j + 2;
-                continue;
-            }
-        }
+        None
+    };
 
-        i += 1;
+    let mut out = Vec::new();
+    let mut i = 0;
+    while i < n {
+        if let Some(m) = match_non_style(i) {
+            i = m.end;
+            out.push(m);
+        } else {
+            i += 1;
+        }
     }
+
+    let mut prot_end = vec![0usize; n];
+    for m in &out {
+        let s = m.start.min(n);
+        let e = m.end.min(n);
+        for slot in &mut prot_end[s..e] {
+            *slot = (*slot).max(e);
+        }
+    }
+    for &(s, e) in extra_protected {
+        let s = s.min(n);
+        let e = e.min(n);
+        if s < e {
+            for slot in &mut prot_end[s..e] {
+                *slot = (*slot).max(e);
+            }
+        }
+    }
+
+    let mut line_start = 0;
+    while line_start < n {
+        let mut line_end = line_start;
+        while line_end < n && chars[line_end] != '\n' {
+            line_end += 1;
+        }
+        if line_end > line_start && line_end - line_start <= 10_000 {
+            scan_styles(chars, line_start, line_end, &prot_end, 0, &mut out);
+        }
+        line_start = line_end + 1;
+    }
+    out.sort_by_key(|m| m.start);
     out
 }
 
@@ -3720,7 +4060,7 @@ fn utf16_prefix_offsets(chars: &[char]) -> Vec<i32> {
 pub fn detect_markdown(text: &str) -> Vec<OutgoingMarkdown> {
     let chars: Vec<char> = text.chars().collect();
     let u16_at = utf16_prefix_offsets(&chars);
-    scan_markdown(&chars)
+    scan_markdown(&chars, &[])
         .into_iter()
         .map(|m| OutgoingMarkdown {
             kind: m.kind.into(),
@@ -3747,9 +4087,25 @@ impl StrippedContent {
 }
 
 pub fn strip_markdown(text: &str) -> StrippedContent {
+    strip_markdown_protected(text, &[])
+}
+
+pub fn strip_markdown_protected(text: &str, protected_utf16: &[(i32, i32)]) -> StrippedContent {
     let chars: Vec<char> = text.chars().collect();
-    let matches = scan_markdown(&chars);
     let u16_at = utf16_prefix_offsets(&chars);
+    let char_at = |u16_off: i32| -> usize {
+        let clamped = u16_off.max(0);
+        u16_at
+            .binary_search(&clamped)
+            .unwrap_or_else(|idx| idx.saturating_sub(1))
+            .min(chars.len())
+    };
+    let extra_protected: Vec<(usize, usize)> = protected_utf16
+        .iter()
+        .filter(|&&(s, e)| e > s && e > 0)
+        .map(|&(s, e)| (char_at(s), char_at(e)))
+        .collect();
+    let matches = scan_markdown(&chars, &extra_protected);
 
     let mut removed = vec![false; chars.len()];
     for m in &matches {
@@ -3862,7 +4218,11 @@ pub fn build_send_content(
     emojis: &[OutgoingEmoji],
 ) -> SendContent {
     let channels = hashtags;
-    let stripped = strip_markdown(text);
+    let mut protected = Vec::with_capacity(mentions.len() + hashtags.len() + emojis.len());
+    protected.extend(mentions.iter().map(|m| (m.s, m.e)));
+    protected.extend(hashtags.iter().map(|h| (h.s, h.e)));
+    protected.extend(emojis.iter().map(|e| (e.s, e.e)));
+    let stripped = strip_markdown_protected(text, &protected);
     let mentions: Vec<OutgoingMention> = mentions
         .iter()
         .map(|m| OutgoingMention {
@@ -4888,6 +5248,7 @@ impl MezonTransport {
             description: clan.description,
             about: clan.about,
             short_url: clan.short_url,
+            hashtags: clan.hashtags,
         }
     }
 
@@ -12225,10 +12586,10 @@ mod tests {
     }
 
     #[test]
-    fn strip_markdown_leaves_bold_with_a_lone_star_inside() {
+    fn strip_markdown_keeps_a_lone_star_between_letters_inside_bold_as_text() {
         let out = strip_markdown("**a*b**");
-        assert_eq!(out.text, "**a*b**");
-        assert!(out.markdowns.is_empty());
+        assert_eq!(out.text, "a*b");
+        assert_eq!(out.markdowns, vec![md("b", 0, 3)]);
     }
 
     #[test]
@@ -12250,6 +12611,152 @@ mod tests {
         let out = strip_markdown("**hi**");
         assert_eq!(out.text, "hi");
         assert_eq!(out.markdowns, vec![md("b", 0, 2)]);
+    }
+
+    #[test]
+    fn strip_markdown_removes_italic_star_and_underscore_markers() {
+        let star = strip_markdown("*it*");
+        assert_eq!(star.text, "it");
+        assert_eq!(star.markdowns, vec![md("i", 0, 2)]);
+
+        let under = strip_markdown("_it_");
+        assert_eq!(under.text, "it");
+        assert_eq!(under.markdowns, vec![md("i", 0, 2)]);
+    }
+
+    #[test]
+    fn strip_markdown_removes_bold_italic_markers() {
+        let out = strip_markdown("***bi***");
+        assert_eq!(out.text, "bi");
+        assert_eq!(out.markdowns, vec![md("b", 0, 2), md("i", 0, 2)]);
+    }
+
+    #[test]
+    fn strip_markdown_removes_strikethrough_markers() {
+        let out = strip_markdown("~~st~~");
+        assert_eq!(out.text, "st");
+        assert_eq!(out.markdowns, vec![md("st", 0, 2)]);
+    }
+
+    #[test]
+    fn strip_markdown_handles_nested_bold_and_strike() {
+        let out = strip_markdown("**a ~~b~~ c**");
+        assert_eq!(out.text, "a b c");
+        assert_eq!(out.markdowns, vec![md("b", 0, 5), md("st", 2, 3)]);
+    }
+
+    #[test]
+    fn strip_markdown_handles_italic_inside_bold() {
+        let star = strip_markdown("**a *b* c**");
+        assert_eq!(star.text, "a b c");
+        assert_eq!(star.markdowns, vec![md("b", 0, 5), md("i", 2, 3)]);
+
+        let under = strip_markdown("**a _b_ c**");
+        assert_eq!(under.text, "a b c");
+        assert_eq!(under.markdowns, vec![md("b", 0, 5), md("i", 2, 3)]);
+    }
+
+    #[test]
+    fn strip_markdown_keeps_a_single_star_between_letters_or_digits_and_snake_case_as_text() {
+        let bold = strip_markdown("mid**word**bold");
+        assert_eq!(bold.text, "midwordbold");
+        assert_eq!(bold.markdowns, vec![md("b", 3, 7)]);
+
+        let bold_with_star = strip_markdown("**5*2=10**");
+        assert_eq!(bold_with_star.text, "5*2=10");
+        assert_eq!(bold_with_star.markdowns, vec![md("b", 0, 6)]);
+
+        let italic_then_product = strip_markdown("see *this* and 2*3");
+        assert_eq!(italic_then_product.text, "see this and 2*3");
+        assert_eq!(italic_then_product.markdowns, vec![md("i", 4, 8)]);
+
+        for raw in [
+            "mid*word*s",
+            "5*2=10, 3*4=12",
+            "foo*.rs, bar*.toml",
+            "a *b*c d",
+            "snake_case_name",
+            "a_b_c",
+            "__x__",
+            "___x___",
+        ] {
+            let out = strip_markdown(raw);
+            assert_eq!(out.text, raw);
+            assert!(out.markdowns.is_empty());
+        }
+    }
+
+    #[test]
+    fn strip_markdown_leaves_star_bullet_and_newline_spans_untouched() {
+        for raw in [
+            "* bullet",
+            "* one\n* two",
+            "*a\nb*",
+            "_a\nb_",
+            "***a\nb***",
+            "~~a\nb~~",
+        ] {
+            let out = strip_markdown(raw);
+            assert_eq!(out.text, raw);
+            assert!(out.markdowns.is_empty());
+        }
+    }
+
+    #[test]
+    fn strip_markdown_leaves_styles_inside_inline_code_untouched() {
+        let star = strip_markdown("`*a*`");
+        assert_eq!(star.text, "*a*");
+        assert_eq!(star.markdowns, vec![md("c", 0, 3)]);
+
+        let strike = strip_markdown("`~~a~~`");
+        assert_eq!(strike.text, "~~a~~");
+        assert_eq!(strike.markdowns, vec![md("c", 0, 5)]);
+    }
+
+    #[test]
+    fn strip_markdown_shifts_mention_offsets_after_new_style_spans() {
+        let sent = build_send_content(
+            "*it* ~~st~~ @bob",
+            &[OutgoingMention {
+                user_id: "7".into(),
+                username: "bob".into(),
+                s: 12,
+                e: 16,
+                ..Default::default()
+            }],
+            &OutgoingHashtags::default(),
+            &[],
+        );
+        assert_eq!(sent.text, "it st @bob");
+        assert_eq!(sent.markdowns, vec![md("i", 0, 2), md("st", 3, 5)]);
+        assert_eq!(sent.mentions[0].s, 6);
+        assert_eq!(sent.mentions[0].e, 10);
+    }
+
+    #[test]
+    fn strip_markdown_keeps_utf16_offsets_for_new_styles_after_astral_chars() {
+        let out = strip_markdown("😀 *i* ~~s~~ ***bi***");
+        assert_eq!(out.text, "😀 i s bi");
+        assert_eq!(
+            out.markdowns,
+            vec![md("i", 3, 4), md("st", 5, 6), md("b", 7, 9), md("i", 7, 9),]
+        );
+    }
+
+    #[test]
+    fn detect_markdown_new_style_kinds_and_offsets() {
+        assert_eq!(
+            detect_markdown("*it* _it_ ***bi*** ~~st~~ **a ~~b~~ c**"),
+            vec![
+                md("i", 0, 4),
+                md("i", 5, 9),
+                md("b", 10, 18),
+                md("i", 10, 18),
+                md("st", 19, 25),
+                md("b", 26, 39),
+                md("st", 30, 35),
+            ]
+        );
     }
 
     #[test]
@@ -12289,6 +12796,68 @@ mod tests {
         let out = strip_markdown("😀 **b**");
         assert_eq!(out.text, "😀 b");
         assert_eq!(out.markdowns, vec![md("b", 3, 4)]);
+    }
+
+    #[test]
+    fn strip_markdown_styles_wrap_inline_code_and_links() {
+        let code = strip_markdown("**run `x` first**");
+        assert_eq!(code.text, "run x first");
+        assert!(code.markdowns.contains(&md("b", 0, 11)));
+        assert!(code.markdowns.contains(&md("c", 4, 5)));
+        assert_eq!(code.markdowns.len(), 2);
+
+        let after_code = strip_markdown("**a `b` c**");
+        assert_eq!(after_code.text, "a b c");
+        assert!(after_code.markdowns.contains(&md("b", 0, 5)));
+        assert!(after_code.markdowns.contains(&md("c", 2, 3)));
+        assert_eq!(after_code.markdowns.len(), 2);
+
+        let link = strip_markdown("**see https://a.b now**");
+        assert_eq!(link.text, "see https://a.b now");
+        assert!(link.markdowns.contains(&md("b", 0, 19)));
+        assert!(link.markdowns.contains(&md("lk", 4, 15)));
+        assert_eq!(link.markdowns.len(), 2);
+    }
+
+    #[test]
+    fn strip_markdown_protects_mention_with_underscores() {
+        let sent = build_send_content(
+            "_hi_ @_bob_",
+            &[OutgoingMention {
+                user_id: "7".into(),
+                username: "_bob_".into(),
+                s: 5,
+                e: 11,
+                ..Default::default()
+            }],
+            &OutgoingHashtags::default(),
+            &[],
+        );
+        assert_eq!(sent.text, "hi @_bob_");
+        assert_eq!(sent.markdowns, vec![md("i", 0, 2)]);
+        assert_eq!(sent.mentions[0].s, 3);
+        assert_eq!(sent.mentions[0].e, 9);
+
+        let direct = strip_markdown_protected("@_bob_", &[(0, 6)]);
+        assert_eq!(direct.text, "@_bob_");
+        assert!(direct.markdowns.is_empty());
+    }
+
+    #[test]
+    fn strip_markdown_bounds_long_lines_and_deep_nesting() {
+        let long_line = "*a ".repeat(7_000);
+        assert!(long_line.len() > 20_000);
+        let out = strip_markdown(&long_line);
+        assert_eq!(out.text, long_line);
+        assert!(out.markdowns.is_empty());
+
+        let mut nested = String::from("x");
+        for level in 0..60 {
+            let marker = if level % 2 == 0 { "*" } else { "**" };
+            nested = format!("{marker}a {nested} b{marker}");
+        }
+        let nested_out = strip_markdown(&nested);
+        assert!(!nested_out.text.is_empty());
     }
 
     #[test]
@@ -13644,6 +14213,74 @@ mod tests {
         assert!(link.contains("10.5,106.2"));
         assert_eq!(value["lk"][0]["s"], 0);
         assert_eq!(value["mk"][0]["type"], "lk");
+    }
+
+    #[test]
+    fn parse_location_from_maps_url() {
+        let url = build_location_maps_link(18.6734, 105.6923);
+        let parsed = parse_location_from_text(LOCATION_CODE, &url).expect("location");
+        assert!((parsed.latitude - 18.6734).abs() < f64::EPSILON);
+        assert!((parsed.longitude - 105.6923).abs() < f64::EPSILON);
+        assert_eq!(parsed.maps_url, url);
+    }
+
+    #[test]
+    fn location_map_preview_fills_viewport_and_centers_pin() {
+        let preview = location_map_preview(18.6734, 105.6923, 400., 150., LOCATION_MAP_TILE_ROOT);
+        let (world_x, world_y) =
+            location_map_world_pixel(18.6734, 105.6923, LOCATION_MAP_PREVIEW_ZOOM);
+        let (tile_x, tile_y) = lat_lon_map_tile(18.6734, 105.6923, LOCATION_MAP_PREVIEW_ZOOM);
+        let origin_x = tile_x.saturating_sub(1) as f64 * MAP_TILE_PX;
+        let origin_y = tile_y.saturating_sub(1) as f64 * MAP_TILE_PX;
+        let pin_x = preview.origin_left_px + (world_x - origin_x) as f32;
+        let pin_y = preview.origin_top_px + (world_y - origin_y) as f32;
+        assert!((pin_x - 200.).abs() < 0.01);
+        assert!((pin_y - 75.).abs() < 0.01);
+        assert!(preview.origin_left_px <= 0.);
+        assert!(preview.origin_top_px <= 0.);
+        assert!(preview.origin_left_px + (MAP_TILE_PX as f32 * 3.) >= 400.);
+        assert!(preview.origin_top_px + (MAP_TILE_PX as f32 * 3.) >= 150.);
+        assert!(preview.tile_urls[1][1].starts_with(LOCATION_MAP_TILE_ROOT));
+        assert!(preview.tile_urls[1][1].contains(&format!(
+            "/{LOCATION_MAP_PREVIEW_ZOOM}/{tile_x}/{tile_y}.png"
+        )));
+        assert!(preview.tile_urls[1][1].contains("tile.openstreetmap.org/"));
+    }
+
+    #[test]
+    fn parse_location_from_content_json() {
+        let json = build_location_content_json(10.5, 106.2);
+        let parsed = parse_location_from_text(LOCATION_CODE, &json).expect("location");
+        assert!((parsed.latitude - 10.5).abs() < f64::EPSILON);
+        assert!((parsed.longitude - 106.2).abs() < f64::EPSILON);
+        assert_eq!(parsed.maps_url, build_location_maps_link(10.5, 106.2));
+    }
+
+    #[test]
+    fn location_click_opens_the_built_maps_link() {
+        let hostile = "https://evil.example/?google.com/maps&q=1,2";
+        let parsed = parse_location_from_text(LOCATION_CODE, hostile).expect("coords");
+        assert_eq!(parsed.maps_url, build_location_maps_link(1.0, 2.0));
+        assert!(!parsed.maps_url.contains("evil.example"));
+    }
+
+    #[test]
+    fn standalone_maps_content_is_a_link_and_nothing_else() {
+        assert!(is_standalone_google_maps_content(
+            "https://www.google.com/maps?q=10.5,106.2&z=14"
+        ));
+        assert!(is_standalone_google_maps_content(
+            r#"{"t":"https://maps.google.com/maps?q=10.5,106.2"}"#
+        ));
+        assert!(!is_standalone_google_maps_content(
+            "meet here https://www.google.com/maps?q=10.5,106.2"
+        ));
+        assert!(!is_standalone_google_maps_content(
+            "https://evil.example/?google.com/maps&q=1,2"
+        ));
+        assert!(!is_standalone_google_maps_content(
+            "https://www.google.com.evil.example/maps?q=1,2"
+        ));
     }
 
     #[test]

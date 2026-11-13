@@ -282,6 +282,8 @@ impl CosmicTextSystemState {
             let allowed_bad_font_names = [
                 "SegoeFluentIcons", // NOTE: Segoe fluent icons postscript name is inconsistent
                 "Segoe Fluent Icons",
+                // mezon vendor edit: keep NotoColorEmoji (no 'm' glyph) from being evicted (MEZON-661)
+                "NotoColorEmoji",
             ];
 
             if font.as_swash().charmap().map('m') == 0

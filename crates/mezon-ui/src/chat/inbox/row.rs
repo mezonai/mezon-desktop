@@ -994,7 +994,10 @@ fn inbox_body_links(
         }
         if !matches!(
             &source.span,
-            MessageSpan::Text(_) | MessageSpan::Bold(_) | MessageSpan::Heading { .. }
+            MessageSpan::Text(_)
+                | MessageSpan::Bold(_)
+                | MessageSpan::Styled { .. }
+                | MessageSpan::Heading { .. }
         ) {
             occupied.push((range, HighlightStyle::default()));
         }

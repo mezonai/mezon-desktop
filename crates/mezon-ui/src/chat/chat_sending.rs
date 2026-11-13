@@ -125,10 +125,4 @@ impl ChatSending {
             store.send_buzz_message(content, cx);
         });
     }
-
-    pub fn send_location(latitude: f64, longitude: f64, cx: &mut App) {
-        MessagesStore::global(cx).update(cx, |store, cx| {
-            store.send_location_message(latitude, longitude, cx);
-        });
-    }
 }

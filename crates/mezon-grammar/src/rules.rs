@@ -1,6 +1,3 @@
-//! Rule-based dictionaries, spelling normalization, and Vietnamese phonotactics.
-//! Provides exact, zero-latency corrections for teencode, confusable pairs, and diacritics.
-
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
@@ -21,7 +18,6 @@ pub struct CorrectionResult {
     pub edits: Vec<CorrectionEdit>,
 }
 
-/// Protected foreign and technology words that should never be mangled.
 pub static FOREIGN_AND_TECH_WORDS: LazyLock<HashSet<&'static str>> = LazyLock::new(|| {
     let words = [
         "ok",
@@ -326,7 +322,6 @@ static RE_CONSONANT_ONSET_CLUSTER: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"^(gr|cl|cr|pr|pl|fr|fl|br|bl|dr|st|sp|sk|sc|sm|sn|sw|str|spr|scr)").unwrap()
 });
 
-/// Vietnamese teencode and shorthand normalization mapping.
 pub static TEENCODE_MAP: LazyLock<HashMap<&'static str, &'static str>> = LazyLock::new(|| {
     let mut m = HashMap::new();
     let pairs = [
@@ -422,7 +417,6 @@ pub static TEENCODE_MAP: LazyLock<HashMap<&'static str, &'static str>> = LazyLoc
     m
 });
 
-/// Confusable compound phrases, spelling fixes, and multi-word collocations.
 pub static CONFUSABLE_PHRASES: LazyLock<Vec<(&'static str, &'static str)>> = LazyLock::new(|| {
     let mut list = vec![
         ("ok ánh", "ok anh"),
@@ -436,7 +430,32 @@ pub static CONFUSABLE_PHRASES: LazyLock<Vec<(&'static str, &'static str)>> = Laz
         ("ok bac", "ok bác"),
         ("ok chu", "ok chú"),
         ("ok thay", "ok thầy"),
-        // Model 2 Context-Aware Precision Collocations
+        ("cả mobile lần desktop", "cả mobile lẫn desktop"),
+        ("ca mobile lan desktop", "cả mobile lẫn desktop"),
+        ("cả mobile lần", "cả mobile lẫn"),
+        ("call 1-1 toi", "call 1-1 tới"),
+        ("call 1-1 tỏi", "call 1-1 tới"),
+        ("call 1-1 tội", "call 1-1 tới"),
+        ("cuoc goi toi", "cuộc gọi tới"),
+        ("cuoc goi den", "cuộc gọi đến"),
+        ("nghe binh thuong", "nghe bình thường"),
+        ("chú meo", "chú mèo"),
+        ("chu meo", "chú mèo"),
+        ("tat chường", "tắt chuông"),
+        ("tắt chường", "tắt chuông"),
+        ("tất chường", "tắt chuông"),
+        ("tất chương", "tắt chuông"),
+        ("đỏ chưởng", "đổ chuông"),
+        ("lần desktop", "lẫn desktop"),
+        ("lan desktop", "lẫn desktop"),
+        ("lan mobile", "lẫn mobile"),
+        ("ca mobile", "cả mobile"),
+        ("call toi", "call tới"),
+        ("call den", "call đến"),
+        ("tat chuong", "tắt chuông"),
+        ("do chuong", "đổ chuông"),
+        ("bat chuong", "bật chuông"),
+        ("rung chuong", "rung chuông"),
         ("tho lanh nghe", "thợ lành nghề"),
         ("thở lành nghe", "thợ lành nghề"),
         ("thở lành nghệ", "thợ lành nghề"),
@@ -1176,7 +1195,6 @@ pub static CONFUSABLE_PHRASES: LazyLock<Vec<(&'static str, &'static str)>> = Laz
         ("thuc hien", "thực hiện"),
         ("huong dan", "hướng dẫn"),
         ("yeu cau", "yêu cầu"),
-        // MODEL2_MINED_PAIRS (507 pairs)
         ("16 máu", "16 màu"),
         ("2004 mới", "2004 mỗi"),
         ("2004 mới clb", "2004 mỗi clb"),
@@ -1685,7 +1703,6 @@ pub static CONFUSABLE_PHRASES: LazyLock<Vec<(&'static str, &'static str)>> = Laz
         ("ẩu đã", "ẩu đả"),
         ("ẩu đã kéo", "ẩu đả kéo"),
     ];
-    // Sort descending by target phrase length to greedily match longest collocations first
     list.sort_by(|a, b| b.0.len().cmp(&a.0.len()));
     list
 });
@@ -1820,7 +1837,6 @@ fn rewrite_outside_spans(
     out
 }
 
-/// Case-matching helper to preserve casing style (UPPER, Capitalized, lower).
 pub fn match_case(original: &str, replacement: &str) -> String {
     if original.is_empty() || replacement.is_empty() {
         return replacement.to_string();
@@ -1848,33 +1864,26 @@ pub fn is_foreign_or_tech_word(word: &str) -> bool {
     if w.is_empty() {
         return false;
     }
-    // 1. Known Vietnamese teencode abbreviations (t2, t3, mik, bik, thik, zui, etc.)
     if TEENCODE_MAP.contains_key(w.as_str()) {
         return false;
     }
-    // 2. Alphanumeric / units (e.g. 447kb, v2, 100%)
     if w.chars().any(|c| c.is_ascii_digit()) {
         return true;
     }
-    // 3. Contains Vietnamese diacritics
     if RE_VN_DIACRITICS.is_match(&w) {
         return false;
     }
-    // 4. Known dictionary
     if FOREIGN_AND_TECH_WORDS.contains(w.as_str()) {
         return true;
     }
-    // 4b. Common confusables or endings
     if w.ends_with("bg") {
         return false;
     }
-    // 5. Non-Vietnamese alphabet letters
     if w.chars().any(|c| matches!(c, 'f' | 'j' | 'w' | 'z'))
         && !matches!(w.as_str(), "zui" | "wa" | "j" | "z")
     {
         return true;
     }
-    // 5b. Double consonants (except oo, ee, uu)
     if has_double_consonant(&w)
         && !w.starts_with("oo")
         && !w.starts_with("ee")
@@ -1882,19 +1891,15 @@ pub fn is_foreign_or_tech_word(word: &str) -> bool {
     {
         return true;
     }
-    // 6. Syllable endings
     if RE_INVALID_VN_ENDING.is_match(&w) && !w.ends_with("ng") {
         return true;
     }
-    // 7. Coda cluster
     if RE_CONSONANT_CODA_CLUSTER.is_match(&w) {
         return true;
     }
-    // 8. Onset cluster
     if RE_CONSONANT_ONSET_CLUSTER.is_match(&w) {
         return true;
     }
-    // 9. Multisyllabic
     if RE_MULTISYLLABIC.is_match(&w) {
         return true;
     }
@@ -1955,7 +1960,6 @@ pub fn is_predominantly_english_sentence(text: &str) -> bool {
     false
 }
 
-/// Normalizes spacing around punctuation marks.
 pub fn normalize_punctuation_spacing(text: &str) -> (String, Vec<CorrectionEdit>) {
     let mut edits = Vec::new();
     let protected = protected_literal_spans(text);
@@ -1979,7 +1983,6 @@ pub fn normalize_punctuation_spacing(text: &str) -> (String, Vec<CorrectionEdit>
 
 static RE_DEGREE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(\d+)\s+(?:do|đó)\b").unwrap());
 
-/// Pre-cleans numeric degree units and phonetic anomalies.
 pub fn preclean_phonetics_and_units(text: &str) -> String {
     let replaced_degree = RE_DEGREE.replace_all(text, "$1 độ").into_owned();
     replaced_degree
@@ -1987,7 +1990,6 @@ pub fn preclean_phonetics_and_units(text: &str) -> String {
         .replace("Xưống", "Xuống")
 }
 
-/// Normalizes Vietnamese teencode and shorthand words.
 pub fn normalize_teencode(text: &str) -> (String, Vec<CorrectionEdit>) {
     let mut edits = Vec::new();
     static RE_WORD: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\b[\p{L}\p{N}]+\b").unwrap());
@@ -2013,7 +2015,6 @@ pub fn normalize_teencode(text: &str) -> (String, Vec<CorrectionEdit>) {
     (current, edits)
 }
 
-/// Normalizes sentence capitalization after terminal punctuation.
 pub fn normalize_sentence_capitalization(text: &str) -> (String, Vec<CorrectionEdit>) {
     let mut edits = Vec::new();
     let re = Regex::new(r"(^|[.?!]\s+)(\p{L})").unwrap();
@@ -2048,7 +2049,6 @@ pub fn normalize_sentence_capitalization(text: &str) -> (String, Vec<CorrectionE
     (capitalized, edits)
 }
 
-/// Tone placement standardizer (quy tắc đặt dấu mới: hòa, khỏe, thủy).
 pub fn normalize_tone_placement(text: &str) -> (String, Vec<CorrectionEdit>) {
     let mut edits = Vec::new();
     let re_word = Regex::new(r"\b\p{L}+\b").unwrap();
@@ -2092,7 +2092,6 @@ pub fn normalize_tone_placement(text: &str) -> (String, Vec<CorrectionEdit>) {
     (result, edits)
 }
 
-/// Strips Vietnamese accents for normalization.
 pub fn strip_accents(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     for c in s.chars() {
@@ -2213,6 +2212,18 @@ pub static COLLOCATIONS_MAP: LazyLock<
     let mut m = HashMap::new();
     let pairs = [
         (("di", "lam"), ("đi", "làm")),
+        (("tat", "chuong"), ("tắt", "chuông")),
+        (("do", "chuong"), ("đổ", "chuông")),
+        (("bat", "chuong"), ("bật", "chuông")),
+        (("rung", "chuong"), ("rung", "chuông")),
+        (("tieng", "chuong"), ("tiếng", "chuông")),
+        (("chuong", "reo"), ("chuông", "reo")),
+        (("chuong", "bao"), ("chuông", "báo")),
+        (("call", "toi"), ("call", "tới")),
+        (("call", "den"), ("call", "đến")),
+        (("nghe", "binh"), ("nghe", "bình")),
+        (("dau", "day"), ("đâu", "đấy")),
+        (("chu", "meo"), ("chú", "mèo")),
         (("rat", "vui"), ("rất", "vui")),
         (("cac", "ban"), ("các", "bạn")),
         (("cung", "xong"), ("cũng", "xong")),
@@ -2302,7 +2313,6 @@ pub static COLLOCATIONS_MAP: LazyLock<
         (("rat", "ngon"), ("rất", "ngon")),
         (("anh", "ay"), ("anh", "ấy")),
         (("rat", "luon"), ("rất", "lươn")),
-        // thui -> authentic 'thui'
         (("be", "thui"), ("bê", "thui")),
         (("mon", "be"), ("món", "bê")),
         (("thit", "thui"), ("thịt", "thui")),
@@ -2315,7 +2325,6 @@ pub static COLLOCATIONS_MAP: LazyLock<
         (("dung", "lam"), ("đừng", "làm")),
         (("tai", "nang"), ("tài", "năng")),
         (("nang", "tre"), ("năng", "trẻ")),
-        // thui -> chat slang for 'thôi'
         (("vay", "thui"), ("vậy", "thôi")),
         (("the", "thui"), ("thế", "thôi")),
         (("nghi", "lam"), ("nghỉ", "làm")),
@@ -2353,7 +2362,6 @@ pub static COLLOCATIONS_MAP: LazyLock<
         (("lam", "thui"), ("làm", "thôi")),
         (("ngu", "thui"), ("ngủ", "thôi")),
         (("uong", "thui"), ("uống", "thôi")),
-        // toi -> tối (evening / night / optimal / max)
         (("buoi", "toi"), ("buổi", "tối")),
         (("troi", "toi"), ("trời", "tối")),
         (("bong", "toi"), ("bóng", "tối")),
@@ -2377,7 +2385,6 @@ pub static COLLOCATIONS_MAP: LazyLock<
         (("toi", "hau"), ("tối", "hậu")),
         (("toi", "co"), ("tối", "cổ")),
         (("den", "toi"), ("đen", "tối")),
-        // toi -> tới (arrive / reach / to)
         (("cho", "toi"), ("cho", "tới")),
         (("di", "toi"), ("đi", "tới")),
         (("den", "toi"), ("đến", "tới")),
@@ -2400,7 +2407,6 @@ pub static COLLOCATIONS_MAP: LazyLock<
         (("nghi", "toi"), ("nghĩ", "tới")),
         (("nhac", "toi"), ("nhắc", "tới")),
         (("tim", "toi"), ("tìm", "tòi")),
-        // toi -> tội (crime / guilt / pity)
         (("pham", "toi"), ("phạm", "tội")),
         (("co", "toi"), ("có", "tội")),
         (("toi", "nghiep"), ("tội", "nghiệp")),
@@ -2427,7 +2433,6 @@ pub static COLLOCATIONS_MAP: LazyLock<
         (("toi", "ac"), ("tội", "ác")),
         (("toi", "tinh"), ("tội", "tình")),
         (("toi", "trang"), ("tội", "trạng")),
-        // toi -> authentic 'toi' (dead / ruined)
         (("chet", "toi"), ("chết", "toi")),
         (("toi", "mang"), ("toi", "mạng")),
         (("toi", "doi"), ("toi", "đời")),
@@ -2436,7 +2441,6 @@ pub static COLLOCATIONS_MAP: LazyLock<
         (("dich", "toi"), ("dịch", "toi")),
         (("ga", "toi"), ("gà", "toi")),
         (("mat", "toi"), ("mất", "toi")),
-        // toi -> tôi (pronoun)
         (("toi", "muon"), ("tôi", "muốn")),
         (("toi", "nghi"), ("tôi", "nghĩ")),
         (("toi", "biet"), ("tôi", "biết")),
@@ -2547,7 +2551,6 @@ pub fn restore_diacritics(text: &str) -> (String, Vec<CorrectionEdit>) {
     let orig_tokens = tokens.clone();
     let mut matched_indices = std::collections::HashSet::new();
 
-    // 1. Collocations pass
     if word_indices.len() >= 2 {
         for k in 0..word_indices.len() - 1 {
             let i1 = word_indices[k];
@@ -2563,7 +2566,6 @@ pub fn restore_diacritics(text: &str) -> (String, Vec<CorrectionEdit>) {
         }
     }
 
-    // 2. Candidate unaccented word pass
     for &idx in &word_indices {
         if matched_indices.contains(&idx) {
             continue;

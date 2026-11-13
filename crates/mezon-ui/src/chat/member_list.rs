@@ -1790,18 +1790,6 @@ fn build_member_menu(args: MemberMenuArgs) -> ContextMenu {
             });
         }
 
-        if permissions.blocked_by_me {
-            menu = menu.item(t("contextMenu.member.unblock"), {
-                let panel = panel.clone();
-                move |_window: &mut Window, cx: &mut App| {
-                    FriendStore::global(cx).update(cx, |store, cx| {
-                        store.unblock_friend(user_id, cx);
-                    });
-                    close_member_menu(&panel, cx);
-                }
-            });
-        }
-
         if permissions.is_friend {
             menu = menu
                 .separator()
@@ -1830,6 +1818,28 @@ fn build_member_menu(args: MemberMenuArgs) -> ContextMenu {
                         });
                     }
                 });
+        }
+
+        if permissions.blocked_by_me {
+            menu = menu.item(t("contextMenu.member.unblock"), {
+                let panel = panel.clone();
+                move |_window: &mut Window, cx: &mut App| {
+                    FriendStore::global(cx).update(cx, |store, cx| {
+                        store.unblock_friend(user_id, cx);
+                    });
+                    close_member_menu(&panel, cx);
+                }
+            });
+        } else {
+            menu = menu.danger_item(t("contextMenu.member.block"), {
+                let panel = panel.clone();
+                move |_window: &mut Window, cx: &mut App| {
+                    FriendStore::global(cx).update(cx, |store, cx| {
+                        store.block_friend(user_id, cx);
+                    });
+                    close_member_menu(&panel, cx);
+                }
+            });
         }
     }
 

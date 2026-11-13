@@ -1159,6 +1159,17 @@ fn render_search_spans(
                         .child(text.to_string()),
                 );
             }
+            MessageSpan::Styled { text, style } => {
+                row = row.child(
+                    div()
+                        .max_w_full()
+                        .min_w_0()
+                        .when(style.bold, |d| d.font_weight(FontWeight::BOLD))
+                        .when(style.italic, |d| d.italic())
+                        .when(style.strike, |d| d.line_through())
+                        .child(text.to_string()),
+                );
+            }
             MessageSpan::Code(text) => {
                 row = row.child(inline_code_chip(theme).child(text.to_string()));
             }

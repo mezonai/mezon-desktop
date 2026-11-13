@@ -1486,6 +1486,7 @@ pub struct ChannelMessages {
     small_avatar_image_cache: Entity<LruImageCache>,
     icon_image_cache: Entity<LruImageCache>,
     ogp_image_cache: Entity<LruImageCache>,
+    location_map_image_cache: Entity<LruImageCache>,
     social_image_cache: Entity<LruImageCache>,
     sprite_image_cache: Entity<LruImageCache>,
     active_videos: Rc<HashMap<(MessageId, usize), Entity<VideoPlayerView>>>,
@@ -2076,6 +2077,8 @@ impl ChannelMessages {
             )
         });
         let ogp_image_cache = crate::image_cache::ogp_timeline_cache("message-ogp", cx);
+        let location_map_image_cache =
+            crate::image_cache::location_map_timeline_cache("message-location-map", cx);
         let social_image_cache = crate::image_cache::social_thumb_cache("message-social", cx);
         let sprite_image_cache = crate::image_cache::shared_sprite_sheet_cache(cx);
         let last_cold_inputs = Self::cold_inputs(cx);
@@ -2161,6 +2164,7 @@ impl ChannelMessages {
             small_avatar_image_cache,
             icon_image_cache,
             ogp_image_cache,
+            location_map_image_cache,
             social_image_cache,
             sprite_image_cache,
             active_videos: Rc::new(HashMap::new()),
@@ -2770,7 +2774,12 @@ impl ChannelMessages {
         self.selection_autoscroll_scheduled = false;
         let (initial_content, initial_spans) = self
             .find_local_message(message_id, cx)
-            .map(|m| (composer_edit_source(&m.content, &m.spans), m.spans))
+            .map(|m| {
+                (
+                    composer_edit_source(&m.content, &m.spans, m.raw_content.as_deref()),
+                    m.spans,
+                )
+            })
             .unwrap_or_default();
         let settings = self.settings.clone();
         let input = cx.new(|cx| {
@@ -2835,10 +2844,9 @@ impl ChannelMessages {
             return;
         };
 
-        if local
-            .as_ref()
-            .is_some_and(|m| composer_edit_source(&m.content, &m.spans) == text)
-        {
+        if local.as_ref().is_some_and(|m| {
+            composer_edit_source(&m.content, &m.spans, m.raw_content.as_deref()) == text
+        }) {
             store.update(cx, |store, cx| store.cancel_edit(cx));
             cx.emit(ChannelMessagesEvent::EditClosed);
             cx.notify();
@@ -5149,6 +5157,7 @@ impl ChannelMessages {
         let avatar_image_cache = self.avatar_image_cache.clone();
         let small_avatar_image_cache = self.small_avatar_image_cache.clone();
         let ogp_image_cache = self.ogp_image_cache.clone();
+        let location_map_image_cache = self.location_map_image_cache.clone();
         let social_image_cache = self.social_image_cache.clone();
         let sprite_image_cache = self.sprite_image_cache.clone();
         let icon_image_cache = self.icon_image_cache.clone();
@@ -5229,6 +5238,7 @@ impl ChannelMessages {
                         large_avatar_cache: avatar_image_cache.clone(),
                         icon_cache: icon_image_cache.clone(),
                         ogp_cache: ogp_image_cache.clone(),
+                        location_map_cache: location_map_image_cache.clone(),
                         social_cache: social_image_cache.clone(),
                         sprite_cache: sprite_image_cache.clone(),
                         attachment_cache: attachment_cache.clone(),
@@ -5543,6 +5553,7 @@ impl Render for ChannelMessages {
         let avatar_image_cache = self.avatar_image_cache.clone();
         let small_avatar_image_cache = self.small_avatar_image_cache.clone();
         let ogp_image_cache = self.ogp_image_cache.clone();
+        let location_map_image_cache = self.location_map_image_cache.clone();
         let social_image_cache = self.social_image_cache.clone();
         let sprite_image_cache = self.sprite_image_cache.clone();
         let icon_image_cache = self.icon_image_cache.clone();
@@ -5631,6 +5642,7 @@ impl Render for ChannelMessages {
                         large_avatar_cache: avatar_image_cache.clone(),
                         icon_cache: icon_image_cache.clone(),
                         ogp_cache: ogp_image_cache.clone(),
+                        location_map_cache: location_map_image_cache.clone(),
                         social_cache: social_image_cache.clone(),
                         sprite_cache: sprite_image_cache.clone(),
                         attachment_cache: attachment_cache.clone(),

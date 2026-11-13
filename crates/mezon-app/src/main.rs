@@ -682,6 +682,18 @@ fn run_app(lock: SingleInstance, initial_url: Option<String>) {
                 include_bytes!(concat!(env!("OUT_DIR"), "/ggsans-ExtraBold.ttf")),
                 "ExtraBold",
             ),
+            (
+                include_bytes!(
+                    "../../../assets/fonts/ibm-plex-sans/IBMPlexSans-Italic-as-ggsans.ttf"
+                ),
+                "Italic",
+            ),
+            (
+                include_bytes!(
+                    "../../../assets/fonts/ibm-plex-sans/IBMPlexSans-SemiBoldItalic-as-ggsans.ttf"
+                ),
+                "SemiBoldItalic",
+            ),
         ];
         let fonts: Vec<Cow<'static, [u8]>> = gg_sans_paths
             .iter()
@@ -1144,11 +1156,6 @@ fn open_main_window(
     mezon_store::PlatformStore::set_notification_permit(
         &platform_store,
         std::sync::Arc::new(mezon_native::notifications::notifications_permitted),
-        cx,
-    );
-    mezon_store::PlatformStore::set_current_location(
-        &platform_store,
-        std::sync::Arc::new(mezon_native::location::current_location),
         cx,
     );
 

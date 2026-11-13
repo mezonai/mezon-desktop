@@ -5733,6 +5733,7 @@ dependencies = [
  "tracing",
  "tray-icon",
  "windows 0.61.3",
+ "x11rb",
  "zbus 4.4.0",
 ]
 

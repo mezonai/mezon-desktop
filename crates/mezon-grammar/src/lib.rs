@@ -17,6 +17,7 @@ pub mod syllable;
 pub mod tokenizer;
 pub mod trie;
 
+pub use accent::decode_teencode_diacritics;
 pub use assets::{
     SYLLABLE_VOCAB_FILE, is_download_enabled, prefetch_all_assets, set_download_enabled,
 };

@@ -281,7 +281,6 @@ pub type McpStopFn = Arc<dyn Fn() -> anyhow::Result<McpServerStatus> + Send + Sy
 pub type McpSetPortFn = Arc<dyn Fn(u16) + Send + Sync>;
 /// Returns whether the OS permits desktop notifications (false only when explicitly denied).
 pub type NotificationPermitFn = Arc<dyn Fn() -> bool + Send + Sync>;
-pub type CurrentLocationFn = Arc<dyn Fn() -> anyhow::Result<(f64, f64)> + Send + Sync>;
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct McpServerStatus {
@@ -361,7 +360,6 @@ pub struct PlatformStore {
     cli_install: Option<CliInstallHooks>,
     mcp_server: Option<McpServerHooks>,
     notification_permit: Option<NotificationPermitFn>,
-    current_location: Option<CurrentLocationFn>,
 }
 
 impl PlatformStore {
@@ -377,7 +375,6 @@ impl PlatformStore {
             cli_install: None,
             mcp_server: None,
             notification_permit: None,
-            current_location: None,
         });
         cx.set_global(GlobalPlatformStore(entity.clone()));
         entity
@@ -613,24 +610,6 @@ impl PlatformStore {
     /// so a pending authorization does not block the notification stream.
     pub fn notifications_permitted(&self) -> bool {
         self.notification_permit.as_ref().is_none_or(|f| f())
-    }
-
-    pub fn set_current_location(entity: &Entity<Self>, f: CurrentLocationFn, cx: &mut App) {
-        entity.update(cx, |store, cx| {
-            store.current_location = Some(f);
-            cx.notify();
-        });
-    }
-
-    pub fn current_location(&self) -> anyhow::Result<(f64, f64)> {
-        match &self.current_location {
-            Some(f) => f(),
-            None => Err(anyhow::anyhow!("current_location not registered")),
-        }
-    }
-
-    pub fn current_location_fn(&self) -> Option<CurrentLocationFn> {
-        self.current_location.clone()
     }
 }
 
