@@ -135,6 +135,30 @@ static COLLOCATIONS: LazyLock<Collocations> = LazyLock::new(|| {
         ("nghe", "binh", "nghe", "bình"),
         ("dau", "day", "đâu", "đấy"),
         ("chu", "meo", "chú", "mèo"),
+        ("tach", "biet", "tách", "biệt"),
+        ("khac", "biet", "khác", "biệt"),
+        ("dac", "biet", "đặc", "biệt"),
+        ("phan", "biet", "phân", "biệt"),
+        ("thi", "show", "thì", "show"),
+        ("thi", "ho", "thì", "họ"),
+        ("va", "muon", "và", "muốn"),
+        ("muon", "lam", "muốn", "làm"),
+        ("lam", "cai", "làm", "cái"),
+        ("ho", "se", "họ", "sẽ"),
+        ("khong", "co", "không", "có"),
+        ("tu", "add", "tự", "add"),
+        ("avatar", "chu", "avatar", "chứ"),
+        ("thuong", "doi", "thường", "đội"),
+        ("doi", "tao", "đội", "tạo"),
+        ("tao", "bot", "tạo", "bot"),
+        ("da", "dung", "đã", "dùng"),
+        ("dung", "nhieu", "dùng", "nhiều"),
+        ("show", "rong", "show", "rỗng"),
+        ("se", "tu", "sẽ", "tự"),
+        ("dong", "chi", "đồng", "chí"),
+        ("cho", "nghi", "cho", "nghỉ"),
+        ("nguoi", "moi", "người", "mới"),
+        ("lom", "qua", "lởm", "quá"),
     ];
     for (u1, u2, w1, w2) in priority_bigrams {
         bigram.insert(pair_key(u1, u2, None), (w1.to_string(), w2.to_string()));
@@ -157,6 +181,19 @@ static COLLOCATIONS: LazyLock<Collocations> = LazyLock::new(|| {
         ("noi", "binh", "thuong", "nói", "bình", "thường"),
         ("cuoc", "goi", "toi", "cuộc", "gọi", "tới"),
         ("cuoc", "goi", "den", "cuộc", "gọi", "đến"),
+        ("tach", "biet", "day", "tách", "biệt", "đấy"),
+        ("tach", "biet", "nhe", "tách", "biệt", "nhé"),
+        ("tach", "biet", "ra", "tách", "biệt", "ra"),
+        ("thuong", "doi", "tao", "thường", "đội", "tạo"),
+        ("doi", "tao", "bot", "đội", "tạo", "bot"),
+        ("da", "dung", "nhieu", "đã", "dùng", "nhiều"),
+        ("dung", "nhieu", "roi", "dùng", "nhiều", "rồi"),
+        ("cai", "gi", "day", "cái", "gì", "đấy"),
+        ("se", "tu", "add", "sẽ", "tự", "add"),
+        ("ma", "lam", "chu", "mà", "làm", "chứ"),
+        ("thi", "cho", "nghi", "thì", "cho", "nghỉ"),
+        ("lay", "nguoi", "moi", "lấy", "người", "mới"),
+        ("dong", "chi", "kia", "đồng", "chí", "kia"),
     ];
     for (u1, u2, u3, w1, w2, w3) in priority_trigrams {
         trigram.insert(
@@ -169,6 +206,9 @@ static COLLOCATIONS: LazyLock<Collocations> = LazyLock::new(|| {
 
 static BAD_COLLOCATIONS: LazyLock<HashSet<(&'static str, &'static str)>> = LazyLock::new(|| {
     [
+        ("tao", "bot"),
+        ("dung", "nhieu"),
+        ("thuong", "doi"),
         ("lon", "tao"),
         ("viec", "bai"),
         ("kem", "phan"),
@@ -215,6 +255,28 @@ static BAD_COLLOCATIONS: LazyLock<HashSet<(&'static str, &'static str)>> = LazyL
 
 static BAD_TRIGRAMS: LazyLock<HashSet<(&'static str, &'static str, &'static str)>> =
     LazyLock::new(|| [("gian", "vi", "co")].into_iter().collect());
+
+static COMMON_HOMOPHONE_VARIANTS: LazyLock<HashMap<&'static str, &'static [&'static str]>> =
+    LazyLock::new(|| {
+        [
+            ("to", &["to", "tờ", "tổ", "tớ", "tô", "tơ"][..]),
+            ("lam", &["làm", "lâm", "lắm"][..]),
+            ("se", &["sẽ", "sẻ", "sé"][..]),
+            ("thui", &["thôi", "thui"][..]),
+            ("thoi", &["thôi", "thời", "thổi"][..]),
+            ("tat", &["tắt", "tất"][..]),
+            ("chuong", &["chuông", "chương"][..]),
+            ("may", &["máy", "may", "mấy"][..]),
+            ("chi", &["chí", "chỉ", "chi"][..]),
+            ("nghi", &["nghỉ", "nghĩ", "nghi"][..]),
+            ("moi", &["mới", "mọi", "mời", "môi"][..]),
+            ("chu", &["chứ", "chủ", "chú", "chu"][..]),
+            ("biet", &["biệt", "biết"][..]),
+            ("tach", &["tách"][..]),
+        ]
+        .into_iter()
+        .collect()
+    });
 
 static RE_SENTENCE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"[.?!]\s+").unwrap());
 static RE_DELIMITER_ONLY: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^[.?!]\s+$").unwrap());
@@ -711,16 +773,20 @@ pub fn decode_teencode_diacritics(text: &str) -> String {
     if text.is_empty() {
         return String::new();
     }
-    if !text.chars().any(|c| {
+    static RE_TEENCODE_SPLIT_CODA: LazyLock<Regex> = LazyLock::new(|| {
+        Regex::new(r"(?i)([a-zA-ZăâêôơưĂÂÊÔƠƯ])([.?`'~^+\\])\s+(n|ng|nh|m|p|t|c|ch|i|y)\b").unwrap()
+    });
+    let mut res = RE_TEENCODE_SPLIT_CODA.replace_all(text, "$1$2$3").into_owned();
+
+    if !res.chars().any(|c| {
         matches!(
             c,
             '^' | '+' | '*' | '(' | '-' | '~' | '.' | '?' | '\'' | '/' | '`' | '\\' | 'ổ' | 'ỏ'
         )
-    }) {
-        return text.to_string();
+    }) && !res.contains(' ') {
+        return res;
     }
 
-    let mut res = text.to_string();
     for (sym, repl) in TEENCODE_DIRECT.iter() {
         if res.contains(sym) {
             res = res.replace(sym, repl);
@@ -736,7 +802,21 @@ pub fn decode_teencode_diacritics(text: &str) -> String {
         }
     }
 
-    clean_double_marks(&res)
+    let cleaned = clean_double_marks(&res);
+
+    static RE_SPLIT_CODA: LazyLock<Regex> = LazyLock::new(|| {
+        Regex::new(r"(?i)\b([a-zA-Zà-ỹĂÂĐÊÔƠƯăâđêôơư]*[àáảãạằắẳẵặầấẩẫậèéẻẽẹềếểễệòóỏõọồốổỗộờớởỡợùúủũụừứửữự])\s+(n|ng|nh|m|p|t|c|ch|i|y)\b").unwrap()
+    });
+    RE_SPLIT_CODA.replace_all(&cleaned, |caps: &regex::Captures| {
+        let syl = &caps[1];
+        let coda = &caps[2];
+        let combined = format!("{syl}{coda}");
+        if is_valid_vietnamese_syllable(&combined) {
+            combined
+        } else {
+            caps[0].to_string()
+        }
+    }).into_owned()
 }
 
 pub(crate) fn add_accents(text: &str, infer: &dyn Fn(&str) -> Option<Vec<f32>>) -> String {
@@ -1273,6 +1353,19 @@ fn is_valid_vietnamese_syllable(syllable: &str) -> bool {
         return false;
     }
     let is_vowel = |c: char| CHAR_TO_TONE.contains_key(&c);
+
+    let chars: Vec<char> = syllable.chars().collect();
+    if chars.len() >= 3 {
+        let first = chars[0];
+        let second = chars[1];
+        let third = chars[2];
+        if (first == 'g' && matches!(second, 'ì' | 'í' | 'ỉ' | 'ĩ' | 'ị') && is_vowel(third))
+            || (first == 'q' && matches!(second, 'ù' | 'ú' | 'ủ' | 'ũ' | 'ụ') && is_vowel(third))
+        {
+            return false;
+        }
+    }
+
     if let Some(last_vowel_idx) = syllable
         .char_indices()
         .filter(|(_, c)| is_vowel(*c))
@@ -1290,11 +1383,19 @@ fn is_valid_vietnamese_syllable(syllable: &str) -> bool {
             return false;
         }
     }
-    let chars: Vec<char> = syllable.chars().collect();
-    for i in 0..chars.len().saturating_sub(1) {
-        if is_vowel(chars[i])
+
+    let rime = if (syllable.starts_with("gi") || syllable.starts_with("qu"))
+        && syllable.chars().nth(2).is_some_and(is_vowel)
+    {
+        &syllable[2..]
+    } else {
+        &syllable
+    };
+    let rime_chars: Vec<char> = rime.chars().collect();
+    for i in 0..rime_chars.len().saturating_sub(1) {
+        if is_vowel(rime_chars[i])
             && matches!(
-                chars[i + 1],
+                rime_chars[i + 1],
                 'ì' | 'í'
                     | 'ỉ'
                     | 'ĩ'
@@ -1374,10 +1475,20 @@ fn rescore_with_collocations(text: &str, original: &str) -> String {
     for k in 0..k_len {
         let idx = alpha_indices[k];
         let tok = &tokens[idx];
+        if is_foreign_or_tech_word(tok) {
+            candidates_per_pos.push(vec![tok.clone()]);
+            continue;
+        }
         let u = strip_accents(tok).to_lowercase();
         let mut cands = vec![tok.clone()];
 
         if unaccented_mask[idx] {
+            if let Some(variants) = COMMON_HOMOPHONE_VARIANTS.get(u.as_str()) {
+                for &v in *variants {
+                    cands.push(match_case(tok, v));
+                }
+            }
+
             if k > 0 && !has_punct_between(&tokens, alpha_indices[k - 1], idx) {
                 let u_prev = strip_accents(&tokens[alpha_indices[k - 1]]).to_lowercase();
                 if !BAD_COLLOCATIONS.contains(&(u_prev.as_str(), u.as_str())) {

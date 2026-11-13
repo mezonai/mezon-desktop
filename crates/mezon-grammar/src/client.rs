@@ -81,7 +81,19 @@ impl MezonGrammarClient {
         let (masked, literals) = mask_protected_literals(text);
         let mut edits = Vec::new();
 
-        let (mut current, edits_punc) = normalize_punctuation_spacing(&masked);
+        let decoded = crate::accent::decode_teencode_diacritics(&masked);
+        let current_source = if decoded != masked {
+            edits.push(CorrectionEdit {
+                original: masked.clone(),
+                replacement: decoded.clone(),
+                reason: "Giải mã ký hiệu dấu teencode".to_string(),
+            });
+            decoded
+        } else {
+            masked
+        };
+
+        let (mut current, edits_punc) = normalize_punctuation_spacing(&current_source);
         edits.extend(edits_punc);
 
         if is_predominantly_english_sentence(text) {

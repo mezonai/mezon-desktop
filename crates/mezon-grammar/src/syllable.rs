@@ -2,6 +2,8 @@ use crate::assets::{SYLLABLE_VOCAB_FILE, load_asset_str};
 use std::collections::HashMap;
 use std::sync::LazyLock;
 
+const PUNCT_TOKENS: &[&str] = &[",", ".", "?", "!", ";", ":"];
+
 pub static SYLLABLE_TO_ID: LazyLock<HashMap<String, i64>> = LazyLock::new(|| {
     load_asset_str(SYLLABLE_VOCAB_FILE)
         .and_then(|json| serde_json::from_str(&json).ok())
@@ -19,7 +21,7 @@ pub static ID_TO_SYLLABLE: LazyLock<HashMap<i64, String>> = LazyLock::new(|| {
 pub static SYLLABLE_CANDIDATES: LazyLock<HashMap<String, Vec<String>>> = LazyLock::new(|| {
     let mut m: HashMap<String, Vec<String>> = HashMap::new();
     for tok in SYLLABLE_TO_ID.keys() {
-        if !tok.starts_with('<') {
+        if !tok.starts_with('<') && !PUNCT_TOKENS.contains(&tok.as_str()) {
             let base = crate::rules::strip_accents(&tok.to_lowercase());
             m.entry(base).or_default().push(tok.clone());
         }
@@ -41,5 +43,8 @@ pub fn candidates_for_syllable(base: &str) -> Option<&'static [String]> {
 
 pub fn is_valid_vietnamese_syllable(syl: &str) -> bool {
     let lower = syl.to_lowercase();
+    if PUNCT_TOKENS.contains(&lower.as_str()) {
+        return false;
+    }
     SYLLABLE_TO_ID.contains_key(&lower)
 }

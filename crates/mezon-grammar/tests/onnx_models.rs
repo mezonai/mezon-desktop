@@ -285,3 +285,41 @@ fn test_telecom_voip_call_sentence_restoration() {
     let res3 = client.restore_sentence("to^.i nghiep chu' meo");
     assert_eq!(res3, "Tội nghiệp chú mèo");
 }
+
+#[test]
+fn test_phonotactic_syllable_validation() {
+    for valid_w in ["giúp", "gió", "giỏi", "giọt", "giọng", "quí", "quít"] {
+        assert!(
+            mezon_grammar::is_valid_syllable_vocab(valid_w),
+            "expected {valid_w} to be valid syllable"
+        );
+    }
+}
+
+#[test]
+fn test_lang_filter_vn_uu_preserved() {
+    for vn_w in ["cuu", "luu", "huu", "muu"] {
+        assert!(
+            !mezon_grammar::rules::is_foreign_or_tech_word(vn_w),
+            "expected {vn_w} not to be foreign or tech word"
+        );
+    }
+}
+
+#[test]
+fn test_tach_biet_confusable_and_collocations() {
+    let client = MezonGrammarClient::new();
+    assert!(client.correct("tach biet").corrected.to_lowercase().contains("tách biệt"));
+    assert!(client.correct("dac biet").corrected.to_lowercase().contains("đặc biệt"));
+    assert!(client.correct("khac biet").corrected.to_lowercase().contains("khác biệt"));
+    assert!(client.correct("phan biet").corrected.to_lowercase().contains("phân biệt"));
+}
+
+#[test]
+fn test_split_coda_teencode_space_restoration() {
+    assert_eq!(mezon_grammar::decode_teencode_diacritics("to^. i"), "tội");
+    assert_eq!(mezon_grammar::decode_teencode_diacritics("ba? n"), "bản");
+    assert_eq!(mezon_grammar::decode_teencode_diacritics("ba. n"), "bạn");
+    assert_eq!(mezon_grammar::decode_teencode_diacritics("Bả n"), "Bản");
+    assert_eq!(mezon_grammar::decode_teencode_diacritics("Tộ i"), "Tội");
+}

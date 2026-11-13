@@ -77,12 +77,22 @@ fn find_local_fallback(filename: &str) -> Option<PathBuf> {
 }
 
 fn find_external_fallback(filename: &str) -> Option<PathBuf> {
-    for base in [
-        "../mezon-grammar/weights/nanolm",
-        "../mezon-grammar/weights/tinylm",
-        "/mnt/mezonai/mezon-grammar/weights/nanolm",
-        "/mnt/mezonai/mezon-grammar/weights/tinylm",
-    ] {
+    let search_order: &[&str] = if filename == SYLLABLE_VOCAB_FILE {
+        &[
+            "../mezon-grammar/weights/nanolm",
+            "/mnt/mezonai/mezon-grammar/weights/nanolm",
+            "../mezon-grammar/weights/tinylm",
+            "/mnt/mezonai/mezon-grammar/weights/tinylm",
+        ]
+    } else {
+        &[
+            "../mezon-grammar/weights/tinylm",
+            "/mnt/mezonai/mezon-grammar/weights/tinylm",
+            "../mezon-grammar/weights/nanolm",
+            "/mnt/mezonai/mezon-grammar/weights/nanolm",
+        ]
+    };
+    for base in search_order {
         let p = PathBuf::from(base).join(filename);
         if p.is_file() {
             return Some(p);
