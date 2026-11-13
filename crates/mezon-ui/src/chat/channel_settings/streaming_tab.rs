@@ -475,11 +475,7 @@ impl StreamingTab {
         can_manage: bool,
         entity: Entity<Self>,
     ) -> impl IntoElement {
-        let stream_key = self
-            .result
-            .as_ref()
-            .and_then(|r| r.key.as_ref())
-            .cloned();
+        let stream_key = self.result.as_ref().and_then(|r| r.key.as_ref()).cloned();
         let is_error = self.result.as_ref().is_some_and(|r| r.key.is_none());
         let loading = self.loading_key;
         let revealed = self.revealed;
@@ -875,9 +871,7 @@ impl StreamingTab {
                             Button::new("thumbnail-select")
                                 .large()
                                 .label(self.t("streamThumbnail.buttons.selectFile", cx))
-                                .icon(
-                                    Icon::new(IconName::Camera).text_color(theme.text_primary),
-                                )
+                                .icon(Icon::new(IconName::Camera).text_color(theme.text_primary))
                                 .primary()
                                 .disabled(disabled)
                                 .on_click(cx.listener(|this, _, _, cx| {
@@ -1030,9 +1024,12 @@ impl StreamingTab {
                             .text_color(theme.text_primary),
                     )
                     .child(
-                        Label::new(mezon_i18n::t(locale, "setting.streaming.qualityDescription"))
-                            .text_xs()
-                            .text_color(theme.tokens.text_theme_primary),
+                        Label::new(mezon_i18n::t(
+                            locale,
+                            "setting.streaming.qualityDescription",
+                        ))
+                        .text_xs()
+                        .text_color(theme.tokens.text_theme_primary),
                     ),
             )
             .child(
@@ -1234,15 +1231,13 @@ impl Render for ThumbnailConfirmation {
                                     "streamThumbnail.confirmModal.removeTitle"
                                 },
                             )))
-                            .child(
-                                div().text_sm().text_color(theme.text_muted).child(t(
-                                    if upload {
-                                        "streamThumbnail.confirmModal.uploadDescription"
-                                    } else {
-                                        "streamThumbnail.confirmModal.removeQuestion"
-                                    },
-                                )),
-                            ),
+                            .child(div().text_sm().text_color(theme.text_muted).child(t(
+                                if upload {
+                                    "streamThumbnail.confirmModal.uploadDescription"
+                                } else {
+                                    "streamThumbnail.confirmModal.removeQuestion"
+                                },
+                            ))),
                     )
                     .child(
                         div()
@@ -1276,7 +1271,11 @@ impl Render for ThumbnailConfirmation {
                                 Shell::global(cx).update(cx, |shell, cx| shell.close_modal(cx))
                             }),
                     )
-                    .child(if upload { confirm.primary() } else { confirm.danger() }),
+                    .child(if upload {
+                        confirm.primary()
+                    } else {
+                        confirm.danger()
+                    }),
             )
     }
 }

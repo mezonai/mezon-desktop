@@ -785,6 +785,35 @@ pub struct TokenTransaction {
 }
 
 #[derive(Debug, Clone)]
+pub struct MessageLocation {
+    pub latitude: f64,
+    pub longitude: f64,
+    pub maps_url: SharedString,
+}
+
+fn location_from_content(content: &str) -> Option<MessageLocation> {
+    let parsed = mezon_client::transport::parse_location_from_text(
+        mezon_client::transport::LOCATION_CODE,
+        content,
+    )?;
+    Some(MessageLocation {
+        latitude: parsed.latitude,
+        longitude: parsed.longitude,
+        maps_url: parsed.maps_url.into(),
+    })
+}
+
+pub fn build_message_location(code: MessageCode, content: &str) -> Option<MessageLocation> {
+    if code == MessageCode::Location {
+        return location_from_content(content);
+    }
+    if mezon_client::transport::is_standalone_google_maps_content(content) {
+        return location_from_content(content);
+    }
+    None
+}
+
+#[derive(Debug, Clone)]
 pub struct Message {
     pub id: MessageId,
     /// The bucket this row lives in: a topic's id for a topic reply, the
@@ -820,6 +849,7 @@ pub struct Message {
     pub ogp: Option<Box<OgpPreview>>,
     pub poll: Option<Box<PollData>>,
     pub call_log: Option<CallLog>,
+    pub location: Option<MessageLocation>,
     pub embeds: Arc<[Embed]>,
     pub components: Arc<[MessageComponentRow]>,
     pub is_card: bool,
@@ -2568,6 +2598,7 @@ impl Message {
             ogp: None,
             poll: None,
             call_log: None,
+            location: None,
             embeds: Vec::new().into(),
             components: Vec::new().into(),
             is_card: false,
@@ -2607,6 +2638,14 @@ impl Message {
 
     pub fn is_sent_by(&self, user_id: &str) -> bool {
         !user_id.is_empty() && self.sender_id == user_id
+    }
+
+    pub fn display_location(&self) -> Option<&MessageLocation> {
+        self.location.as_ref()
+    }
+
+    pub fn shows_location_card(&self) -> bool {
+        self.location.is_some()
     }
 
     pub fn message_ref(&self) -> MessageRef {
@@ -2740,6 +2779,11 @@ impl Message {
 
     pub fn with_call_log(mut self, call_log: Option<CallLog>) -> Self {
         self.call_log = call_log;
+        self
+    }
+
+    pub fn with_location(mut self, location: Option<MessageLocation>) -> Self {
+        self.location = location;
         self
     }
 
@@ -4860,6 +4904,25 @@ mod tests {
     #[test]
     fn rich_layout_none_for_empty_spans() {
         assert!(build_rich_layout(&[]).is_none());
+    }
+
+    #[test]
+    fn location_card_is_code_17_or_a_link_only_message() {
+        let link = "https://www.google.com/maps?q=10.5,106.2";
+        let prose = format!("see {link}");
+        assert!(build_message_location(MessageCode::Location, link).is_some());
+        assert!(build_message_location(MessageCode::Chat, link).is_some());
+        assert!(build_message_location(MessageCode::Chat, &prose).is_none());
+        let stored = Message::new(MessageId(1), prose, "1", "a", 0);
+        assert!(stored.display_location().is_none());
+        assert!(!stored.shows_location_card());
+        let card = stored.with_location(build_message_location(MessageCode::Chat, link));
+        let maps_url = mezon_client::transport::build_location_maps_link(10.5, 106.2);
+        assert_eq!(
+            card.display_location()
+                .map(|location| location.maps_url.as_ref()),
+            Some(maps_url.as_str())
+        );
     }
 
     #[test]

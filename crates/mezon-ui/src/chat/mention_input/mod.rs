@@ -51,7 +51,6 @@ use crate::chat::member_list::{
 };
 use crate::chat::message::CreatePollModal;
 use crate::chat::message::MessageBuzzModal;
-use crate::chat::message::ShareLocationModal;
 use crate::chat::role_style::role_fallback_color;
 use crate::components::compositions::channel_row::{channel_type_icon, voice_busy_tag};
 use crate::components::primitives::{Avatar, Icon, IconName, ToastKind};
@@ -1671,32 +1670,11 @@ impl MentionInput {
             })
     }
 
-    fn open_share_location(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.file_menu_open = false;
-        if self.composer_anonymous(cx) {
-            let locale = self.settings.read(cx).language.clone();
-            let message = SharedString::from(mezon_i18n::t(
-                &locale,
-                "common.cannotSendLocationWithAnonymous",
-            ));
-            Shell::global(cx).update(cx, |shell, cx| shell.info(message, cx));
-            cx.notify();
-            return;
-        }
-        let locale = SharedString::from(self.settings.read(cx).language.clone());
-        let for_topic = self.for_topic;
-        window.defer(cx, move |window, cx| {
-            ShareLocationModal::open(locale, for_topic, window, cx);
-        });
-        cx.notify();
-    }
-
     fn render_file_menu(&self, cx: &mut Context<Self>) -> AnyElement {
         let theme = cx.theme().clone();
         let locale = SharedString::from(self.settings.read(cx).language.clone());
         let show_poll =
             !self.for_topic && MessagesStore::global(cx).read(cx).mode() != STREAM_MODE_DM;
-        let show_location = !self.composer_anonymous(cx);
         let text_color = theme.text_muted;
         let text_hover = theme.text_primary;
         let bg_hover = theme.bg_hover;
@@ -1746,38 +1724,6 @@ impl MentionInput {
                     ))
                     .map(|element| Icon::motion_scope(element, true)),
             );
-        if show_location {
-            menu =
-                menu.child(
-                    div()
-                        .id("file-menu-location")
-                        .flex()
-                        .flex_row()
-                        .items_center()
-                        .gap_3()
-                        .px_4()
-                        .py_3()
-                        .rounded_md()
-                        .cursor_pointer()
-                        .text_color(text_color)
-                        .hover(|s| s.bg(bg_hover).text_color(text_hover))
-                        .on_mouse_down(
-                            MouseButton::Left,
-                            cx.listener(|this, _, window, cx| this.open_share_location(window, cx)),
-                        )
-                        .child(
-                            Icon::new(IconName::Location)
-                                .size(px(20.))
-                                .flex_none()
-                                .text_color(text_color)
-                                .hover(|s| s.text_color(text_hover)),
-                        )
-                        .child(div().text_sm().font_weight(FontWeight::MEDIUM).child(
-                            mezon_i18n::t(&locale, "message.attachments.location").to_string(),
-                        ))
-                        .map(|element| Icon::motion_scope(element, true)),
-                );
-        }
         if show_poll {
             menu = menu.child(
                 div()

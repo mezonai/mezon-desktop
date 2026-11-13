@@ -6,7 +6,6 @@ pub mod cli_install;
 pub mod control;
 pub mod deep_link;
 pub mod instance;
-pub mod location;
 pub mod notifications;
 pub mod power;
 #[cfg(not(any(target_os = "macos", target_os = "windows")))]
