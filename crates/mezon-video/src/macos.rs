@@ -608,13 +608,6 @@ impl AvFoundationPlayer {
                 let offset = seconds_to_cm_time(seconds);
                 let _: () = msg_send![item, setConfiguredTimeOffsetFromLive: offset];
             }
-            let has_preserve: BOOL = msg_send![
-                item,
-                respondsToSelector: sel!(setAutomaticallyPreservesTimeOffsetFromLive:)
-            ];
-            if has_preserve != NO {
-                let _: () = msg_send![item, setAutomaticallyPreservesTimeOffsetFromLive: YES];
-            }
         }
     }
 
