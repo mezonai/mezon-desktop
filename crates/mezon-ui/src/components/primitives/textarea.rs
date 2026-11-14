@@ -12,6 +12,7 @@ use unicode_segmentation::UnicodeSegmentation;
 
 use mezon_theme::ActiveTheme;
 use mezon_widgets::blink_manager::{CaretBlink, HasCaretBlink};
+use mezon_widgets::text_edit::{VerticalCaretTarget, caret_index_on_row, vertical_caret_target};
 
 use crate::components::primitives::text_actions::{
     Backspace, Copy, Cut, Delete, DeleteToLineEnd, DeleteToLineStart, DeleteToNextWordEnd,
@@ -394,28 +395,36 @@ impl TextArea {
     }
 
     fn caret_line_target(&self, delta: isize) -> usize {
-        if self.single_line || self.last_lines.len() <= 1 {
+        if self.single_line || self.last_lines.is_empty() {
             return if delta < 0 { 0 } else { self.content.len() };
         }
         let line_height = self.line_height;
         let (line_ix, local) = locate_display_offset(&self.last_lines, self.cursor_offset());
-        let caret_x = self.last_lines[line_ix]
-            .line
-            .position_for_index(local, line_height)
-            .map(|p| p.x)
-            .unwrap_or(Pixels::ZERO);
-        let target_ix = line_ix as isize + delta;
-        if target_ix < 0 {
-            return 0;
+        let doc = &self.last_lines[line_ix];
+        match vertical_caret_target(&doc.line, local, line_height, delta) {
+            VerticalCaretTarget::InLine(ix) => doc.start + ix,
+            VerticalCaretTarget::PreviousLine(x) => {
+                let Some(prev) = line_ix
+                    .checked_sub(1)
+                    .and_then(|ix| self.last_lines.get(ix))
+                else {
+                    return 0;
+                };
+                prev.start
+                    + caret_index_on_row(
+                        &prev.line,
+                        x,
+                        prev.line.wrap_boundaries().len(),
+                        line_height,
+                    )
+            }
+            VerticalCaretTarget::NextLine(x) => {
+                let Some(next) = self.last_lines.get(line_ix + 1) else {
+                    return self.content.len();
+                };
+                next.start + caret_index_on_row(&next.line, x, 0, line_height)
+            }
         }
-        let Some(target) = self.last_lines.get(target_ix as usize) else {
-            return self.content.len();
-        };
-        let local_target = target
-            .line
-            .closest_index_for_position(point(caret_x, px(0.)), line_height)
-            .unwrap_or_else(|ix| ix);
-        target.start + local_target
     }
 
     fn move_caret_line(&mut self, delta: isize, cx: &mut Context<Self>) {

@@ -2,7 +2,7 @@ use std::any::Any;
 use std::ops::Range;
 use std::rc::Rc;
 
-use gpui::SharedString;
+use gpui::{Pixels, SharedString, WrappedLine, point};
 
 const MAX_UNDO_HISTORY: usize = 256;
 const MAX_UNDO_HISTORY_BYTES: usize = 4 * 1024 * 1024;
@@ -124,6 +124,80 @@ pub fn word_range_at(text: &str, offset: usize) -> Range<usize> {
 
 pub fn line_range_at(text: &str, offset: usize) -> Range<usize> {
     line_start(text, offset)..line_end(text, offset)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum VerticalCaretTarget {
+    InLine(usize),
+    PreviousLine(Pixels),
+    NextLine(Pixels),
+}
+
+pub fn vertical_caret_target(
+    line: &WrappedLine,
+    local: usize,
+    line_height: Pixels,
+    delta: isize,
+) -> VerticalCaretTarget {
+    let caret = line
+        .position_for_index(local, line_height)
+        .unwrap_or_default();
+    if line_height <= Pixels::ZERO {
+        return if delta < 0 {
+            VerticalCaretTarget::PreviousLine(caret.x)
+        } else {
+            VerticalCaretTarget::NextLine(caret.x)
+        };
+    }
+    let row = (caret.y / line_height).round() as isize;
+    let target = row + delta;
+    let rows = line.wrap_boundaries().len() as isize + 1;
+    if target < 0 {
+        VerticalCaretTarget::PreviousLine(caret.x)
+    } else if target >= rows {
+        VerticalCaretTarget::NextLine(caret.x)
+    } else {
+        VerticalCaretTarget::InLine(caret_index_on_row(
+            line,
+            caret.x,
+            target as usize,
+            line_height,
+        ))
+    }
+}
+
+fn row_start_index(line: &WrappedLine, row: usize) -> Option<usize> {
+    let boundary = line.wrap_boundaries().get(row.checked_sub(1)?)?;
+    line.runs()
+        .get(boundary.run_ix)?
+        .glyphs
+        .get(boundary.glyph_ix)
+        .map(|glyph| glyph.index)
+}
+
+pub fn caret_index_on_row(line: &WrappedLine, x: Pixels, row: usize, line_height: Pixels) -> usize {
+    if line_height <= Pixels::ZERO {
+        return 0;
+    }
+    let ix = line
+        .closest_index_for_position(point(x, line_height * (row as f32 + 0.5)), line_height)
+        .unwrap_or_else(|ix| ix);
+    if row > 0 && row_start_index(line, row) == Some(ix) {
+        let boundary = line.wrap_boundaries()[row - 1];
+        return line
+            .runs()
+            .get(boundary.run_ix)
+            .and_then(|run| run.glyphs.get(boundary.glyph_ix + 1))
+            .or_else(|| {
+                line.runs()
+                    .get(boundary.run_ix + 1..)
+                    .into_iter()
+                    .flatten()
+                    .find_map(|run| run.glyphs.first())
+            })
+            .map_or(line.len(), |glyph| glyph.index);
+    }
+    ix
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
@@ -887,5 +961,147 @@ mod tests {
             marked_caret_range(prefix.len(), preedit, Some(&(3..3))),
             at_end
         );
+    }
+
+    fn shape_line_for_test(
+        cx: &mut gpui::TestAppContext,
+        text: &str,
+        wrap_width: Option<Pixels>,
+    ) -> WrappedLine {
+        let cx = cx.add_empty_window();
+        cx.update(|window, _cx| {
+            let run = gpui::TextRun {
+                len: text.len(),
+                font: gpui::font(".SystemUIFont"),
+                color: gpui::Hsla::default(),
+                background_color: None,
+                underline: None,
+                strikethrough: None,
+            };
+            let mut lines = window
+                .text_system()
+                .shape_text(
+                    SharedString::new(text),
+                    gpui::px(10.),
+                    &[run],
+                    wrap_width,
+                    None,
+                )
+                .unwrap();
+            assert_eq!(lines.len(), 1);
+            lines.pop().unwrap()
+        })
+    }
+
+    fn three_row_wrapped_line(cx: &mut gpui::TestAppContext) -> WrappedLine {
+        let line = shape_line_for_test(cx, "aaaa bbbb cccc", Some(gpui::px(32.)));
+        assert_eq!(line.wrap_boundaries().len(), 2);
+        line
+    }
+
+    fn painted_row(line: &WrappedLine, ix: usize, line_height: Pixels) -> usize {
+        (line.position_for_index(ix, line_height).unwrap().y / line_height).round() as usize
+    }
+
+    #[gpui::test]
+    fn vertical_caret_target_steps_up_across_three_wrapped_rows(cx: &mut gpui::TestAppContext) {
+        let line = three_row_wrapped_line(cx);
+        let lh = gpui::px(20.);
+        assert_eq!(painted_row(&line, line.len(), lh), 2);
+        let VerticalCaretTarget::InLine(ix1) = vertical_caret_target(&line, line.len(), lh, -1)
+        else {
+            panic!("expected InLine");
+        };
+        assert_eq!(painted_row(&line, ix1, lh), 1);
+        let VerticalCaretTarget::InLine(ix0) = vertical_caret_target(&line, ix1, lh, -1) else {
+            panic!("expected InLine");
+        };
+        assert_eq!(painted_row(&line, ix0, lh), 0);
+        assert!(matches!(
+            vertical_caret_target(&line, ix0, lh, -1),
+            VerticalCaretTarget::PreviousLine(_)
+        ));
+    }
+
+    #[gpui::test]
+    fn vertical_caret_target_steps_down_across_three_wrapped_rows(cx: &mut gpui::TestAppContext) {
+        let line = three_row_wrapped_line(cx);
+        let lh = gpui::px(20.);
+        assert_eq!(painted_row(&line, 2, lh), 0);
+        let VerticalCaretTarget::InLine(ix1) = vertical_caret_target(&line, 2, lh, 1) else {
+            panic!("expected InLine");
+        };
+        assert_eq!(painted_row(&line, ix1, lh), 1);
+        let VerticalCaretTarget::InLine(ix2) = vertical_caret_target(&line, ix1, lh, 1) else {
+            panic!("expected InLine");
+        };
+        assert_eq!(painted_row(&line, ix2, lh), 2);
+        assert!(matches!(
+            vertical_caret_target(&line, ix2, lh, 1),
+            VerticalCaretTarget::NextLine(_)
+        ));
+    }
+
+    #[gpui::test]
+    fn vertical_caret_target_down_from_index_zero_lands_on_row_one_not_wrap_boundary(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let line = three_row_wrapped_line(cx);
+        let lh = gpui::px(20.);
+        let b0 = row_start_index(&line, 1).unwrap();
+        assert_eq!(painted_row(&line, 0, lh), 0);
+        let VerticalCaretTarget::InLine(ix1) = vertical_caret_target(&line, 0, lh, 1) else {
+            panic!("expected InLine");
+        };
+        assert_ne!(ix1, b0);
+        assert_eq!(painted_row(&line, ix1, lh), 1);
+        let VerticalCaretTarget::InLine(ix2) = vertical_caret_target(&line, ix1, lh, 1) else {
+            panic!("expected InLine");
+        };
+        assert_eq!(painted_row(&line, ix2, lh), 2);
+        assert!(matches!(
+            vertical_caret_target(&line, ix2, lh, 1),
+            VerticalCaretTarget::NextLine(_)
+        ));
+    }
+
+    #[gpui::test]
+    fn vertical_caret_target_preserves_horizontal_column(cx: &mut gpui::TestAppContext) {
+        let line = three_row_wrapped_line(cx);
+        let lh = gpui::px(20.);
+        let start = 12;
+        assert_eq!(painted_row(&line, start, lh), 2);
+        let x_before = line.position_for_index(start, lh).unwrap().x;
+        let VerticalCaretTarget::InLine(ix1) = vertical_caret_target(&line, start, lh, -1) else {
+            panic!("expected InLine");
+        };
+        assert_eq!(painted_row(&line, ix1, lh), 1);
+        let x_after = line.position_for_index(ix1, lh).unwrap().x;
+        assert!((x_after - x_before).abs() <= gpui::px(6.));
+    }
+
+    #[gpui::test]
+    fn vertical_caret_target_on_single_row_line_steps_to_adjacent_lines(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let line = shape_line_for_test(cx, "aaaa bbbb", None);
+        let lh = gpui::px(20.);
+        assert!(line.wrap_boundaries().is_empty());
+        assert!(matches!(
+            vertical_caret_target(&line, 3, lh, -1),
+            VerticalCaretTarget::PreviousLine(_)
+        ));
+        assert!(matches!(
+            vertical_caret_target(&line, 3, lh, 1),
+            VerticalCaretTarget::NextLine(_)
+        ));
+    }
+
+    #[gpui::test]
+    fn caret_index_on_row_clamps_x_past_row_end_onto_that_row(cx: &mut gpui::TestAppContext) {
+        let line = three_row_wrapped_line(cx);
+        let lh = gpui::px(20.);
+        let ix = caret_index_on_row(&line, gpui::px(500.), 1, lh);
+        assert_eq!(painted_row(&line, ix, lh), 1);
     }
 }

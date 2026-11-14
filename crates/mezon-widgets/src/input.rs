@@ -24,12 +24,12 @@ use crate::text_actions::{
     TEXT_INPUT_CONTEXT, Undo, Up,
 };
 use crate::text_edit::{
-    HistoryEntry, SelectGranularity, ceil_char_boundary, clip_insert_to_byte_limit,
-    clipped_edit_is_rejected, extend_range_for_granularity, floor_char_boundary,
-    granularity_for_click, home_target, ime_replace_range, line_end, line_start,
-    marked_caret_range, marked_range_after_delete, next_word_boundary, previous_word_boundary,
-    push_undo_entry, range_for_granularity, splice_out_byte_range, surrounding_delete_range,
-    swallow_discarded_ime_commit,
+    HistoryEntry, SelectGranularity, VerticalCaretTarget, caret_index_on_row, ceil_char_boundary,
+    clip_insert_to_byte_limit, clipped_edit_is_rejected, extend_range_for_granularity,
+    floor_char_boundary, granularity_for_click, home_target, ime_replace_range, line_end,
+    line_start, marked_caret_range, marked_range_after_delete, next_word_boundary,
+    previous_word_boundary, push_undo_entry, range_for_granularity, splice_out_byte_range,
+    surrounding_delete_range, swallow_discarded_ime_commit, vertical_caret_target,
 };
 
 const MASK: char = '\u{2022}';
@@ -402,7 +402,7 @@ impl InputState {
     }
 
     fn caret_line_target(&self, delta: isize) -> usize {
-        if !self.multi_line || self.last_lines.len() <= 1 || self.line_height <= Pixels::ZERO {
+        if !self.multi_line || self.last_lines.is_empty() || self.line_height <= Pixels::ZERO {
             return if delta < 0 { 0 } else { self.content.len() };
         }
         let line_height = self.line_height;
@@ -415,23 +415,32 @@ impl InputState {
             .find(|(_, line)| line.start <= display_offset)
             .map(|(ix, line)| (ix, display_offset - line.start))
             .unwrap_or((0, 0));
-        let caret_x = self.last_lines[line_ix]
-            .line
-            .position_for_index(local, line_height)
-            .map(|position| position.x)
-            .unwrap_or(Pixels::ZERO);
-        let target_ix = line_ix as isize + delta;
-        if target_ix < 0 {
-            return 0;
-        }
-        let Some(target) = self.last_lines.get(target_ix as usize) else {
-            return self.content.len();
+        let doc = &self.last_lines[line_ix];
+        let display_target = match vertical_caret_target(&doc.line, local, line_height, delta) {
+            VerticalCaretTarget::InLine(ix) => doc.start + ix,
+            VerticalCaretTarget::PreviousLine(x) => {
+                let Some(prev) = line_ix
+                    .checked_sub(1)
+                    .and_then(|ix| self.last_lines.get(ix))
+                else {
+                    return 0;
+                };
+                prev.start
+                    + caret_index_on_row(
+                        &prev.line,
+                        x,
+                        prev.line.wrap_boundaries().len(),
+                        line_height,
+                    )
+            }
+            VerticalCaretTarget::NextLine(x) => {
+                let Some(next) = self.last_lines.get(line_ix + 1) else {
+                    return self.content.len();
+                };
+                next.start + caret_index_on_row(&next.line, x, 0, line_height)
+            }
         };
-        let local_target = target
-            .line
-            .closest_index_for_position(point(caret_x, px(0.)), line_height)
-            .unwrap_or_else(|ix| ix);
-        self.display_to_content_offset(target.start + local_target)
+        self.display_to_content_offset(display_target)
     }
 
     fn up(&mut self, _: &Up, _: &mut Window, cx: &mut Context<Self>) {
