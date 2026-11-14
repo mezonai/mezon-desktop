@@ -5,10 +5,10 @@ use gpui::Size as GpuiSize;
 use gpui::http_client::HttpClient;
 use gpui::{
     App, AppContext, BackgroundExecutor, Bounds, Context, Corners, DisplayId, Entity, FocusHandle,
-    Focusable, ImageCache, KeyDownEvent, MouseButton, MouseDownEvent, MouseMoveEvent, ObjectFit,
-    Pixels, Point, Render, RenderImage, Resource, ScrollDelta, ScrollWheelEvent, SharedString,
-    SharedUri, Subscription, UniformListScrollHandle, Window, WindowBounds, WindowHandle,
-    WindowOptions, canvas, div, img, point, prelude::*, px, relative, size, uniform_list,
+    Focusable, ImageCache, KeyDownEvent, ListAlignment, ListOffset, ListState, MouseButton,
+    MouseDownEvent, MouseMoveEvent, ObjectFit, Pixels, Point, Render, RenderImage, Resource,
+    ScrollDelta, ScrollWheelEvent, SharedString, SharedUri, Subscription, Window, WindowBounds,
+    WindowHandle, WindowOptions, canvas, div, img, list, point, prelude::*, px, size,
 };
 use mezon_store::{
     AppConfig, ChannelAttachment, ChannelId, ChannelList, ClanId, DirectMessageStore, GalleryStore,
@@ -37,8 +37,10 @@ use crate::theme::{ActiveTheme, Theme};
 const MIN_ZOOM: f32 = 1.0;
 const MAX_ZOOM: f32 = 5.0;
 const ZOOM_STEP: f32 = 0.25;
-const THUMB_ROW_HEIGHT: f32 = 72.0;
-const SIDEBAR_WIDTH: f32 = 96.0;
+const THUMB_W: f32 = 120.0;
+const THUMB_H: f32 = 90.0;
+const SIDEBAR_WIDTH: f32 = 140.0;
+const THUMB_LIST_OVERDRAW: f32 = 300.0;
 const THUMB_SCROLLBAR_GUTTER: f32 = 14.0;
 const VIEWER_FETCH_LIMIT: i32 = 100;
 const VIEWER_SEEK_MAX_PAGES: usize = 20;
@@ -52,6 +54,17 @@ fn index_of_url(attachments: &[ChannelAttachment], url: &str) -> Option<usize> {
     attachments
         .iter()
         .position(|a| attachment_matches_url(a, url))
+}
+
+fn thumb_date_label(create_time_seconds: u32) -> SharedString {
+    chrono::DateTime::from_timestamp(create_time_seconds as i64, 0)
+        .map(|dt| {
+            dt.with_timezone(&chrono::Local)
+                .format("%d/%m/%Y")
+                .to_string()
+        })
+        .unwrap_or_default()
+        .into()
 }
 
 fn sort_attachments_desc(attachments: &mut [ChannelAttachment]) {
@@ -248,7 +261,9 @@ pub struct ImageViewer {
     rotation_loading: bool,
     image_cache: Entity<LruImageCache>,
     thumb_image_cache: Entity<LruImageCache>,
-    list_scroll: UniformListScrollHandle,
+    list_state: ListState,
+    list_urls: Vec<String>,
+    thumb_scroll_armed: bool,
     pending_thumb_scroll: bool,
     active_video: Option<Entity<VideoPlayerView>>,
     active_video_url: Option<String>,
@@ -339,7 +354,10 @@ impl ImageViewer {
             rotation_loading: false,
             image_cache,
             thumb_image_cache,
-            list_scroll: UniformListScrollHandle::new(),
+            list_state: ListState::new(0, ListAlignment::Top, px(THUMB_LIST_OVERDRAW))
+                .measure_all(),
+            list_urls: Vec::new(),
+            thumb_scroll_armed: false,
             pending_thumb_scroll: false,
             active_video: None,
             active_video_url: None,
@@ -547,6 +565,44 @@ impl ImageViewer {
 
     fn current(&self) -> Option<&ChannelAttachment> {
         self.attachments.get(self.index)
+    }
+
+    fn display_row(&self, index: usize) -> Option<usize> {
+        self.attachments.len().checked_sub(index + 1)
+    }
+
+    fn sync_thumb_list(&mut self) -> bool {
+        let count = self.attachments.len();
+        let unchanged = self.list_urls.len() == count
+            && self.list_state.item_count() == count
+            && self.list_urls.first().map(String::as_str)
+                == self.attachments.first().map(|a| a.url.as_str())
+            && self.list_urls.last().map(String::as_str)
+                == self.attachments.last().map(|a| a.url.as_str());
+        if unchanged {
+            return false;
+        }
+        let old_len = self.list_urls.len();
+        let anchor = if old_len > 0 && !self.pending_thumb_scroll {
+            let top = self.list_state.logical_scroll_top();
+            old_len
+                .checked_sub(top.item_ix + 1)
+                .and_then(|i| self.list_urls.get(i))
+                .map(|url| (url.clone(), top.offset_in_item))
+        } else {
+            None
+        };
+        self.list_state.reset(count);
+        self.list_urls = self.attachments.iter().map(|a| a.url.clone()).collect();
+        if let Some((url, offset_in_item)) = anchor
+            && let Some(i) = self.attachments.iter().position(|a| a.url == url)
+        {
+            self.list_state.scroll_to(ListOffset {
+                item_ix: count - 1 - i,
+                offset_in_item,
+            });
+        }
+        true
     }
 
     fn fetch_initial(
@@ -833,8 +889,9 @@ impl ImageViewer {
         if self.index <= LOAD_MORE_THRESHOLD {
             self.fetch_newer(cx);
         }
-        self.list_scroll
-            .scroll_to_item(self.index, gpui::ScrollStrategy::Center);
+        if let Some(row) = self.display_row(self.index) {
+            self.list_state.scroll_to_center_item(row);
+        }
         self.pending_thumb_scroll = false;
         cx.notify();
     }
@@ -943,8 +1000,8 @@ impl ImageViewer {
                     self.close_window(window, cx);
                 }
             }
-            "left" | "up" => self.prev(window, cx),
-            "right" | "down" => self.next(window, cx),
+            "left" | "up" => self.next(window, cx),
+            "right" | "down" => self.prev(window, cx),
             "+" | "=" => self.set_zoom(self.zoom + ZOOM_STEP, cx),
             "-" | "_" => self.set_zoom(self.zoom - ZOOM_STEP, cx),
             "0" => self.reset_zoom(cx),
@@ -1086,10 +1143,20 @@ impl Render for ImageViewer {
                 .update(cx, |cache, cx| cache.sweep_once_per_frame(window, cx));
             self.schedule_video_player_sync(window, cx);
         }
+        if self.sync_thumb_list() {
+            self.thumb_scroll_armed = false;
+        }
         if self.pending_thumb_scroll && self.show_thumbnails && !self.attachments.is_empty() {
-            self.list_scroll
-                .scroll_to_item(self.index, gpui::ScrollStrategy::Center);
-            self.pending_thumb_scroll = false;
+            if self.thumb_scroll_armed {
+                if let Some(row) = self.display_row(self.index) {
+                    self.list_state.scroll_to_center_item(row);
+                }
+                self.pending_thumb_scroll = false;
+                self.thumb_scroll_armed = false;
+            } else {
+                self.thumb_scroll_armed = true;
+                window.request_animation_frame();
+            }
         }
         let theme = cx.theme().clone();
         let locale = self.locale(cx);
@@ -1190,8 +1257,8 @@ impl ImageViewer {
             div().size_full().into_any_element()
         };
 
-        let can_prev = self.index > 0;
-        let can_next = self.index + 1 < self.attachments.len();
+        let can_older = self.index + 1 < self.attachments.len();
+        let can_newer = self.index > 0;
 
         div()
             .relative()
@@ -1204,25 +1271,39 @@ impl ImageViewer {
             .justify_center()
             .image_cache(self.image_cache.clone())
             .child(content)
-            .when(can_prev, |el| {
+            .when(!self.attachments.is_empty(), |el| {
                 el.child(
-                    nav_button(IconName::ChevronLeft, theme, true).on_mouse_down(
-                        MouseButton::Left,
-                        cx.listener(|this, _: &MouseDownEvent, window, cx| this.prev(window, cx)),
-                    ),
-                )
-            })
-            .when(can_next, |el| {
-                el.child(
-                    nav_button(IconName::ChevronRight, theme, false).on_mouse_down(
-                        MouseButton::Left,
-                        cx.listener(|this, _: &MouseDownEvent, window, cx| this.next(window, cx)),
-                    ),
+                    div()
+                        .absolute()
+                        .top_0()
+                        .bottom_0()
+                        .right(px(8.))
+                        .flex()
+                        .flex_col()
+                        .justify_center()
+                        .gap_2()
+                        .child(
+                            nav_button("viewer-older", IconName::ChevronUp, theme, can_older)
+                                .on_mouse_down(
+                                    MouseButton::Left,
+                                    cx.listener(|this, _: &MouseDownEvent, window, cx| {
+                                        this.next(window, cx)
+                                    }),
+                                ),
+                        )
+                        .child(
+                            nav_button("viewer-newer", IconName::ChevronDown, theme, can_newer)
+                                .on_mouse_down(
+                                    MouseButton::Left,
+                                    cx.listener(|this, _: &MouseDownEvent, window, cx| {
+                                        this.prev(window, cx)
+                                    }),
+                                ),
+                        ),
                 )
             })
     }
 
-    /// Render an animated GIF by playing the original file frame-by-frame.
     fn render_animated_image(&self, att: &ChannelAttachment) -> gpui::AnyElement {
         let url = SharedUri::from(&att.url);
         div()
@@ -1370,85 +1451,107 @@ impl ImageViewer {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
-        let count = self.attachments.len();
         let entity = cx.entity();
-        let active = self.index;
         let border = theme.border;
         let brand = theme.brand;
         let bg_tertiary = theme.bg_tertiary;
         let placeholder_bg = theme.bg_tertiary;
         let placeholder_muted = theme.text_muted;
+        let date_color = theme.text_primary;
         let sidebar_bg = theme.bg_secondary;
 
-        let list = uniform_list("viewer-thumbnails", count, move |range, _window, cx| {
-            range
-                .map(|ix| {
-                    let info =
-                        entity.read(cx).attachments.get(ix).map(|att| {
-                            (att.is_video, SharedUri::from(att.viewer_thumb_src.as_ref()))
-                        });
-                    let Some((is_video, src)) = info else {
-                        return div().into_any_element();
-                    };
-                    let is_active = ix == active;
-                    let ph_bg = placeholder_bg;
-                    let ph_muted = placeholder_muted;
-                    div()
-                        .id(("viewer-thumb", ix))
-                        .h(px(THUMB_ROW_HEIGHT))
-                        .w_full()
-                        .p_1()
-                        .child(
-                            div()
-                                .size_full()
-                                .rounded(px(6.))
-                                .overflow_hidden()
-                                .border_2()
-                                .border_color(if is_active { brand } else { gpui::rgba(0) })
-                                .relative()
-                                .when(is_video, |el| {
-                                    el.child(
-                                        div().size_full().bg(bg_tertiary).child(
-                                            div()
-                                                .absolute()
-                                                .inset_0()
-                                                .flex()
-                                                .items_center()
-                                                .justify_center()
-                                                .child(
-                                                    Icon::new(IconName::Play)
-                                                        .size(px(16.))
-                                                        .text_color(gpui::white()),
-                                                ),
-                                        ),
-                                    )
-                                })
-                                .when(!is_video, |el| {
-                                    el.child(
-                                        img(src)
-                                            .size_full()
-                                            .object_fit(ObjectFit::Cover)
-                                            .id(("viewer-thumb-img", ix))
-                                            .with_loading(move || {
-                                                viewer_thumb_placeholder(ph_bg, ph_muted)
-                                            })
-                                            .with_fallback(move || {
-                                                viewer_thumb_placeholder(ph_bg, ph_muted)
-                                            }),
-                                    )
-                                }),
-                        )
-                        .on_mouse_down(MouseButton::Left, {
-                            let entity = entity.clone();
-                            move |_: &MouseDownEvent, window, cx| {
-                                entity.update(cx, |this, cx| this.go_to(ix, window, cx));
-                            }
-                        })
-                        .into_any_element()
+        let thumbs = list(self.list_state.clone(), move |row, _window, cx| {
+            let this = entity.read(cx);
+            let Some(ix) = this.attachments.len().checked_sub(row + 1) else {
+                return div().into_any_element();
+            };
+            let Some(att) = this.attachments.get(ix) else {
+                return div().into_any_element();
+            };
+            let is_video = att.is_video;
+            let src = SharedUri::from(att.viewer_thumb_src.as_ref());
+            let show_date = ix == 0
+                || this
+                    .attachments
+                    .get(ix - 1)
+                    .is_none_or(|newer| newer.day_index != att.day_index);
+            let date_label = show_date.then(|| thumb_date_label(att.create_time_seconds));
+            let is_active = ix == this.index;
+            let ph_bg = placeholder_bg;
+            let ph_muted = placeholder_muted;
+
+            let thumb = div()
+                .id(("viewer-thumb", ix))
+                .relative()
+                .w(px(THUMB_W + 4.))
+                .h(px(THUMB_H + 4.))
+                .rounded(px(6.))
+                .overflow_hidden()
+                .border_2()
+                .border_color(if is_active { brand } else { gpui::rgba(0) })
+                .cursor_pointer()
+                .when(is_video, |el| {
+                    el.child(
+                        div()
+                            .size_full()
+                            .rounded(px(4.))
+                            .bg(bg_tertiary)
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .child(
+                                Icon::new(IconName::Play)
+                                    .size(px(16.))
+                                    .text_color(gpui::white()),
+                            ),
+                    )
                 })
-                .collect::<Vec<_>>()
+                .when(!is_video, |el| {
+                    el.child(
+                        img(src)
+                            .size_full()
+                            .rounded(px(4.))
+                            .object_fit(ObjectFit::Cover)
+                            .id(("viewer-thumb-img", ix))
+                            .with_loading(move || viewer_thumb_placeholder(ph_bg, ph_muted))
+                            .with_fallback(move || viewer_thumb_placeholder(ph_bg, ph_muted)),
+                    )
+                })
+                .when(!is_active, |el| {
+                    el.child(
+                        div()
+                            .absolute()
+                            .inset_0()
+                            .rounded(px(4.))
+                            .bg(gpui::hsla(0., 0., 0., 0.3)),
+                    )
+                })
+                .on_mouse_down(MouseButton::Left, {
+                    let entity = entity.clone();
+                    move |_: &MouseDownEvent, window, cx| {
+                        entity.update(cx, |this, cx| this.go_to(ix, window, cx));
+                    }
+                });
+
+            div()
+                .w_full()
+                .py(px(2.))
+                .flex()
+                .flex_col()
+                .items_center()
+                .child(thumb)
+                .when_some(date_label, |el, label| {
+                    el.child(
+                        div()
+                            .mt_1()
+                            .mb_1()
+                            .text_size(px(13.))
+                            .text_color(date_color)
+                            .child(label),
+                    )
+                })
+                .into_any_element()
         })
-        .track_scroll(&self.list_scroll)
         .w_full()
         .flex_1()
         .h_full()
@@ -1472,10 +1575,10 @@ impl ImageViewer {
                     .relative()
                     .overflow_hidden()
                     .image_cache(self.thumb_image_cache.clone())
-                    .child(list)
+                    .child(thumbs)
                     .custom_scrollbars(
                         Scrollbars::always_visible(ScrollAxes::Vertical)
-                            .tracked_scroll_handle(&self.list_scroll)
+                            .tracked_scroll_handle(&self.list_state)
                             .with_stable_track_along(
                                 ScrollAxes::Vertical,
                                 gpui::Hsla::from(sidebar_bg),
@@ -1699,21 +1802,25 @@ impl ImageViewer {
     }
 }
 
-fn nav_button(icon: IconName, theme: &Theme, left: bool) -> gpui::Stateful<gpui::Div> {
+fn nav_button(
+    id: &'static str,
+    icon: IconName,
+    theme: &Theme,
+    enabled: bool,
+) -> gpui::Stateful<gpui::Div> {
     div()
-        .id(if left { "viewer-prev" } else { "viewer-next" })
-        .absolute()
-        .top(relative(0.5))
-        .when(left, |el| el.left(px(16.)))
-        .when(!left, |el| el.right(px(16.)))
+        .id(id)
         .size(px(40.))
         .flex()
         .items_center()
         .justify_center()
         .rounded_full()
         .bg(gpui::hsla(0., 0., 0., 0.5))
-        .cursor_pointer()
-        .hover(|el| el.bg(gpui::hsla(0., 0., 0., 0.7)))
+        .when(enabled, |el| {
+            el.cursor_pointer()
+                .hover(|el| el.bg(gpui::hsla(0., 0., 0., 0.7)))
+        })
+        .when(!enabled, |el| el.opacity(0.4))
         .child(Icon::new(icon).size(px(20.)).text_color(theme.text_primary))
 }
 
