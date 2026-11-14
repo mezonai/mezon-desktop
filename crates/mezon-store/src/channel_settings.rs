@@ -544,6 +544,9 @@ impl ChannelSettingsStore {
         cx: &mut Context<Self>,
     ) {
         let key = (clan_id, parent_id);
+        if !self.rows.contains_key(&key) && !self.loading.contains(&key) {
+            return;
+        }
         let channel_id = restored.id;
         self.pending_restored_rows
             .entry(key)
