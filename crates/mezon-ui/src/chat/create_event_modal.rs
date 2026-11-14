@@ -1185,6 +1185,7 @@ impl CreateEventModal {
             .flex()
             .items_center()
             .justify_between()
+            .gap_3()
             .when(enabled, |option| {
                 option
                     .cursor_pointer()
@@ -1198,16 +1199,22 @@ impl CreateEventModal {
             .when(!enabled, |option| option.cursor_not_allowed().opacity(0.5))
             .child(
                 div()
+                    .flex_1()
+                    .min_w_0()
                     .flex()
                     .items_center()
                     .gap_3()
                     .child(
-                        Icon::new(icon)
-                            .size(px(23.))
-                            .text_color(theme.tokens.text_secondary),
+                        div().flex_shrink_0().child(
+                            Icon::new(icon)
+                                .size(px(23.))
+                                .text_color(theme.tokens.text_secondary),
+                        ),
                     )
                     .child(
                         div()
+                            .flex_1()
+                            .min_w_0()
                             .child(
                                 div()
                                     .font_weight(FontWeight::SEMIBOLD)
@@ -1223,6 +1230,7 @@ impl CreateEventModal {
             )
             .child(
                 div()
+                    .flex_shrink_0()
                     .size(px(14.))
                     .rounded_full()
                     .border_2()
@@ -1370,6 +1378,47 @@ impl CreateEventModal {
             )
             .when(self.location_kind == Some(LocationKind::Voice), |d| {
                 d.child(div().mt_3().child(self.voice_select.clone()))
+                    .when_some(private_voice_channel, |d, (_, name, _)| {
+                        let tip =
+                            self.tr("eventCreator.fields.VoiceChannel.privateAudienceTip", cx);
+                        let (before, after) =
+                            tip.split_once("{{channelName}}").unwrap_or((&tip, ""));
+                        d.child(
+                            div()
+                                .id("private-voice-audience-tip")
+                                .mt_2()
+                                .flex()
+                                .flex_wrap()
+                                .items_center()
+                                .gap_x_1()
+                                .text_size(px(12.))
+                                .text_color(theme.text_secondary)
+                                .children(
+                                    before
+                                        .split_whitespace()
+                                        .map(|word| div().max_w_full().child(word.to_string())),
+                                )
+                                .child(
+                                    div()
+                                        .flex()
+                                        .items_center()
+                                        .gap_1()
+                                        .min_w_0()
+                                        .max_w_full()
+                                        .child(
+                                            Icon::new(IconName::SpeakerLock)
+                                                .size(px(16.))
+                                                .text_color(theme.brand),
+                                        )
+                                        .child(
+                                            div()
+                                                .min_w_0()
+                                                .text_color(theme.brand)
+                                                .child(format!("{name}{after}")),
+                                        ),
+                                ),
+                        )
+                    })
             })
             .when(self.location_kind == Some(LocationKind::Somewhere), |d| {
                 let count = self.address.read(cx).value().chars().count();
@@ -1434,66 +1483,28 @@ impl CreateEventModal {
                             ),
                     )
                     .child(self.audience_select.clone())
-                    .when(self.audience_select.read(cx).selected().is_some(), |d| {
-                        d.child(
-                            div()
-                                .id("clear-event-audience")
-                                .mt_1()
-                                .flex()
-                                .justify_end()
-                                .text_size(px(13.))
-                                .text_color(theme.brand)
-                                .cursor_pointer()
-                                .hover(|style| style.underline())
-                                .on_click(cx.listener(|this, _, _, cx| {
-                                    this.audience_select
-                                        .update(cx, |select, cx| select.set_selected(None, cx));
-                                    cx.notify();
-                                }))
-                                .child(self.tr("eventCreator.actions.clearAudiences", cx)),
-                        )
-                    })
-                    .when_some(private_voice_channel, |d, (_, name, _)| {
-                        let tip =
-                            self.tr("eventCreator.fields.VoiceChannel.privateAudienceTip", cx);
-                        let (before, after) =
-                            tip.split_once("{{channelName}}").unwrap_or((&tip, ""));
-                        d.child(
-                            div()
-                                .id("private-voice-audience-tip")
-                                .mt_2()
-                                .flex()
-                                .flex_wrap()
-                                .items_center()
-                                .gap_x_1()
-                                .text_size(px(12.))
-                                .text_color(theme.text_secondary)
-                                .children(
-                                    before
-                                        .split_whitespace()
-                                        .map(|word| div().max_w_full().child(word.to_string())),
-                                )
-                                .child(
-                                    div()
-                                        .flex()
-                                        .items_center()
-                                        .gap_1()
-                                        .min_w_0()
-                                        .max_w_full()
-                                        .child(
-                                            Icon::new(IconName::SpeakerLock)
-                                                .size(px(16.))
-                                                .text_color(theme.brand),
-                                        )
-                                        .child(
-                                            div()
-                                                .min_w_0()
-                                                .text_color(theme.brand)
-                                                .child(format!("{name}{after}")),
-                                        ),
-                                ),
-                        )
-                    })
+                    .when(
+                        self.audience_select.read(cx).selected().is_some(),
+                        |d| {
+                            d.child(
+                                div()
+                                    .id("clear-event-audience")
+                                    .mt_1()
+                                    .flex()
+                                    .justify_end()
+                                    .text_size(px(13.))
+                                    .text_color(theme.brand)
+                                    .cursor_pointer()
+                                    .hover(|style| style.underline())
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.audience_select
+                                            .update(cx, |select, cx| select.set_selected(None, cx));
+                                        cx.notify();
+                                    }))
+                                    .child(self.tr("eventCreator.actions.clearAudiences", cx)),
+                            )
+                        },
+                    )
                 },
             )
             .into_any_element()

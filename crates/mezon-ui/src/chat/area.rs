@@ -857,7 +857,7 @@ fn latest_activity_strip(
                 .items_center()
                 .justify_center()
                 .size(px(28.))
-                .child(Icon::new(IconName::Topic).size(px(24.)).selected(true))
+                .child(Icon::new(IconName::Topic).size(px(20.)).selected(true))
                 .when(topic_unread, |icon| {
                     icon.child(unread_dot().absolute().top_0().right_0())
                 }),
@@ -1162,7 +1162,7 @@ fn latest_activity_strip(
         mezon_i18n::t(locale, "chat.activityStrip.hideAction").into();
     let dismiss_locale = locale.to_string();
     let dismiss_button = Button::new("hide-channel-activity-strip")
-        .icon(Icon::new(IconName::PinOff).size(px(24.)).selected(false))
+        .icon(Icon::new(IconName::PinOff).size(px(20.)).selected(false))
         .with_size(Size::Small)
         .ghost()
         .on_click(move |_, window, cx| {
