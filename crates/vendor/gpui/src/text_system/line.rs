@@ -114,6 +114,9 @@ impl ShapedLine {
         window: &mut Window,
         cx: &mut App,
     ) -> Result<()> {
+        if !has_background(&self.decoration_runs) {
+            return Ok(());
+        }
         paint_line_background(
             origin,
             &self.layout,
@@ -315,6 +318,9 @@ impl WrappedLine {
             None => self.layout.wrap_width,
         };
 
+        if !has_background(&self.decoration_runs) {
+            return Ok(());
+        }
         paint_line_background(
             origin,
             &self.layout.unwrapped_layout,
@@ -575,6 +581,12 @@ fn paint_line(
 
         Ok(())
     })
+}
+
+fn has_background(decoration_runs: &[DecorationRun]) -> bool {
+    decoration_runs
+        .iter()
+        .any(|run| run.background_color.is_some())
 }
 
 fn paint_line_background(
