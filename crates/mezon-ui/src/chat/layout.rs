@@ -2162,9 +2162,10 @@ impl ChatLayout {
         let channel_key = channel_id.to_string();
         let threads = ThreadsStore::global(cx).read(cx);
         let known_active = threads.thread_active(&channel_key);
-        let private =
-            private.or_else(|| threads.thread_channel_private(&channel_key).map(|p| p != 0));
-        if known_active.is_none() {
+        let supplied_private = private;
+        let private = supplied_private
+            .or_else(|| threads.thread_channel_private(&channel_key).map(|p| p != 0));
+        if known_active.is_none() && supplied_private.is_none() {
             self.channel_list.update(cx, |list, cx| {
                 if list.channel_in_clan(clan_id, channel_id) {
                     list.refresh_thread_active_from_server(clan_id, channel_id, cx);
