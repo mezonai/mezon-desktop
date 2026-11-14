@@ -10,6 +10,11 @@ pub type CloseHandler = Arc<dyn Fn(bool) + Send + Sync>;
 
 pub type ErrorHandler = Arc<dyn Fn(String) + Send + Sync>;
 
+/// The connection closed before the adapter could enqueue the message.
+#[derive(Debug, thiserror::Error)]
+#[error("{0}")]
+pub(crate) struct SocketUnavailable(pub(crate) &'static str);
+
 #[async_trait]
 pub trait TransportAdapter: Send + Sync {
     async fn connect(&self, host: &str, port: u16, token: &str) -> Result<()>;

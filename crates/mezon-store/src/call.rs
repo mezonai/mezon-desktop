@@ -156,6 +156,7 @@ pub struct CallStore {
     generation: u64,
     pending_remote_ice: Vec<IcePayload>,
     pending_local_ice: Vec<IcePayload>,
+    initial_answer_pending: bool,
     known_peer_sessions: VecDeque<KnownPeerSession>,
     early_remote_status: Option<EarlyRemoteStatus>,
     render_cache: Mutex<HashMap<u64, CachedRenderFrame>>,
@@ -165,6 +166,8 @@ pub struct CallStore {
     _events_task: Option<Task<()>>,
     _timeout_task: Option<Task<()>>,
     _ice_grace_task: Option<Task<()>>,
+    _initial_sdp_task: Option<Task<()>>,
+    _offer_push_task: Option<Task<()>>,
 }
 
 impl CallStore {
@@ -209,6 +212,7 @@ impl CallStore {
             tones: CallTones::default(),
             pending_remote_ice: Vec::new(),
             pending_local_ice: Vec::new(),
+            initial_answer_pending: false,
             known_peer_sessions: VecDeque::new(),
             early_remote_status: None,
             generation: 0,
@@ -219,6 +223,8 @@ impl CallStore {
             _events_task: None,
             _timeout_task: None,
             _ice_grace_task: None,
+            _initial_sdp_task: None,
+            _offer_push_task: None,
         }
     }
 
@@ -492,6 +498,7 @@ impl CallStore {
             cam_on: video,
         };
         self.phase = CallPhase::Connecting;
+        self.initial_answer_pending = true;
         self.tones.stop_dial_ring();
 
         let (input_device, output_device, camera_device) = self.call_devices(cx);
@@ -726,8 +733,7 @@ impl CallStore {
                     .ok()
                     .and_then(|json| compress_sdp(&json).ok())
                 {
-                    self.send_to_peer(WEBRTC_SDP_OFFER, compressed.clone(), cx);
-                    self.send_call_push_offer(compressed, cx);
+                    self.send_initial_sdp(WEBRTC_SDP_OFFER, compressed, cx);
                 }
             }
             EngineEvent::LocalAnswer(sdp) => {
@@ -739,11 +745,15 @@ impl CallStore {
                     .ok()
                     .and_then(|json| compress_sdp(&json).ok())
                 {
-                    self.send_to_peer(WEBRTC_SDP_ANSWER, compressed, cx);
+                    if self.initial_answer_pending {
+                        self.send_initial_sdp(WEBRTC_SDP_ANSWER, compressed, cx);
+                    } else {
+                        self.send_to_peer(WEBRTC_SDP_ANSWER, compressed, cx);
+                    }
                 }
             }
             EngineEvent::LocalIce(ice) => {
-                if matches!(self.phase, CallPhase::Outgoing) {
+                if self.initial_answer_pending || matches!(self.phase, CallPhase::Outgoing) {
                     if self.pending_local_ice.len() < MAX_PENDING_ICE {
                         self.pending_local_ice.push(ice);
                     }
@@ -768,6 +778,7 @@ impl CallStore {
                 .to_string();
                 self.send_to_peer(WEBRTC_SDP_STATUS_REMOTE_MEDIA, status, cx);
                 if self.is_caller {
+                    self._offer_push_task = None;
                     self.send_call_push_cancel(true, cx);
                 }
                 cx.notify();
@@ -1183,6 +1194,8 @@ impl CallStore {
             self.is_caller,
             self.connected_at.is_some()
         );
+        self._initial_sdp_task = None;
+        self._offer_push_task = None;
         if notify_peer {
             let signal = if matches!(reason, EndReason::Timeout)
                 && matches!(self.phase, CallPhase::Incoming)
@@ -1219,6 +1232,7 @@ impl CallStore {
         self.caller_session_id = None;
         self.pending_remote_ice.clear();
         self.pending_local_ice.clear();
+        self.initial_answer_pending = false;
         self.engine = None;
         self.frame_store = None;
         self.started_at = None;
@@ -1228,6 +1242,8 @@ impl CallStore {
         self._events_task = None;
         self._timeout_task = None;
         self._ice_grace_task = None;
+        self._initial_sdp_task = None;
+        self._offer_push_task = None;
         self.tones.stop_dial_ring();
         self.pending_texture_replaces.lock().clear();
         let mut cache = self.render_cache.lock();
@@ -1426,41 +1442,107 @@ impl CallStore {
         let caller_id = self.self_id;
         cx.background_executor()
             .spawn(async move {
-                let is_sdp = matches!(data_type, WEBRTC_SDP_OFFER | WEBRTC_SDP_ANSWER);
+                Self::forward_signal(
+                    &api,
+                    receiver_id,
+                    data_type,
+                    json_data,
+                    channel_id,
+                    caller_id,
+                    false,
+                )
+                .await;
+            })
+            .detach();
+    }
+
+    async fn forward_signal(
+        api: &AppApi,
+        receiver_id: i64,
+        data_type: i32,
+        json_data: String,
+        channel_id: i64,
+        caller_id: i64,
+        call_setup: bool,
+    ) -> bool {
+        let is_sdp = matches!(data_type, WEBRTC_SDP_OFFER | WEBRTC_SDP_ANSWER);
+        if is_sdp {
+            tracing::info!(
+                data_type,
+                receiver_id,
+                channel_id,
+                "call: forwarding local SDP"
+            );
+        }
+        let result = api
+            .forward_webrtc_signaling(
+                receiver_id,
+                data_type,
+                json_data,
+                channel_id,
+                caller_id,
+                call_setup,
+            )
+            .await;
+        match result {
+            Ok(sent_over_socket) => {
                 if is_sdp {
                     tracing::info!(
                         data_type,
                         receiver_id,
                         channel_id,
-                        "call: forwarding local SDP"
-                    );
-                }
-                if let Err(e) = api
-                    .forward_webrtc_signaling(
-                        receiver_id,
-                        data_type,
-                        json_data,
-                        channel_id,
-                        caller_id,
-                    )
-                    .await
-                {
-                    tracing::warn!(
-                        "call: signaling send failed type={data_type} to={receiver_id}: {e:#}"
-                    );
-                } else if is_sdp {
-                    tracing::info!(
-                        data_type,
-                        receiver_id,
-                        channel_id,
+                        sent_over_socket,
                         "call: local SDP acknowledged by signaling server"
                     );
                 }
-            })
-            .detach();
+                sent_over_socket
+            }
+            Err(e) => {
+                tracing::warn!(
+                    "call: signaling send failed type={data_type} to={receiver_id}: {e:#}"
+                );
+                false
+            }
+        }
     }
 
-    fn send_call_push_offer(&self, compressed_offer: String, cx: &Context<Self>) {
+    fn send_initial_sdp(&mut self, data_type: i32, json_data: String, cx: &mut Context<Self>) {
+        let Some(peer) = self.peer.clone() else {
+            return;
+        };
+        let api = self.api.clone();
+        let caller_id = self.self_id;
+        let generation = self.generation;
+        self._initial_sdp_task = Some(cx.spawn(async move |this, cx| {
+            let offer = (data_type == WEBRTC_SDP_OFFER).then(|| json_data.clone());
+            let sent_over_socket = Self::forward_signal(
+                &api,
+                peer.user_id,
+                data_type,
+                json_data,
+                peer.channel_id,
+                caller_id,
+                true,
+            )
+            .await;
+            let _ = this.update(cx, |this, cx| {
+                if this.generation != generation {
+                    return;
+                }
+                if data_type == WEBRTC_SDP_ANSWER {
+                    this.initial_answer_pending = false;
+                    this.flush_local_ice(cx);
+                } else if let Some(offer) = offer
+                    && sent_over_socket
+                    && matches!(this.phase, CallPhase::Outgoing)
+                {
+                    this.send_call_push_offer(offer, cx);
+                }
+            });
+        }));
+    }
+
+    fn send_call_push_offer(&mut self, compressed_offer: String, cx: &Context<Self>) {
         let Some(peer) = self.peer.clone() else {
             return;
         };
@@ -1476,16 +1558,14 @@ impl CallStore {
         .to_string();
         let api = self.api.clone();
         let caller_id = self.self_id;
-        cx.background_executor()
-            .spawn(async move {
-                if let Err(e) = api
-                    .make_call_push(peer.user_id, body, peer.channel_id, caller_id)
-                    .await
-                {
-                    tracing::warn!("call: offer push failed to {}: {e:#}", peer.user_id);
-                }
-            })
-            .detach();
+        self._offer_push_task = Some(cx.background_executor().spawn(async move {
+            if let Err(e) = api
+                .make_call_push(peer.user_id, body, peer.channel_id, caller_id, true)
+                .await
+            {
+                tracing::warn!("call: offer push failed to {}: {e:#}", peer.user_id);
+            }
+        }));
     }
 
     fn send_call_push_cancel(&self, is_connected: bool, cx: &Context<Self>) {
@@ -1519,7 +1599,7 @@ impl CallStore {
         cx.background_executor()
             .spawn(async move {
                 if let Err(e) = api
-                    .make_call_push(peer.user_id, body, channel_id, original_caller)
+                    .make_call_push(peer.user_id, body, channel_id, original_caller, false)
                     .await
                 {
                     tracing::warn!("call: cancel push failed to {}: {e:#}", peer.user_id);

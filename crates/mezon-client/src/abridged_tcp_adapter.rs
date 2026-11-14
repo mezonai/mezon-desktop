@@ -905,7 +905,9 @@ impl TransportAdapter for AbridgedTcpAdapter {
 
         if !self.is_open() {
             tracing::warn!("send(): connection NOT open, rejecting");
-            return Err(anyhow::anyhow!("Connection is not open"));
+            return Err(
+                crate::transport_adapter::SocketUnavailable("Connection is not open").into(),
+            );
         }
         tracing::trace!("Connection is open");
 
@@ -951,7 +953,10 @@ impl TransportAdapter for AbridgedTcpAdapter {
                 Some(ref tx) => tx.clone(),
                 None => {
                     tracing::error!("Write channel not available (None)");
-                    return Err(anyhow::anyhow!("Write channel not available"));
+                    return Err(crate::transport_adapter::SocketUnavailable(
+                        "Write channel not available",
+                    )
+                    .into());
                 }
             }
         };
@@ -964,7 +969,7 @@ impl TransportAdapter for AbridgedTcpAdapter {
                 }
                 mpsc::error::SendTimeoutError::Closed(_) => {
                     tracing::error!("mpsc send failed: channel closed");
-                    anyhow::anyhow!("Write channel closed")
+                    crate::transport_adapter::SocketUnavailable("Write channel closed").into()
                 }
             })?;
         tracing::trace!("Packet queued via mpsc channel");
