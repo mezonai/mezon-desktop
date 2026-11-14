@@ -155,7 +155,7 @@ impl ClanEventsModal {
             .channel_voice_id
             .and_then(|id| channels.channel_display_name(self.clan_id, id));
         let is_location = !event.address.is_empty();
-        let location = if event.is_private {
+        let location = if event.is_external {
             tr("eventCreator.eventDetail.privateRoom").to_string()
         } else if is_location {
             event.address.clone()
@@ -250,7 +250,7 @@ impl ClanEventsModal {
                             .px_1()
                             .py(px(2.))
                             .rounded(px(2.))
-                            .bg(if event.is_private {
+                            .bg(if event.is_external {
                                 gpui::rgb(0xef4444)
                             } else if is_channel_event {
                                 gpui::rgb(0xf97316)
@@ -259,7 +259,7 @@ impl ClanEventsModal {
                             })
                             .text_color(gpui::white())
                             .text_size(px(14.))
-                            .child(if event.is_private {
+                            .child(if event.is_external {
                                 tr("eventCreator.eventDetail.privateEvent")
                             } else if is_channel_event {
                                 tr("eventCreator.eventDetail.channelEvent")
@@ -425,7 +425,7 @@ impl ClanEventsModal {
                                     .gap_2()
                                     .min_w_0()
                                     .text_color(theme.text_secondary)
-                                    .child(if is_location && !event.is_private {
+                                    .child(if is_location && !event.is_external {
                                         Icon::new(IconName::Location)
                                             .size(px(20.))
                                             .selected(false)
@@ -566,7 +566,7 @@ impl ClanEventsModal {
                                     }),
                             ),
                     )
-                    .child(if event.is_private {
+                    .child(if event.is_external {
                         div()
                             .mt_3()
                             .flex()
@@ -738,7 +738,7 @@ impl ClanEventsModal {
     }
 
     fn event_link(&self, event: &ClanEventItem, cx: &App) -> String {
-        if event.is_private && !event.external_link.is_empty() {
+        if event.is_external && !event.external_link.is_empty() {
             format!(
                 "{}{}",
                 AppConfig::global(cx).redirect_uri.trim_end_matches('/'),
@@ -842,6 +842,9 @@ impl ClanEventsModal {
 
     fn can_modify_event(&self, event: &ClanEventItem, cx: &App) -> bool {
         let current_user = BadgeService::global(cx).read(cx).current_user_id(cx);
+        if event.is_external {
+            return current_user == Some(event.creator_id) || current_user == event.co_host;
+        }
         current_user == Some(event.creator_id)
             || PermissionStore::try_global(cx).is_some_and(|store| {
                 let permissions = store.read(cx).clan_settings_permissions(self.clan_id, cx);
@@ -894,7 +897,7 @@ impl ClanEventsModal {
             .and_then(|id| channels.channel_display_name(self.clan_id, id));
         let location = if !event.address.is_empty() {
             event.address.clone()
-        } else if event.is_private {
+        } else if event.is_external {
             tr("eventCreator.eventDetail.privateRoom").to_string()
         } else {
             voice_name.unwrap_or_else(|| tr("eventCreator.tabs.location").to_string())
@@ -1005,6 +1008,31 @@ impl ClanEventsModal {
                                 .replace("{{username}}", creator_name),
                         ),
                 )
+                .when_some(event.co_host, |body, co_host| {
+                    let host = ClanMembersStore::global(cx)
+                        .read(cx)
+                        .member(self.clan_id, co_host)
+                        .cloned();
+                    let host_name = host
+                        .as_ref()
+                        .map(|member| member.name())
+                        .unwrap_or_default();
+                    let host_avatar = host
+                        .as_ref()
+                        .map(|member| member.avatar())
+                        .unwrap_or_default();
+                    body.child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap_3()
+                            .child(Avatar::new().src(host_avatar.to_string()).size_px(px(22.)))
+                            .child(
+                                tr("eventCreator.eventDetail.coHost")
+                                    .replace("{{username}}", host_name),
+                            ),
+                    )
+                })
                 .when(!event.description.is_empty(), |body| {
                     body.child(div().whitespace_normal().child(event.description.clone()))
                 })
