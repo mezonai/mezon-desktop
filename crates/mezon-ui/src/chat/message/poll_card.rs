@@ -351,7 +351,8 @@ fn render_answer_row(
     if can_select {
         let mut circle = div()
             .size_5()
-            .rounded_full()
+            .when(allow_multiple, |el| el.rounded(px(3.)))
+            .when(!allow_multiple, |el| el.rounded_full())
             .border_2()
             .border_color(theme.tokens.text_theme_primary)
             .flex()
@@ -359,7 +360,15 @@ fn render_answer_row(
             .justify_center()
             .flex_shrink_0();
         if is_selected {
-            circle = circle.child(div().w(px(10.)).h(px(10.)).rounded_full().bg(rgb(BLUE_500)));
+            circle = if allow_multiple {
+                circle.bg(rgb(BLUE_500)).border_color(rgb(BLUE_500)).child(
+                    Icon::new(IconName::Check)
+                        .size(px(14.))
+                        .text_color(rgb(0xffffff)),
+                )
+            } else {
+                circle.child(div().w(px(10.)).h(px(10.)).rounded_full().bg(rgb(BLUE_500)))
+            };
         }
         right = right.child(circle);
     }
@@ -367,7 +376,8 @@ fn render_answer_row(
         right = right.child(
             div()
                 .size_5()
-                .rounded_full()
+                .when(allow_multiple, |el| el.rounded(px(3.)))
+                .when(!allow_multiple, |el| el.rounded_full())
                 .bg(theme.tokens.text_theme_primary)
                 .flex()
                 .items_center()

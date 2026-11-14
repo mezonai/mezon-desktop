@@ -28,10 +28,8 @@ const PUBLISHER_PREJOIN_AVATAR_SIZE: f32 = 80.;
 fn stream_channel_bg(theme: &Theme, joined: bool) -> Rgba {
     if joined {
         gpui::rgb(0x11111b)
-    } else if !theme_is_light(theme) {
-        theme.tokens.theme_setting_primary
     } else {
-        gpui::rgb(0xd1d5db)
+        theme.bg_tertiary
     }
 }
 
