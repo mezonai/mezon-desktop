@@ -96,9 +96,6 @@ pub fn configure_window<V: 'static>(cx: &mut App, handle: WindowHandle<V>) {
 
         #[cfg(not(target_os = "linux"))]
         window.on_window_should_close(cx, |window, cx| !hide_main_window(window, cx));
-
-        #[cfg(target_os = "macos")]
-        platform::disable_window_fullscreen(window);
     }) {
         tracing::warn!("Failed to configure main window: {error}");
     }

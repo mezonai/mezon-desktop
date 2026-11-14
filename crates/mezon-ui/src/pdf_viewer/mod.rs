@@ -98,7 +98,7 @@ fn spawn_pdf_viewer_window(
         window_min_size: Some(size(px(600.0), px(480.0))),
         kind: overlay_window_kind(),
         focus: true,
-        show: true,
+        show: !cfg!(target_os = "macos"),
         is_movable: true,
         display_id,
         titlebar: Some(window_controls::window_title_options()),
