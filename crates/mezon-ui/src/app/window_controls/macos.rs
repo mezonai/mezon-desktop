@@ -215,7 +215,7 @@ fn disable_fullscreen(native_view: *mut std::ffi::c_void) {
         }
 
         let current: u64 = msg_send![window, collectionBehavior];
-        let behavior = (current & !(FULLSCREEN_PRIMARY | FULLSCREEN_AUXILIARY)) | FULLSCREEN_NONE;
+        let behavior = (current & !(FULLSCREEN_PRIMARY | FULLSCREEN_NONE)) | FULLSCREEN_AUXILIARY;
         let _: () = msg_send![window, setCollectionBehavior: behavior];
     });
 }

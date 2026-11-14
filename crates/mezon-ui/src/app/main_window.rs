@@ -66,7 +66,11 @@ pub fn overlay_placement_from_window(
     let display_id = window.display(cx).map(|d| d.id());
     let bounds = window.bounds();
     let window_bounds = if window.is_fullscreen() {
-        WindowBounds::Fullscreen(bounds)
+        if cfg!(target_os = "macos") {
+            WindowBounds::Windowed(bounds)
+        } else {
+            WindowBounds::Fullscreen(bounds)
+        }
     } else if window.is_maximized() {
         WindowBounds::Maximized(bounds)
     } else {
